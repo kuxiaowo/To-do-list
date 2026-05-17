@@ -420,19 +420,25 @@ createApp({
       }
       localStorage.setItem(LEGACY_MIGRATION_KEY, 'done');
     },
-    async replaceTasks(nextTasks, successMessage) {
-      const previousTasks = this.tasks;
-      this.tasks = nextTasks;
-      try {
-        await this.persistTasks();
-        if (successMessage) ElementPlus.ElMessage.success(successMessage);
-        return true;
-      } catch (error) {
-        this.tasks = previousTasks;
-        console.error('保存任务失败：', error);
-        ElementPlus.ElMessage.error('保存失败，服务器没有写入成功。');
-        return false;
-      }
+    async createTaskOnServer(task) {
+      const payload = await this.apiJson(TASKS_API, {
+        method: 'POST',
+        body: JSON.stringify(task)
+      });
+      localStorage.setItem(LEGACY_MIGRATION_KEY, 'done');
+      return payload.task;
+    },
+    async updateTaskOnServer(taskId, task) {
+      const payload = await this.apiJson(`${TASKS_API}/${encodeURIComponent(taskId)}`, {
+        method: 'PUT',
+        body: JSON.stringify(task)
+      });
+      localStorage.setItem(LEGACY_MIGRATION_KEY, 'done');
+      return payload.task;
+    },
+    async deleteTaskOnServer(taskId) {
+      await this.apiJson(`${TASKS_API}/${encodeURIComponent(taskId)}`, { method: 'DELETE' });
+      localStorage.setItem(LEGACY_MIGRATION_KEY, 'done');
     },
     compareTasks(a, b) {
       const aUnscheduled = !a.dueAt;
@@ -541,25 +547,27 @@ createApp({
         completed: !!this.form.completed
       };
 
-      let nextTasks;
-      if (this.dialogMode === 'create') {
-        nextTasks = [
-          ...this.tasks,
-          { id: this.createTaskId(), createdAt: new Date().toISOString(), ...payload }
-        ];
-      } else {
-        const index = this.tasks.findIndex(task => task.id === this.activeTaskId);
-        if (index === -1) return;
-        nextTasks = this.tasks.map(task => task.id === this.activeTaskId
-          ? { ...task, ...payload, updatedAt: new Date().toISOString() }
-          : task
-        );
+      try {
+        if (this.dialogMode === 'create') {
+          const task = { id: this.createTaskId(), createdAt: new Date().toISOString(), ...payload };
+          const savedTask = await this.createTaskOnServer(task);
+          this.tasks = [...this.tasks, savedTask || task];
+          ElementPlus.ElMessage.success('任务已创建。');
+        } else {
+          const existing = this.tasks.find(task => task.id === this.activeTaskId);
+          if (!existing) return;
+          const nextTask = { ...existing, ...payload, updatedAt: new Date().toISOString() };
+          const savedTask = await this.updateTaskOnServer(this.activeTaskId, nextTask);
+          this.tasks = this.tasks.map(task => task.id === this.activeTaskId ? (savedTask || nextTask) : task);
+          await this.loadScheduleItems();
+          ElementPlus.ElMessage.success('任务已更新。');
+        }
+        this.dialogVisible = false;
+        if (payload.dueAt) this.$nextTick(() => this.scrollToDate(payload.dueAt));
+      } catch (error) {
+        console.error('保存任务失败：', error);
+        ElementPlus.ElMessage.error(`保存失败：${error.message}`);
       }
-
-      const ok = await this.replaceTasks(nextTasks, this.dialogMode === 'create' ? '任务已创建。' : '任务已更新。');
-      if (!ok) return;
-      this.dialogVisible = false;
-      if (payload.dueAt) this.$nextTick(() => this.scrollToDate(payload.dueAt));
     },
     async toggleComplete(taskId) {
       if (!this.currentUser) {
@@ -569,14 +577,17 @@ createApp({
       const task = this.tasks.find(item => item.id === taskId);
       if (!task) return;
       const nextCompleted = !task.completed;
-      const nextTasks = this.tasks.map(item => item.id === taskId
-        ? { ...item, completed: nextCompleted, updatedAt: new Date().toISOString() }
-        : item
-      );
-      const ok = await this.replaceTasks(nextTasks, nextCompleted ? '已标记完成。' : '已取消完成。');
-      if (!ok) return;
-      this.form.completed = nextCompleted;
-      this.dialogVisible = false;
+      const nextTask = { ...task, completed: nextCompleted, updatedAt: new Date().toISOString() };
+      try {
+        const savedTask = await this.updateTaskOnServer(taskId, nextTask);
+        this.tasks = this.tasks.map(item => item.id === taskId ? (savedTask || nextTask) : item);
+        this.form.completed = nextCompleted;
+        this.dialogVisible = false;
+        ElementPlus.ElMessage.success(nextCompleted ? '已标记完成。' : '已取消完成。');
+      } catch (error) {
+        console.error('修改任务状态失败：', error);
+        ElementPlus.ElMessage.error(`修改失败：${error.message}`);
+      }
     },
     deleteTask(taskId) {
       if (!this.currentUser) {
@@ -588,10 +599,16 @@ createApp({
         cancelButtonText: '取消',
         type: 'warning'
       }).then(async () => {
-        const nextTasks = this.tasks.filter(task => task.id !== taskId);
-        const ok = await this.replaceTasks(nextTasks, '任务已删除。');
-        if (!ok) return;
-        this.dialogVisible = false;
+        try {
+          await this.deleteTaskOnServer(taskId);
+          this.tasks = this.tasks.filter(task => task.id !== taskId);
+          this.scheduleItems = this.scheduleItems.filter(item => item.taskId !== taskId);
+          this.dialogVisible = false;
+          ElementPlus.ElMessage.success('任务已删除。');
+        } catch (error) {
+          console.error('删除任务失败：', error);
+          ElementPlus.ElMessage.error(`删除失败：${error.message}`);
+        }
       }).catch(() => {});
     },
     scrollToToday() {

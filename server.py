@@ -144,6 +144,21 @@ def normalize_task(task: dict, user_id: int) -> dict:
     }
 
 
+def public_task(row: sqlite3.Row) -> dict:
+    return {
+        'id': row['id'],
+        'userId': row['user_id'],
+        'title': row['title'],
+        'subject': row['subject'],
+        'dueAt': row['due_at'],
+        'priority': row['priority'],
+        'note': row['note'],
+        'completed': bool(row['completed']),
+        'createdAt': row['created_at'],
+        'updatedAt': row['updated_at'],
+    }
+
+
 def public_user(row: sqlite3.Row | dict) -> dict:
     return {
         'id': row['id'],
@@ -211,6 +226,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return self.handle_auth_login()
         if path == '/api/auth/logout':
             return self.handle_auth_logout()
+        if path == '/api/tasks':
+            return self.handle_create_task()
         if path == '/api/schedule-items':
             return self.handle_create_schedule_item()
         self.send_error(HTTPStatus.NOT_FOUND, 'Not found')
@@ -219,12 +236,16 @@ class TodoHandler(SimpleHTTPRequestHandler):
         path = urlparse(self.path).path
         if path == '/api/tasks/bulk':
             return self.handle_bulk_replace()
+        if path.startswith('/api/tasks/'):
+            return self.handle_update_task(path.rsplit('/', 1)[-1])
         if path.startswith('/api/schedule-items/'):
             return self.handle_update_schedule_item(path.rsplit('/', 1)[-1])
         self.send_error(HTTPStatus.NOT_FOUND, 'Not found')
 
     def do_DELETE(self):
         path = urlparse(self.path).path
+        if path.startswith('/api/tasks/'):
+            return self.handle_delete_task(path.rsplit('/', 1)[-1])
         if path.startswith('/api/schedule-items/'):
             return self.handle_delete_schedule_item(path.rsplit('/', 1)[-1])
         self.send_error(HTTPStatus.NOT_FOUND, 'Not found')
@@ -283,22 +304,102 @@ class TodoHandler(SimpleHTTPRequestHandler):
                 ''',
                 (user['id'],),
             ).fetchall()
-        tasks = [
-            {
-                'id': row['id'],
-                'userId': row['user_id'],
-                'title': row['title'],
-                'subject': row['subject'],
-                'dueAt': row['due_at'],
-                'priority': row['priority'],
-                'note': row['note'],
-                'completed': bool(row['completed']),
-                'createdAt': row['created_at'],
-                'updatedAt': row['updated_at'],
-            }
-            for row in rows
-        ]
+        tasks = [public_task(row) for row in rows]
         return self.write_json({'tasks': tasks, 'readOnly': False, 'user': public_user(user)})
+
+    def validate_task_payload(self, payload: dict, user_id: int, task_id: str | None = None):
+        if not isinstance(payload, dict):
+            return None, {'error': 'task must be an object'}
+        task = normalize_task({**payload, 'id': task_id or payload.get('id', '')}, user_id)
+        if not task['id']:
+            task['id'] = f"task-{int(time.time() * 1000)}-{secrets.token_hex(4)}"
+        if not task['title']:
+            return None, {'error': 'task title is required'}
+        if task['priority'] not in {'high', 'medium', 'low'}:
+            return None, {'error': 'invalid priority'}
+        now = now_iso()
+        if not task['createdAt']:
+            task['createdAt'] = now
+        task['updatedAt'] = now
+        return task, None
+
+    def handle_create_task(self):
+        user = self.require_user()
+        if not user:
+            return
+        payload = self.read_json_body()
+        if payload is None:
+            return
+        task, error = self.validate_task_payload(payload, int(user['id']))
+        if error:
+            return self.write_json(error, status=HTTPStatus.BAD_REQUEST)
+
+        with get_db() as conn:
+            try:
+                conn.execute(
+                    '''
+                    INSERT INTO tasks (id, user_id, title, subject, due_at, priority, note, completed, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ''',
+                    (
+                        task['id'], task['userId'], task['title'], task['subject'], task['dueAt'],
+                        task['priority'], task['note'], 1 if task['completed'] else 0,
+                        task['createdAt'], task['updatedAt'],
+                    ),
+                )
+                conn.commit()
+            except sqlite3.IntegrityError:
+                return self.write_json({'error': 'task id already exists'}, status=HTTPStatus.CONFLICT)
+            row = conn.execute(
+                'SELECT id, user_id, title, subject, due_at, priority, note, completed, created_at, updated_at FROM tasks WHERE id = ? AND user_id = ?',
+                (task['id'], user['id']),
+            ).fetchone()
+        return self.write_json({'ok': True, 'task': public_task(row)}, status=HTTPStatus.CREATED)
+
+    def handle_update_task(self, task_id: str):
+        user = self.require_user()
+        if not user:
+            return
+        payload = self.read_json_body()
+        if payload is None:
+            return
+        task, error = self.validate_task_payload(payload, int(user['id']), task_id=task_id)
+        if error:
+            return self.write_json(error, status=HTTPStatus.BAD_REQUEST)
+
+        with get_db() as conn:
+            existing = conn.execute('SELECT created_at FROM tasks WHERE id = ? AND user_id = ?', (task_id, user['id'])).fetchone()
+            if not existing:
+                return self.write_json({'error': 'task not found'}, status=HTTPStatus.NOT_FOUND)
+            conn.execute(
+                '''
+                UPDATE tasks
+                SET title = ?, subject = ?, due_at = ?, priority = ?, note = ?, completed = ?, updated_at = ?
+                WHERE id = ? AND user_id = ?
+                ''',
+                (
+                    task['title'], task['subject'], task['dueAt'], task['priority'], task['note'],
+                    1 if task['completed'] else 0, task['updatedAt'], task_id, user['id'],
+                ),
+            )
+            conn.commit()
+            row = conn.execute(
+                'SELECT id, user_id, title, subject, due_at, priority, note, completed, created_at, updated_at FROM tasks WHERE id = ? AND user_id = ?',
+                (task_id, user['id']),
+            ).fetchone()
+        return self.write_json({'ok': True, 'task': public_task(row)})
+
+    def handle_delete_task(self, task_id: str):
+        user = self.require_user()
+        if not user:
+            return
+        with get_db() as conn:
+            conn.execute('DELETE FROM schedule_items WHERE task_id = ? AND user_id = ?', (task_id, user['id']))
+            cursor = conn.execute('DELETE FROM tasks WHERE id = ? AND user_id = ?', (task_id, user['id']))
+            conn.commit()
+        if cursor.rowcount == 0:
+            return self.write_json({'error': 'task not found'}, status=HTTPStatus.NOT_FOUND)
+        return self.write_json({'ok': True})
 
     def handle_bulk_replace(self):
         user = self.require_user()

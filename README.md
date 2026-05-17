@@ -135,7 +135,10 @@ TODO_ADMIN_PASSWORD='change-this-password' \
 任务接口：
 
 - `GET /api/tasks`：获取当前用户任务
-- `PUT /api/tasks/bulk`：批量替换当前用户任务
+- `POST /api/tasks`：创建单个任务
+- `PUT /api/tasks/{id}`：更新单个任务
+- `DELETE /api/tasks/{id}`：删除单个任务，并删除它对应的每日安排
+- `PUT /api/tasks/bulk`：批量替换当前用户任务，主要用于旧版 localStorage 数据迁移
 
 每日安排接口：
 
