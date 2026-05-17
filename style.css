@@ -408,7 +408,6 @@ body {
   overflow-x: auto;
   overflow-y: hidden;
   padding-bottom: 10px;
-  scroll-behavior: smooth;
 }
 
 .timeline-columns {

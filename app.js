@@ -592,7 +592,7 @@ createApp({
           ElementPlus.ElMessage.success('任务已更新。');
         }
         this.dialogVisible = false;
-        if (payload.dueAt) this.$nextTick(() => this.scrollToDate(payload.dueAt));
+        if (payload.dueAt) this.$nextTick(() => this.scrollToDate(payload.dueAt, this.activePage, 'instant'));
       } catch (error) {
         console.error('保存任务失败：', error);
         ElementPlus.ElMessage.error(`保存失败：${error.message}`);
@@ -663,7 +663,10 @@ createApp({
       this.currentViewDateKey = key;
       this.pageViewDateKeys[page] = key;
       if (behavior === 'instant') {
+        const previousBehavior = container.style.scrollBehavior;
+        container.style.scrollBehavior = 'auto';
         container.scrollLeft = nextLeft;
+        container.style.scrollBehavior = previousBehavior;
         return;
       }
       container.scrollTo({ left: nextLeft, behavior });
