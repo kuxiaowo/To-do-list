@@ -174,12 +174,28 @@
         </div>
 
         <div v-else class="daily-board">
+          <div class="daily-tools">
+            <div>
+              <div class="daily-tools-title">时间格子</div>
+              <div class="daily-tools-subtitle">模板会从当前查看日期开始影响之后未单独自定义的日期。</div>
+            </div>
+            <div class="daily-tools-actions">
+              <el-button plain :disabled="!currentUser" @click="openWeekSlotEditor">编辑一周模板</el-button>
+              <el-button plain type="danger" :disabled="!currentUser" @click="resetAllScheduleConfig">重置全部</el-button>
+            </div>
+          </div>
           <div class="timeline-scroll" ref="dailyScroll">
             <div class="timeline-columns">
               <section v-for="day in scheduleDayColumns" :key="day.key" class="day-column" :data-day="day.key">
                 <div class="day-header">
-                  <div class="day-label">{{ day.label }}</div>
-                  <div class="day-subtitle">{{ day.subtitle }}</div>
+                  <div>
+                    <div class="day-label">{{ day.label }}</div>
+                    <div class="day-subtitle">{{ day.subtitle }}<span v-if="day.hasOverride"> · 单日自定义</span></div>
+                  </div>
+                  <div class="day-actions">
+                    <el-button size="small" text :disabled="!currentUser" @click="openDaySlotEditor(day)">编辑</el-button>
+                    <el-button size="small" text :disabled="!currentUser || !day.hasOverride" @click="resetDaySlots(day)">重置</el-button>
+                  </div>
                 </div>
 
                 <div
@@ -278,13 +294,7 @@
         </el-form-item>
 
         <el-form-item label="截止时间" v-if="!form.unscheduled">
-          <el-time-picker
-            v-model="form.time"
-            value-format="HH:mm"
-            format="HH:mm"
-            placeholder="选择时间"
-            style="width: 100%;"
-          ></el-time-picker>
+          <el-input v-model="form.time" placeholder="例如：23:59" maxlength="5"></el-input>
         </el-form-item>
 
         <el-form-item label="优先级">
@@ -316,6 +326,48 @@
           <div class="right-actions">
             <el-button @click="dialogVisible = false">取消</el-button>
             <el-button type="primary" @click="saveTask">保存</el-button>
+          </div>
+        </div>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="slotEditorVisible"
+      :title="slotEditorMode === 'day' ? '编辑当天时间格子' : '编辑一周模板'"
+      width="min(94vw, 760px)"
+      destroy-on-close
+    >
+      <div class="slot-editor">
+        <div class="slot-editor-hint" v-if="slotEditorMode === 'day'">
+          {{ slotEditorDate }} 的时间格子，只影响这一天。
+        </div>
+        <div class="slot-editor-hint" v-else>
+          从 {{ slotEditorDate }} 开始，未单独自定义的日期会使用这个一周模板。
+        </div>
+
+        <el-tabs v-if="slotEditorMode === 'week'" v-model="slotEditorWeekday" class="slot-week-tabs">
+          <el-tab-pane v-for="key in ['1','2','3','4','5','6','0']" :key="key" :label="weekdayLabel(key)" :name="key"></el-tab-pane>
+        </el-tabs>
+
+        <div class="slot-editor-list">
+          <div v-for="(slot, index) in activeEditorSlots()" :key="slot.keyBase" class="slot-editor-row">
+            <el-input v-model="slot.label" placeholder="名称" maxlength="40"></el-input>
+            <el-input v-model="slot.start" placeholder="开始 HH:mm" maxlength="5"></el-input>
+            <el-input v-model="slot.end" placeholder="结束 HH:mm" maxlength="5"></el-input>
+            <el-button type="danger" plain @click="removeEditorSlot(index)">删除</el-button>
+          </div>
+          <div v-if="!activeEditorSlots().length" class="empty-column">暂无时间格子。</div>
+        </div>
+
+        <el-button plain @click="addEditorSlot">新增时间格子</el-button>
+      </div>
+
+      <template #footer>
+        <div class="dialog-footer">
+          <div></div>
+          <div class="right-actions">
+            <el-button @click="slotEditorVisible = false">取消</el-button>
+            <el-button type="primary" @click="saveSlotEditor">保存</el-button>
           </div>
         </div>
       </template>

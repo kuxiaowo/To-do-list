@@ -438,6 +438,16 @@ body {
   padding-bottom: 12px;
   margin-bottom: 6px;
   border-bottom: 1px solid var(--line);
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.day-actions {
+  display: flex;
+  gap: 2px;
+  flex-shrink: 0;
 }
 
 .day-label {
@@ -550,6 +560,36 @@ body {
   min-height: 0;
 }
 
+.daily-tools {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  background: rgba(var(--panel-rgb), 0.94);
+  border: 1px solid var(--panel-border);
+  border-radius: 18px;
+  box-shadow: var(--schedule-shadow);
+  padding: 12px 14px;
+}
+
+.daily-tools-title {
+  font-weight: 800;
+  font-size: 0.95rem;
+}
+
+.daily-tools-subtitle {
+  color: var(--muted);
+  font-size: 0.84rem;
+  margin-top: 4px;
+}
+
+.daily-tools-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .schedule-slot {
   border: 1px dashed var(--slot-border);
   background: var(--panel-muted);
@@ -619,6 +659,34 @@ body {
   justify-content: center;
   font-weight: 900;
   font-size: 14px;
+}
+
+.slot-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.slot-editor-hint {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.slot-week-tabs {
+  margin-bottom: -4px;
+}
+
+.slot-editor-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.slot-editor-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) 140px 140px auto;
+  gap: 10px;
+  align-items: center;
 }
 
 .ddl-dock {
@@ -705,6 +773,19 @@ body {
 
   .priority-tags {
     justify-content: flex-start;
+  }
+
+  .daily-tools {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .daily-tools-actions {
+    justify-content: flex-start;
+  }
+
+  .slot-editor-row {
+    grid-template-columns: 1fr;
   }
 
 }

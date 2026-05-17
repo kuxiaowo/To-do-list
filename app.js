@@ -5,6 +5,9 @@ const TASKS_API = '/api/tasks';
 const TASKS_BULK_API = '/api/tasks/bulk';
 const AUTH_API = '/api/auth';
 const SCHEDULE_API = '/api/schedule-items';
+const SCHEDULE_CONFIG_API = '/api/schedule-config';
+const SCHEDULE_TEMPLATE_API = '/api/schedule-template';
+const SCHEDULE_DAY_SLOTS_API = '/api/schedule-day-slots';
 const AUTH_TOKEN_KEY = 'todo-list-auth-token-v1';
 const THEME_STORAGE_KEY = 'todo-list-theme-v1';
 const TIMELINE_START_MONTH = 4;
@@ -12,25 +15,58 @@ const TIMELINE_START_DAY = 1;
 const PRIORITY_ORDER = { high: 0, medium: 1, low: 2 };
 const PRIORITY_LABELS = { high: '高优先级', medium: '中优先级', low: '低优先级' };
 const WEEKDAY_TEXT = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
-const SCHEDULE_TEMPLATES = {
-  weekday: [
-    { label: '午休', start: '13:00', end: '13:45' },
-    { label: '晚饭后', start: '18:00', end: '18:40' },
-    { label: '第一节晚自习', start: '18:40', end: '19:40' },
-    { label: '第二节晚自习', start: '19:50', end: '20:40' },
-    { label: '第三节晚自习', start: '20:50', end: '21:30' },
+const DEFAULT_WEEK_SLOTS = {
+  0: [
+    { keyBase: '0-09:00', label: '上午', start: '09:00', end: '10:00' },
+    { keyBase: '1-10:00', label: '上午', start: '10:00', end: '11:00' },
+    { keyBase: '2-11:00', label: '上午', start: '11:00', end: '12:00' },
+    { keyBase: '3-14:00', label: '下午', start: '14:00', end: '15:00' },
+    { keyBase: '4-15:00', label: '下午', start: '15:00', end: '16:00' },
+    { keyBase: '5-17:00', label: '下午', start: '17:00', end: '18:00' },
+    { keyBase: '6-18:00', label: '晚饭后', start: '18:00', end: '18:40' },
+    { keyBase: '7-18:40', label: '第一节晚自习', start: '18:40', end: '19:40' },
+    { keyBase: '8-19:50', label: '第二节晚自习', start: '19:50', end: '20:40' },
+    { keyBase: '9-20:50', label: '第三节晚自习', start: '20:50', end: '21:30' },
   ],
-  friday: [
-    { label: '午休', start: '13:00', end: '13:45' },
+  1: [
+    { keyBase: '0-13:00', label: '午休', start: '13:00', end: '13:45' },
+    { keyBase: '1-18:00', label: '晚饭后', start: '18:00', end: '18:40' },
+    { keyBase: '2-18:40', label: '第一节晚自习', start: '18:40', end: '19:40' },
+    { keyBase: '3-19:50', label: '第二节晚自习', start: '19:50', end: '20:40' },
+    { keyBase: '4-20:50', label: '第三节晚自习', start: '20:50', end: '21:30' },
   ],
-  weekend: [
-    { label: '上午', start: '09:00', end: '10:00' },
-    { label: '上午', start: '10:00', end: '11:00' },
-    { label: '上午', start: '11:00', end: '12:00' },
-    { label: '下午', start: '14:00', end: '15:00' },
-    { label: '下午', start: '15:00', end: '16:00' },
-    { label: '下午', start: '17:00', end: '18:00' },
-    { label: '晚上', start: '19:00', end: '20:00' },
+  2: [
+    { keyBase: '0-13:00', label: '午休', start: '13:00', end: '13:45' },
+    { keyBase: '1-18:00', label: '晚饭后', start: '18:00', end: '18:40' },
+    { keyBase: '2-18:40', label: '第一节晚自习', start: '18:40', end: '19:40' },
+    { keyBase: '3-19:50', label: '第二节晚自习', start: '19:50', end: '20:40' },
+    { keyBase: '4-20:50', label: '第三节晚自习', start: '20:50', end: '21:30' },
+  ],
+  3: [
+    { keyBase: '0-13:00', label: '午休', start: '13:00', end: '13:45' },
+    { keyBase: '1-18:00', label: '晚饭后', start: '18:00', end: '18:40' },
+    { keyBase: '2-18:40', label: '第一节晚自习', start: '18:40', end: '19:40' },
+    { keyBase: '3-19:50', label: '第二节晚自习', start: '19:50', end: '20:40' },
+    { keyBase: '4-20:50', label: '第三节晚自习', start: '20:50', end: '21:30' },
+  ],
+  4: [
+    { keyBase: '0-13:00', label: '午休', start: '13:00', end: '13:45' },
+    { keyBase: '1-18:00', label: '晚饭后', start: '18:00', end: '18:40' },
+    { keyBase: '2-18:40', label: '第一节晚自习', start: '18:40', end: '19:40' },
+    { keyBase: '3-19:50', label: '第二节晚自习', start: '19:50', end: '20:40' },
+    { keyBase: '4-20:50', label: '第三节晚自习', start: '20:50', end: '21:30' },
+  ],
+  5: [
+    { keyBase: '0-13:00', label: '午休', start: '13:00', end: '13:45' },
+  ],
+  6: [
+    { keyBase: '0-09:00', label: '上午', start: '09:00', end: '10:00' },
+    { keyBase: '1-10:00', label: '上午', start: '10:00', end: '11:00' },
+    { keyBase: '2-11:00', label: '上午', start: '11:00', end: '12:00' },
+    { keyBase: '3-14:00', label: '下午', start: '14:00', end: '15:00' },
+    { keyBase: '4-15:00', label: '下午', start: '15:00', end: '16:00' },
+    { keyBase: '5-17:00', label: '下午', start: '17:00', end: '18:00' },
+    { keyBase: '6-19:00', label: '晚上', start: '19:00', end: '20:00' },
   ],
 };
 
@@ -39,6 +75,9 @@ createApp({
     return {
       tasks: [],
       scheduleItems: [],
+      defaultWeekSlots: JSON.parse(JSON.stringify(DEFAULT_WEEK_SLOTS)),
+      scheduleTemplateVersions: [],
+      scheduleDayOverrides: {},
       showCompleted: false,
       isDarkMode: (localStorage.getItem(THEME_STORAGE_KEY) || 'light') === 'dark',
       activePage: 'ddl',
@@ -60,6 +99,12 @@ createApp({
       activeScheduleTask: null,
       activeScheduleSlot: null,
       scheduleForm: { durationMinutes: 30, note: '', completed: false },
+      slotEditorVisible: false,
+      slotEditorMode: 'day',
+      slotEditorDate: '',
+      slotEditorWeekday: '1',
+      slotEditorSlots: [],
+      slotEditorWeekSlots: JSON.parse(JSON.stringify(DEFAULT_WEEK_SLOTS)),
       loginForm: { nickname: '', password: '' },
       registerForm: { name: '', nickname: '', password: '' }
     };
@@ -128,15 +173,15 @@ createApp({
       for (let date = new Date(start); date <= end; date = this.addDays(date, 1)) {
         const offset = this.daysBetween(base, date);
         const key = this.formatDateKey(date);
-        const weekday = date.getDay();
-        const templateKey = weekday >= 1 && weekday <= 4 ? 'weekday' : weekday === 5 ? 'friday' : 'weekend';
+        const rawSlots = this.slotsForDate(key);
         days.push({
           key,
           label: this.formatDateLabel(date),
           subtitle: this.relativeLabel(offset),
-          slots: SCHEDULE_TEMPLATES[templateKey].map((slot, index) => ({
+          hasOverride: !!this.scheduleDayOverrides[key],
+          slots: rawSlots.map((slot) => ({
             ...slot,
-            key: `${key}-${index}-${slot.start}`,
+            key: this.scheduleSlotKeyFromBase(key, slot.keyBase),
             duration: this.minutesBetween(slot.start, slot.end)
           }))
         });
@@ -151,6 +196,7 @@ createApp({
     this.pageViewDateKeys.daily = this.currentViewDateKey;
     document.addEventListener('click', this.closeAccountMenu);
     await this.loadCurrentUser();
+    await this.loadScheduleConfig();
     await this.loadTasks();
     await this.loadScheduleItems();
     this.$nextTick(() => this.scrollToDate(this.currentViewDateKey, 'ddl', 'instant'));
@@ -208,7 +254,7 @@ createApp({
         }
       });
       const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(payload.error || '请求失败');
+      if (!response.ok) throw new Error(payload.message || payload.error || '请求失败');
       return payload;
     },
     async loadCurrentUser() {
@@ -232,6 +278,7 @@ createApp({
         this.currentUser = payload.user;
         this.accountMenuOpen = false;
         localStorage.setItem(AUTH_TOKEN_KEY, payload.token);
+        await this.loadScheduleConfig();
         await this.loadTasks();
         await this.loadScheduleItems();
         ElementPlus.ElMessage.success('登录成功。');
@@ -249,6 +296,7 @@ createApp({
         this.currentUser = payload.user;
         this.accountMenuOpen = false;
         localStorage.setItem(AUTH_TOKEN_KEY, payload.token);
+        await this.loadScheduleConfig();
         await this.loadTasks();
         await this.loadScheduleItems();
         ElementPlus.ElMessage.success('注册成功，已自动登录。');
@@ -264,6 +312,8 @@ createApp({
       this.currentUser = null;
       this.tasks = [];
       this.scheduleItems = [];
+      this.scheduleTemplateVersions = [];
+      this.scheduleDayOverrides = {};
       this.accountMenuOpen = true;
       localStorage.removeItem(AUTH_TOKEN_KEY);
       ElementPlus.ElMessage.success('已退出登录。');
@@ -311,6 +361,47 @@ createApp({
         console.error('读取每日安排失败：', error);
         ElementPlus.ElMessage.error('每日安排读取失败。');
       }
+    },
+    async loadScheduleConfig() {
+      try {
+        const payload = await this.apiJson(SCHEDULE_CONFIG_API, { cache: 'no-store' });
+        this.defaultWeekSlots = this.cloneSlots(payload.defaultWeekSlots || DEFAULT_WEEK_SLOTS);
+        this.scheduleTemplateVersions = Array.isArray(payload.templateVersions) ? payload.templateVersions : [];
+        this.scheduleDayOverrides = payload.dayOverrides && typeof payload.dayOverrides === 'object' ? payload.dayOverrides : {};
+      } catch (error) {
+        console.error('读取时间格子配置失败：', error);
+        this.defaultWeekSlots = this.cloneSlots(DEFAULT_WEEK_SLOTS);
+        this.scheduleTemplateVersions = [];
+        this.scheduleDayOverrides = {};
+      }
+    },
+    cloneSlots(value) {
+      return JSON.parse(JSON.stringify(value || {}));
+    },
+    normalizeWeekSlots(value) {
+      const source = value || {};
+      return ['0', '1', '2', '3', '4', '5', '6'].reduce((week, key) => {
+        week[key] = this.cloneSlots(source[key] || []);
+        return week;
+      }, {});
+    },
+    weekTemplateForDate(dateKey) {
+      const versions = [...this.scheduleTemplateVersions]
+        .filter(version => version.effectiveFrom <= dateKey)
+        .sort((a, b) => {
+          if (a.effectiveFrom !== b.effectiveFrom) return a.effectiveFrom.localeCompare(b.effectiveFrom);
+          return Number(a.id || 0) - Number(b.id || 0);
+        });
+      const latest = versions[versions.length - 1];
+      return this.normalizeWeekSlots(latest ? latest.slots : this.defaultWeekSlots);
+    },
+    slotsForDate(dateKey) {
+      if (this.scheduleDayOverrides[dateKey]) return this.cloneSlots(this.scheduleDayOverrides[dateKey]);
+      const weekday = String(new Date(`${dateKey}T00:00:00`).getDay());
+      return this.weekTemplateForDate(dateKey)[weekday] || [];
+    },
+    scheduleSlotKeyFromBase(date, keyBase) {
+      return `${date}-${keyBase}`;
     },
     minutesBetween(start, end) {
       const [sh, sm] = start.split(':').map(Number);
@@ -427,6 +518,128 @@ createApp({
         }
       }).catch(() => {});
     },
+    openDaySlotEditor(day) {
+      if (!this.currentUser) {
+        ElementPlus.ElMessage.warning('请先登录或注册，再修改时间格子。');
+        return;
+      }
+      this.slotEditorMode = 'day';
+      this.slotEditorDate = day.key;
+      this.slotEditorSlots = this.cloneSlots(this.slotsForDate(day.key));
+      this.slotEditorVisible = true;
+    },
+    openWeekSlotEditor() {
+      if (!this.currentUser) {
+        ElementPlus.ElMessage.warning('请先登录或注册，再修改时间格子。');
+        return;
+      }
+      const dateKey = this.pageViewDateKeys.daily || this.currentViewDateKey || this.formatDateKey(new Date());
+      this.slotEditorMode = 'week';
+      this.slotEditorDate = dateKey;
+      this.slotEditorWeekday = String(new Date(`${dateKey}T00:00:00`).getDay());
+      this.slotEditorWeekSlots = this.weekTemplateForDate(dateKey);
+      this.slotEditorVisible = true;
+    },
+    addEditorSlot() {
+      const slot = { keyBase: this.createSlotKeyBase(), label: '新时间段', start: '09:00', end: '10:00' };
+      if (this.slotEditorMode === 'day') {
+        this.slotEditorSlots.push(slot);
+        return;
+      }
+      this.slotEditorWeekSlots[this.slotEditorWeekday].push(slot);
+    },
+    removeEditorSlot(index) {
+      if (this.slotEditorMode === 'day') {
+        this.slotEditorSlots.splice(index, 1);
+        return;
+      }
+      this.slotEditorWeekSlots[this.slotEditorWeekday].splice(index, 1);
+    },
+    activeEditorSlots() {
+      return this.slotEditorMode === 'day'
+        ? this.slotEditorSlots
+        : (this.slotEditorWeekSlots[this.slotEditorWeekday] || []);
+    },
+    validateEditorSlots(slots) {
+      for (const slot of slots) {
+        if (!slot.label || !slot.start || !slot.end) return '请填写每个时间段的名称、开始和结束时间。';
+        if (!this.isValidTimeText(slot.start) || !this.isValidTimeText(slot.end)) return '时间格式必须是 HH:mm，例如 18:40。';
+        if (this.minutesBetween(slot.start, slot.end) <= 0) return '每个时间段的结束时间必须晚于开始时间。';
+      }
+      return '';
+    },
+    isValidTimeText(value) {
+      if (!/^\d{2}:\d{2}$/.test(value || '')) return false;
+      const [hour, minute] = value.split(':').map(Number);
+      return hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59;
+    },
+    async saveSlotEditor() {
+      if (!this.currentUser) return;
+      const error = this.slotEditorMode === 'day'
+        ? this.validateEditorSlots(this.slotEditorSlots)
+        : ['0', '1', '2', '3', '4', '5', '6'].map(key => this.validateEditorSlots(this.slotEditorWeekSlots[key] || [])).find(Boolean);
+      if (error) {
+        ElementPlus.ElMessage.error(error);
+        return;
+      }
+      try {
+        if (this.slotEditorMode === 'day') {
+          await this.apiJson(`${SCHEDULE_DAY_SLOTS_API}/${this.slotEditorDate}`, {
+            method: 'PUT',
+            body: JSON.stringify({ slots: this.slotEditorSlots })
+          });
+          ElementPlus.ElMessage.success('当天时间格子已保存。');
+        } else {
+          await this.apiJson(SCHEDULE_TEMPLATE_API, {
+            method: 'PUT',
+            body: JSON.stringify({ effectiveFrom: this.slotEditorDate, slots: this.slotEditorWeekSlots })
+          });
+          ElementPlus.ElMessage.success('一周模板已保存。');
+        }
+        this.slotEditorVisible = false;
+        await this.loadScheduleConfig();
+      } catch (error) {
+        ElementPlus.ElMessage.error(error.message);
+      }
+    },
+    resetDaySlots(day) {
+      if (!this.currentUser) {
+        ElementPlus.ElMessage.warning('请先登录或注册，再重置时间格子。');
+        return;
+      }
+      ElementPlus.ElMessageBox.confirm(`重置 ${day.label} 的时间格子？`, '重置当天', {
+        confirmButtonText: '重置',
+        cancelButtonText: '取消',
+        type: 'warning'
+      }).then(async () => {
+        try {
+          await this.apiJson(`${SCHEDULE_DAY_SLOTS_API}/${day.key}`, { method: 'DELETE' });
+          await this.loadScheduleConfig();
+          ElementPlus.ElMessage.success('当天已恢复为模板。');
+        } catch (error) {
+          ElementPlus.ElMessage.error(error.message);
+        }
+      }).catch(() => {});
+    },
+    resetAllScheduleConfig() {
+      if (!this.currentUser) {
+        ElementPlus.ElMessage.warning('请先登录或注册，再重置时间格子。');
+        return;
+      }
+      ElementPlus.ElMessageBox.confirm('重置全部时间格子设置？所有单日自定义和一周模板都会恢复为系统默认。', '重置全部', {
+        confirmButtonText: '重置全部',
+        cancelButtonText: '取消',
+        type: 'warning'
+      }).then(async () => {
+        try {
+          await this.apiJson(SCHEDULE_CONFIG_API, { method: 'DELETE' });
+          await this.loadScheduleConfig();
+          ElementPlus.ElMessage.success('全部时间格子已恢复为默认模板。');
+        } catch (error) {
+          ElementPlus.ElMessage.error(error.message);
+        }
+      }).catch(() => {});
+    },
     async persistTasks() {
       if (!this.currentUser) throw new Error('请先登录后再保存');
       const response = await fetch(TASKS_BULK_API, {
@@ -487,6 +700,12 @@ createApp({
       next.setDate(next.getDate() + days);
       return next;
     },
+    weekStartDate(date) {
+      const next = this.startOfDay(date);
+      const offset = (next.getDay() + 6) % 7;
+      next.setDate(next.getDate() - offset);
+      return next;
+    },
     daysBetween(baseDate, targetDate) {
       const base = this.startOfDay(baseDate);
       const target = this.startOfDay(targetDate);
@@ -518,6 +737,9 @@ createApp({
     },
     priorityLabel(priority) {
       return PRIORITY_LABELS[priority] || '未分类';
+    },
+    weekdayLabel(key) {
+      return WEEKDAY_TEXT[Number(key)] || key;
     },
     openCreateDialog() {
       if (!this.currentUser) {
@@ -552,6 +774,7 @@ createApp({
     buildDueAt() {
       if (this.form.unscheduled) return '';
       if (!this.form.date || !this.form.time) return null;
+      if (!this.isValidTimeText(this.form.time)) return null;
       return `${this.form.date}T${this.form.time}:00`;
     },
     async saveTask() {
@@ -563,7 +786,7 @@ createApp({
       const subject = this.form.subject.trim();
       const dueAt = this.buildDueAt();
       if (!title || !subject || dueAt === null) {
-        ElementPlus.ElMessage.warning('请先填写标题、科目；如果要设置截止时间，也要填日期和时间。');
+        ElementPlus.ElMessage.warning('请先填写标题、科目；如果要设置截止时间，也要填日期和 HH:mm 格式的时间。');
         return;
       }
 
@@ -700,6 +923,9 @@ createApp({
         return window.crypto.randomUUID();
       }
       return `task-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    },
+    createSlotKeyBase() {
+      return `custom-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     }
   }
 }).use(ElementPlus).mount('#app');
