@@ -137,7 +137,7 @@
           </div>
         </div>
 
-        <div v-if="activePage === 'ddl'" class="timeline-scroll" ref="timelineScroll" @scroll.passive="handleTimelineScroll('ddl')">
+        <div v-if="activePage === 'ddl'" class="timeline-scroll" ref="timelineScroll">
           <div class="timeline-columns">
             <section v-for="day in dayColumns" :key="day.key" class="day-column" :data-day="day.key">
               <div class="day-header">
@@ -174,7 +174,7 @@
         </div>
 
         <div v-else class="daily-board">
-          <div class="timeline-scroll" ref="dailyScroll" @scroll.passive="handleTimelineScroll('daily')">
+          <div class="timeline-scroll" ref="dailyScroll">
             <div class="timeline-columns">
               <section v-for="day in scheduleDayColumns" :key="day.key" class="day-column" :data-day="day.key">
                 <div class="day-header">

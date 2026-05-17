@@ -112,6 +112,14 @@ createApp({
     ddlTasks() {
       return this.sortedTasks.filter(task => task.dueAt && !task.completed);
     },
+    scheduleItemsBySlot() {
+      return this.scheduleItems.reduce((groups, item) => {
+        const key = this.scheduleSlotKey(item.date, item.slotKey);
+        if (!groups[key]) groups[key] = [];
+        groups[key].push(item);
+        return groups;
+      }, {});
+    },
     scheduleDayColumns() {
       const base = this.startOfDay(new Date());
       const start = this.timelineStartDate();
@@ -310,12 +318,15 @@ createApp({
       return (eh * 60 + em) - (sh * 60 + sm);
     },
     scheduleItemsForSlot(date, slotKey) {
-      return this.scheduleItems.filter(item => item.date === date && item.slotKey === slotKey);
+      return this.scheduleItemsBySlot[this.scheduleSlotKey(date, slotKey)] || [];
     },
     slotUsedMinutes(date, slotKey, excludeId = null) {
       return this.scheduleItemsForSlot(date, slotKey)
         .filter(item => item.id !== excludeId)
         .reduce((sum, item) => sum + Number(item.durationMinutes || 0), 0);
+    },
+    scheduleSlotKey(date, slotKey) {
+      return `${date}::${slotKey}`;
     },
     handleDropOnSlot(day, slot) {
       if (!this.currentUser) {
@@ -652,9 +663,6 @@ createApp({
       this.currentViewDateKey = key;
       this.pageViewDateKeys[page] = key;
       container.scrollTo({ left: nextLeft, behavior });
-    },
-    handleTimelineScroll(page) {
-      this.rememberCurrentViewDate(page);
     },
     rememberCurrentViewDate(page) {
       const container = page === 'daily' ? this.$refs.dailyScroll : this.$refs.timelineScroll;
