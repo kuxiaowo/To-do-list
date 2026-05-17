@@ -153,7 +153,7 @@ createApp({
     await this.loadCurrentUser();
     await this.loadTasks();
     await this.loadScheduleItems();
-    this.$nextTick(() => this.scrollToDate(this.currentViewDateKey, 'ddl', 'auto'));
+    this.$nextTick(() => this.scrollToDate(this.currentViewDateKey, 'ddl', 'instant'));
   },
   beforeUnmount() {
     document.removeEventListener('click', this.closeAccountMenu);
@@ -648,7 +648,7 @@ createApp({
       this.rememberCurrentViewDate(this.activePage);
       this.activePage = page;
       const key = this.pageViewDateKeys[page] || this.currentViewDateKey || this.formatDateKey(new Date());
-      this.$nextTick(() => this.scrollToDate(key, page, 'auto'));
+      this.$nextTick(() => this.scrollToDate(key, page, 'instant'));
     },
     scrollToDate(dateLike, page = this.activePage, behavior = 'smooth') {
       const key = this.formatDateKey(dateLike);
@@ -662,6 +662,10 @@ createApp({
       const nextLeft = Math.min(maxScrollLeft, Math.max(0, targetCenter - viewportCenter));
       this.currentViewDateKey = key;
       this.pageViewDateKeys[page] = key;
+      if (behavior === 'instant') {
+        container.scrollLeft = nextLeft;
+        return;
+      }
       container.scrollTo({ left: nextLeft, behavior });
     },
     rememberCurrentViewDate(page) {
