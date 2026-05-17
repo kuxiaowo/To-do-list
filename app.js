@@ -7,6 +7,8 @@ const AUTH_API = '/api/auth';
 const SCHEDULE_API = '/api/schedule-items';
 const AUTH_TOKEN_KEY = 'todo-list-auth-token-v1';
 const THEME_STORAGE_KEY = 'todo-list-theme-v1';
+const TIMELINE_START_MONTH = 4;
+const TIMELINE_START_DAY = 1;
 const PRIORITY_ORDER = { high: 0, medium: 1, low: 2 };
 const PRIORITY_LABELS = { high: '高优先级', medium: '中优先级', low: '低优先级' };
 const WEEKDAY_TEXT = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
@@ -40,6 +42,7 @@ createApp({
       showCompleted: false,
       isDarkMode: (localStorage.getItem(THEME_STORAGE_KEY) || 'light') === 'dark',
       activePage: 'ddl',
+      pageViewDateKeys: { ddl: '', daily: '' },
       dialogVisible: false,
       dialogMode: 'create',
       activeTaskId: null,
@@ -85,9 +88,11 @@ createApp({
     },
     dayColumns() {
       const base = this.startOfDay(new Date());
+      const start = this.timelineStartDate();
+      const end = this.addDays(base, this.dayRange.future);
       const days = [];
-      for (let offset = -this.dayRange.past; offset <= this.dayRange.future; offset++) {
-        const date = this.addDays(base, offset);
+      for (let date = new Date(start); date <= end; date = this.addDays(date, 1)) {
+        const offset = this.daysBetween(base, date);
         const key = this.formatDateKey(date);
         const tasks = this.filteredTasks.filter(task => task.dueAt && task.dueAt.startsWith(key));
         days.push({
@@ -109,9 +114,11 @@ createApp({
     },
     scheduleDayColumns() {
       const base = this.startOfDay(new Date());
+      const start = this.timelineStartDate();
+      const end = this.addDays(base, 21);
       const days = [];
-      for (let offset = -7; offset <= 21; offset++) {
-        const date = this.addDays(base, offset);
+      for (let date = new Date(start); date <= end; date = this.addDays(date, 1)) {
+        const offset = this.daysBetween(base, date);
         const key = this.formatDateKey(date);
         const weekday = date.getDay();
         const templateKey = weekday >= 1 && weekday <= 4 ? 'weekday' : weekday === 5 ? 'friday' : 'weekend';
@@ -132,11 +139,13 @@ createApp({
   async mounted() {
     this.applyTheme();
     this.currentViewDateKey = this.formatDateKey(new Date());
+    this.pageViewDateKeys.ddl = this.currentViewDateKey;
+    this.pageViewDateKeys.daily = this.currentViewDateKey;
     document.addEventListener('click', this.closeAccountMenu);
     await this.loadCurrentUser();
     await this.loadTasks();
     await this.loadScheduleItems();
-    this.$nextTick(() => this.scrollToToday());
+    this.$nextTick(() => this.scrollToDate(this.currentViewDateKey, 'ddl', 'auto'));
   },
   beforeUnmount() {
     document.removeEventListener('click', this.closeAccountMenu);
@@ -458,10 +467,19 @@ createApp({
     startOfDay(date) {
       return new Date(date.getFullYear(), date.getMonth(), date.getDate());
     },
+    timelineStartDate() {
+      const today = new Date();
+      return new Date(today.getFullYear(), TIMELINE_START_MONTH, TIMELINE_START_DAY);
+    },
     addDays(date, days) {
       const next = new Date(date);
       next.setDate(next.getDate() + days);
       return next;
+    },
+    daysBetween(baseDate, targetDate) {
+      const base = this.startOfDay(baseDate);
+      const target = this.startOfDay(targetDate);
+      return Math.round((target - base) / 86400000);
     },
     formatDateKey(dateLike) {
       const date = new Date(dateLike);
@@ -614,9 +632,16 @@ createApp({
     scrollToToday() {
       this.scrollToDate(this.startOfDay(new Date()));
     },
-    scrollToDate(dateLike) {
+    switchPage(page) {
+      if (page === this.activePage) return;
+      this.rememberCurrentViewDate(this.activePage);
+      this.activePage = page;
+      const key = this.pageViewDateKeys[page] || this.currentViewDateKey || this.formatDateKey(new Date());
+      this.$nextTick(() => this.scrollToDate(key, page, 'auto'));
+    },
+    scrollToDate(dateLike, page = this.activePage, behavior = 'smooth') {
       const key = this.formatDateKey(dateLike);
-      const container = this.activePage === 'daily' ? this.$refs.dailyScroll : this.$refs.timelineScroll;
+      const container = page === 'daily' ? this.$refs.dailyScroll : this.$refs.timelineScroll;
       if (!container) return;
       const target = container.querySelector(`[data-day="${key}"]`);
       if (!target) return;
@@ -625,7 +650,27 @@ createApp({
       const viewportCenter = container.clientWidth / 2;
       const nextLeft = Math.min(maxScrollLeft, Math.max(0, targetCenter - viewportCenter));
       this.currentViewDateKey = key;
-      container.scrollTo({ left: nextLeft, behavior: 'smooth' });
+      this.pageViewDateKeys[page] = key;
+      container.scrollTo({ left: nextLeft, behavior });
+    },
+    handleTimelineScroll(page) {
+      this.rememberCurrentViewDate(page);
+    },
+    rememberCurrentViewDate(page) {
+      const container = page === 'daily' ? this.$refs.dailyScroll : this.$refs.timelineScroll;
+      if (!container) return;
+      const columns = [...container.querySelectorAll('[data-day]')];
+      if (!columns.length) return;
+      const viewportCenter = container.scrollLeft + container.clientWidth / 2;
+      const nearest = columns.reduce((best, column) => {
+        const center = column.offsetLeft + column.offsetWidth / 2;
+        const distance = Math.abs(center - viewportCenter);
+        return distance < best.distance ? { column, distance } : best;
+      }, { column: columns[0], distance: Number.POSITIVE_INFINITY }).column;
+      const key = nearest.dataset.day;
+      if (!key) return;
+      this.pageViewDateKeys[page] = key;
+      if (page === this.activePage) this.currentViewDateKey = key;
     },
     jumpToOffset(days) {
       const base = new Date(`${this.currentViewDateKey}T00:00:00`);

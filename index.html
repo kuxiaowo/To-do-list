@@ -72,8 +72,8 @@
         <div class="timeline-header">
           <div class="timeline-title">
             <div class="page-nav">
-              <button class="page-nav-button" :class="{ active: activePage === 'ddl' }" type="button" @click="activePage = 'ddl'">DDL日期时间线</button>
-              <button class="page-nav-button" :class="{ active: activePage === 'daily' }" type="button" @click="activePage = 'daily'">每日安排</button>
+              <button class="page-nav-button" :class="{ active: activePage === 'ddl' }" type="button" @click="switchPage('ddl')">DDL日期时间线</button>
+              <button class="page-nav-button" :class="{ active: activePage === 'daily' }" type="button" @click="switchPage('daily')">每日安排</button>
             </div>
             <p>{{ activePage === 'ddl' ? '有截止时间的任务会按时间自动排序；没想好时间的事项会留在左侧待办池。' : '把下方 DDL 拖到每天的时间栏里，创建可完成的学习安排。' }}</p>
           </div>
@@ -137,7 +137,7 @@
           </div>
         </div>
 
-        <div v-if="activePage === 'ddl'" class="timeline-scroll" ref="timelineScroll">
+        <div v-if="activePage === 'ddl'" class="timeline-scroll" ref="timelineScroll" @scroll.passive="handleTimelineScroll('ddl')">
           <div class="timeline-columns">
             <section v-for="day in dayColumns" :key="day.key" class="day-column" :data-day="day.key">
               <div class="day-header">
@@ -174,7 +174,7 @@
         </div>
 
         <div v-else class="daily-board">
-          <div class="timeline-scroll" ref="dailyScroll">
+          <div class="timeline-scroll" ref="dailyScroll" @scroll.passive="handleTimelineScroll('daily')">
             <div class="timeline-columns">
               <section v-for="day in scheduleDayColumns" :key="day.key" class="day-column" :data-day="day.key">
                 <div class="day-header">
