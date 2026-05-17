@@ -1,6 +1,6 @@
 # To-Do List Timeline
 
-一个面向学习任务管理的待办清单 Web 应用。项目使用单文件前端、Python 标准库 HTTP 服务和 SQLite 数据库实现，不需要 Node.js 构建流程，也不依赖第三方 Python 包。
+一个面向学习任务管理的待办清单 Web 应用。项目使用静态前端、Python 标准库 HTTP 服务和 SQLite 数据库实现，不需要 Node.js 构建流程，也不依赖第三方 Python 包。
 
 ## 功能特性
 
@@ -17,7 +17,7 @@
 
 ## 技术栈
 
-- 前端：Vue 3、Element Plus，通过 CDN 在 `index.html` 中直接加载
+- 前端：Vue 3、Element Plus，本地静态文件加载
 - 后端：Python 标准库 `http.server` + `sqlite3`
 - 数据库：SQLite，默认写入 `data/todo-list.db`
 - 部署：可直接运行 `server.py`，也可使用 `deploy-first-run.sh` 创建 systemd 用户服务
@@ -26,7 +26,10 @@
 
 ```text
 .
-├── index.html           # 前端页面、样式和 Vue 应用逻辑
+├── index.html           # 前端页面结构
+├── style.css            # 页面样式
+├── app.js               # Vue 应用逻辑
+├── vendor/              # Vue 和 Element Plus 本地依赖
 ├── server.py            # 静态文件服务、API 服务和 SQLite 初始化
 ├── deploy-first-run.sh  # Linux 首次部署脚本，可初始化数据库和 systemd 用户服务
 ├── LICENSE              # MIT License
@@ -53,6 +56,12 @@ python server.py
 
 ```text
 http://0.0.0.0:8092
+```
+
+可通过环境变量修改监听地址和端口：
+
+```bash
+TODO_HOST=127.0.0.1 TODO_PORT=9000 python server.py
 ```
 
 本机访问通常使用：
@@ -112,9 +121,7 @@ TODO_ADMIN_PASSWORD='change-this-password' \
 其他环境变量：
 
 - `TODO_SERVICE_NAME`：systemd 用户服务名，默认 `todo-list.service`
-- `TODO_PORT`：部署脚本提示用端口，默认 `8092`
-
-注意：当前 `server.py` 中监听端口是常量 `PORT = 8092`。如果要更改实际端口，需要修改 `server.py`。
+- `TODO_PORT`：服务监听端口，默认 `8092`
 
 ## API 概览
 
@@ -163,13 +170,13 @@ data/todo-list.db
 
 该项目没有打包步骤，修改后端或前端文件后刷新浏览器即可查看效果。后端修改通常需要重启 `server.py`。
 
-前端依赖通过 CDN 加载：
+前端依赖已放在 `vendor/` 目录：
 
-- `https://unpkg.com/vue@3/dist/vue.global.prod.js`
-- `https://unpkg.com/element-plus/dist/index.full.min.js`
-- `https://unpkg.com/element-plus/dist/index.css`
+- `vendor/vue.global.prod.js`
+- `vendor/element-plus.full.min.js`
+- `vendor/element-plus.css`
 
-如果部署环境无法访问外网 CDN，需要将这些资源改为本地静态文件。
+因此部署环境不需要访问外网 CDN。以后升级 Vue 或 Element Plus 时，替换 `vendor/` 中对应文件即可。
 
 ## 许可证
 

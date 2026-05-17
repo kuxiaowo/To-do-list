@@ -5,6 +5,7 @@ import base64
 import hashlib
 import hmac
 import json
+import os
 import secrets
 import sqlite3
 import time
@@ -16,8 +17,8 @@ from urllib.parse import urlparse
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / 'data'
 DB_PATH = DATA_DIR / 'todo-list.db'
-HOST = '0.0.0.0'
-PORT = 8092
+HOST = os.environ.get('TODO_HOST', '0.0.0.0')
+PORT = int(os.environ.get('TODO_PORT', '8092'))
 PASSWORD_ITERATIONS = 260_000
 SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
 
