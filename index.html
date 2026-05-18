@@ -20,9 +20,9 @@
         <div class="summary-header">
           <div>
             <h1 class="summary-title">To-Do List</h1>
-            <p class="summary-subtitle">左侧收纳还没分配时间的待办池；右侧横向滚动查看已经安排截止时间的任务。</p>
+            <p class="summary-subtitle">{{ activePage === 'daily' ? '左侧收纳临时或长期任务；右侧把任务拖进时间格子生成每日安排。' : '左侧收纳还没分配时间的待办池；右侧横向滚动查看已经安排截止时间的任务。' }}</p>
           </div>
-          <el-button type="primary" :disabled="!currentUser" @click="openCreateDialog">新增任务</el-button>
+          <el-button type="primary" :disabled="!currentUser" @click="openCreateDialog">{{ activePage === 'daily' ? '新增安排' : '新增任务' }}</el-button>
         </div>
 
         <div class="toolbar">
@@ -38,7 +38,7 @@
 
         <section class="summary-section">
           <h3>
-            <span>未排期待办池</span>
+            <span>{{ activePage === 'daily' ? '弹性任务池' : '未排期待办池' }}</span>
             <span class="day-subtitle">{{ unscheduledCount }} 项</span>
           </h3>
           <div v-for="group in unscheduledByPriority" :key="group.key" class="summary-card">
@@ -47,7 +47,14 @@
               <span class="day-subtitle">{{ group.tasks.length }} 项</span>
             </div>
             <template v-if="group.tasks.length">
-              <div v-for="task in group.tasks" :key="task.id" class="summary-task" @click="openEditDialog(task)">
+              <div
+                v-for="task in group.tasks"
+                :key="task.id"
+                class="summary-task"
+                :draggable="activePage === 'daily'"
+                @dragstart="startTaskDrag(task)"
+                @click="openEditDialog(task)"
+              >
                 <div class="task-main">
                   <div style="min-width: 0; flex: 1;">
                     <div class="task-title">{{ task.title }}</div>
@@ -62,9 +69,11 @@
                 </div>
               </div>
             </template>
-            <div v-else class="summary-empty">这一档暂时没有未排期事项。</div>
+            <div v-else class="summary-empty">{{ activePage === 'daily' ? '这一档暂时没有弹性任务。' : '这一档暂时没有未排期事项。' }}</div>
           </div>
-          <div v-if="!unscheduledCount" class="summary-empty">待办池是空的；还没想好时间的任务可以先扔这里。</div>
+          <div v-if="!unscheduledCount" class="summary-empty">
+            {{ activePage === 'daily' ? '任务池是空的；临时或长期任务可以先放这里，再拖进每日安排。' : '待办池是空的；还没想好时间的任务可以先扔这里。' }}
+          </div>
         </section>
       </aside>
 
@@ -75,7 +84,7 @@
               <button class="page-nav-button" :class="{ active: activePage === 'ddl' }" type="button" @click="switchPage('ddl')">DDL日期时间线</button>
               <button class="page-nav-button" :class="{ active: activePage === 'daily' }" type="button" @click="switchPage('daily')">每日安排</button>
             </div>
-            <p>{{ activePage === 'ddl' ? '有截止时间的任务会按时间自动排序；没想好时间的事项会留在左侧待办池。' : '把下方 DDL 拖到每天的时间栏里，创建可完成的学习安排。' }}</p>
+            <p>{{ activePage === 'ddl' ? '有截止时间的任务会按时间自动排序；没想好时间的事项会留在左侧待办池。' : '把左侧弹性任务池或下方 DDL 拖到每天的时间栏里，创建可完成的学习安排。' }}</p>
           </div>
           <div class="timeline-header-actions">
             <div class="toolbar-row priority-tags">
@@ -159,7 +168,6 @@
                       <div class="task-meta">
                         <span class="task-time">{{ formatTime(task.dueAt) }}</span>
                         <span v-if="task.subject" class="meta-chip subject-chip">{{ task.subject }}</span>
-                        <span>{{ priorityLabel(task.priority) }}</span>
                         <span v-if="task.completed" class="meta-chip completed-badge">已完成</span>
                       </div>
                       <div v-if="task.note" class="task-note-preview">{{ task.note }}</div>
@@ -224,7 +232,6 @@
                     <div class="task-meta">
                       <span v-if="item.task.subject" class="meta-chip subject-chip">{{ item.task.subject }}</span>
                       <span>{{ item.durationMinutes }} 分钟</span>
-                      <span>{{ priorityLabel(item.task.priority) }}</span>
                     </div>
                     <div v-if="item.note" class="task-note-preview">{{ item.note }}</div>
                     <span v-if="item.completed" class="schedule-check">✓</span>
@@ -248,7 +255,7 @@
                 class="ddl-card"
                 :class="priorityClass(task.priority)"
                 draggable="true"
-                @dragstart="draggedTaskId = task.id"
+                @dragstart="startTaskDrag(task)"
               >
                 <div class="task-title">{{ task.title }}</div>
                 <div class="task-meta">
@@ -266,7 +273,7 @@
 
     <el-dialog
       v-model="dialogVisible"
-      :title="dialogMode === 'create' ? '新增任务' : '任务详情 / 编辑'"
+      :title="dialogMode === 'create' ? (isCreatingArrangement ? '新增安排' : '新增任务') : '任务详情 / 编辑'"
       width="min(92vw, 640px)"
       destroy-on-close
     >
@@ -279,11 +286,15 @@
           <el-input v-model="form.subject" placeholder="例如：数学 / 物理 / 英语" maxlength="30" show-word-limit></el-input>
         </el-form-item>
 
-        <el-form-item label="时间安排">
-          <el-switch v-model="form.unscheduled" active-text="先放入未排期待办池" inactive-text="设置截止时间"></el-switch>
+        <el-form-item v-if="isCreatingArrangement" label="时间安排">
+          <el-tag type="info" effect="plain">放入弹性任务池</el-tag>
         </el-form-item>
 
-        <el-form-item label="截止日期" v-if="!form.unscheduled">
+        <el-form-item v-else label="时间安排">
+          <el-switch v-model="form.unscheduled" :active-text="activePage === 'daily' ? '先放入弹性任务池' : '先放入未排期待办池'" inactive-text="设置截止时间"></el-switch>
+        </el-form-item>
+
+        <el-form-item label="截止日期" v-if="!isCreatingArrangement && !form.unscheduled">
           <el-date-picker
             v-model="form.date"
             type="date"
@@ -293,7 +304,7 @@
           ></el-date-picker>
         </el-form-item>
 
-        <el-form-item label="截止时间" v-if="!form.unscheduled">
+        <el-form-item label="截止时间" v-if="!isCreatingArrangement && !form.unscheduled">
           <el-input v-model="form.time" placeholder="例如：23:59" maxlength="5"></el-input>
         </el-form-item>
 
@@ -380,7 +391,7 @@
       destroy-on-close
     >
       <el-form :model="scheduleForm" label-width="110px" @submit.prevent>
-        <el-form-item label="DDL任务">
+        <el-form-item label="安排任务">
           <div>{{ activeScheduleTask ? activeScheduleTask.title : '未选择' }}</div>
         </el-form-item>
         <el-form-item label="时间段">
@@ -412,7 +423,7 @@
 
   <script src="./vendor/vue.global.prod.js"></script>
   <script src="./vendor/element-plus.full.min.js"></script>
-  <script src="./app.js"></script>
+  <script src="./app.js?v=arrangement-pool-20260518"></script>
 </body>
 </html>
 

@@ -329,6 +329,16 @@ body {
   word-break: break-word;
 }
 
+.task-card .task-title,
+.schedule-card .task-title,
+.ddl-card .task-title,
+.summary-task .task-title {
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
 .task-meta {
   margin-top: 6px;
   color: var(--muted);
@@ -347,6 +357,24 @@ body {
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+.task-card .task-note-preview,
+.schedule-card .task-note-preview,
+.ddl-card .task-note-preview {
+  -webkit-line-clamp: 2;
+}
+
+.timeline-scroll .task-card .task-note-preview {
+  -webkit-line-clamp: 2;
+}
+
+.summary-task[draggable="true"] {
+  cursor: grab;
+}
+
+.summary-task[draggable="true"]:active {
+  cursor: grabbing;
 }
 
 .priority-dot {

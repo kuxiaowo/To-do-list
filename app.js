@@ -84,6 +84,7 @@ createApp({
       pageViewDateKeys: { ddl: '', daily: '' },
       dialogVisible: false,
       dialogMode: 'create',
+      createDialogType: 'task',
       activeTaskId: null,
       currentViewDateKey: '',
       form: this.emptyForm(),
@@ -156,6 +157,9 @@ createApp({
     },
     ddlTasks() {
       return this.sortedTasks.filter(task => task.dueAt && !task.completed);
+    },
+    isCreatingArrangement() {
+      return this.dialogMode === 'create' && this.createDialogType === 'arrangement';
     },
     scheduleItemsBySlot() {
       return this.scheduleItems.reduce((groups, item) => {
@@ -419,6 +423,10 @@ createApp({
     scheduleSlotKey(date, slotKey) {
       return `${date}::${slotKey}`;
     },
+    startTaskDrag(task) {
+      if (this.activePage !== 'daily') return;
+      this.draggedTaskId = task.id;
+    },
     handleDropOnSlot(day, slot) {
       if (!this.currentUser) {
         ElementPlus.ElMessage.warning('请先登录或注册，再创建安排。');
@@ -503,7 +511,7 @@ createApp({
     },
     deleteScheduleItem() {
       if (!this.activeScheduleItemId) return;
-      ElementPlus.ElMessageBox.confirm('删除这个安排？不会删除原 DDL。', '删除安排', {
+      ElementPlus.ElMessageBox.confirm('删除这个安排？不会删除原任务。', '删除安排', {
         confirmButtonText: '删除',
         cancelButtonText: '取消',
         type: 'warning'
@@ -747,8 +755,14 @@ createApp({
         return;
       }
       this.dialogMode = 'create';
+      this.createDialogType = this.activePage === 'daily' ? 'arrangement' : 'task';
       this.activeTaskId = null;
       this.form = this.emptyForm();
+      if (this.createDialogType === 'arrangement') {
+        this.form.unscheduled = true;
+        this.form.date = '';
+        this.form.time = '';
+      }
       this.dialogVisible = true;
     },
     openEditDialog(task) {
@@ -757,6 +771,7 @@ createApp({
         return;
       }
       this.dialogMode = 'edit';
+      this.createDialogType = 'task';
       this.activeTaskId = task.id;
       const due = task.dueAt ? new Date(task.dueAt) : new Date();
       this.form = {
@@ -772,6 +787,7 @@ createApp({
       this.dialogVisible = true;
     },
     buildDueAt() {
+      if (this.isCreatingArrangement) return '';
       if (this.form.unscheduled) return '';
       if (!this.form.date || !this.form.time) return null;
       if (!this.isValidTimeText(this.form.time)) return null;
@@ -781,6 +797,11 @@ createApp({
       if (!this.currentUser) {
         ElementPlus.ElMessage.warning('请先登录或注册，再保存任务。');
         return;
+      }
+      if (this.isCreatingArrangement) {
+        this.form.unscheduled = true;
+        this.form.date = '';
+        this.form.time = '';
       }
       const title = this.form.title.trim();
       const subject = this.form.subject.trim();
@@ -798,6 +819,7 @@ createApp({
         note: this.form.note.trim(),
         completed: !!this.form.completed
       };
+      if (this.isCreatingArrangement) payload.dueAt = '';
 
       try {
         if (this.dialogMode === 'create') {
