@@ -275,7 +275,15 @@ def is_valid_time_text(value: str) -> bool:
         hour, minute = [int(part) for part in value.split(':', 1)]
     except Exception:
         return False
-    return len(value) == 5 and value[2] == ':' and 0 <= hour <= 23 and 0 <= minute <= 59
+    return len(value.split(':', 1)[0]) in {1, 2} and len(value.split(':', 1)[1]) == 2 and 0 <= hour <= 23 and 0 <= minute <= 59
+
+
+def normalize_time_text(value: str) -> str:
+    value = str(value).strip()
+    if not is_valid_time_text(value):
+        return ''
+    hour, minute = [int(part) for part in value.split(':', 1)]
+    return f'{hour:02d}:{minute:02d}'
 
 
 def weekday_for_date(date_key: str) -> str:
@@ -314,7 +322,9 @@ def normalize_slot_list(slots, path: str = 'slots'):
         if not label or not start or not end:
             return None, f'{path}[{index}] label, start and end are required'
         if not is_valid_time_text(start) or not is_valid_time_text(end):
-            return None, f'{path}[{index}] time must use HH:mm'
+            return None, f'{path}[{index}] time must use H:mm or HH:mm'
+        start = normalize_time_text(start)
+        end = normalize_time_text(end)
         if minutes_between(start, end) <= 0:
             return None, f'{path}[{index}] end must be later than start'
         if key_base in seen_keys:

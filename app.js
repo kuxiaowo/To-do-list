@@ -572,15 +572,23 @@ createApp({
     validateEditorSlots(slots) {
       for (const slot of slots) {
         if (!slot.label || !slot.start || !slot.end) return '请填写每个时间段的名称、开始和结束时间。';
-        if (!this.isValidTimeText(slot.start) || !this.isValidTimeText(slot.end)) return '时间格式必须是 HH:mm，例如 18:40。';
+        slot.start = this.normalizeTimeText(slot.start);
+        slot.end = this.normalizeTimeText(slot.end);
+        if (!slot.start || !slot.end) return '时间格式必须是 H:mm 或 HH:mm，例如 9:00 或 18:40。';
         if (this.minutesBetween(slot.start, slot.end) <= 0) return '每个时间段的结束时间必须晚于开始时间。';
       }
       return '';
     },
     isValidTimeText(value) {
-      if (!/^\d{2}:\d{2}$/.test(value || '')) return false;
-      const [hour, minute] = value.split(':').map(Number);
-      return hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59;
+      return !!this.normalizeTimeText(value);
+    },
+    normalizeTimeText(value) {
+      const match = String(value || '').trim().match(/^(\d{1,2}):(\d{2})$/);
+      if (!match) return '';
+      const hour = Number(match[1]);
+      const minute = Number(match[2]);
+      if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return '';
+      return `${this.pad(hour)}:${this.pad(minute)}`;
     },
     async saveSlotEditor() {
       if (!this.currentUser) return;
@@ -783,8 +791,10 @@ createApp({
       if (this.isArrangementDialog) return '';
       if (this.form.unscheduled) return '';
       if (!this.form.date || !this.form.time) return null;
-      if (!this.isValidTimeText(this.form.time)) return null;
-      return `${this.form.date}T${this.form.time}:00`;
+      const normalizedTime = this.normalizeTimeText(this.form.time);
+      if (!normalizedTime) return null;
+      this.form.time = normalizedTime;
+      return `${this.form.date}T${normalizedTime}:00`;
     },
     async saveTask() {
       if (!this.currentUser) {
@@ -800,7 +810,7 @@ createApp({
       const subject = this.form.subject.trim();
       const dueAt = this.buildDueAt();
       if (!title || !subject || dueAt === null) {
-        ElementPlus.ElMessage.warning('请先填写标题、科目；如果要设置截止时间，也要填日期和 HH:mm 格式的时间。');
+        ElementPlus.ElMessage.warning('请先填写标题、科目；如果要设置截止时间，也要填日期和 H:mm 或 HH:mm 格式的时间。');
         return;
       }
 
