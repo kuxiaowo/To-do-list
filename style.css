@@ -339,6 +339,10 @@ body {
   overflow: hidden;
 }
 
+.timeline-scroll .task-card .task-title {
+  -webkit-line-clamp: 2;
+}
+
 .task-meta {
   margin-top: 6px;
   color: var(--muted);
@@ -359,10 +363,9 @@ body {
   overflow: hidden;
 }
 
-.task-card .task-note-preview,
 .schedule-card .task-note-preview,
 .ddl-card .task-note-preview {
-  -webkit-line-clamp: 2;
+  -webkit-line-clamp: 1;
 }
 
 .timeline-scroll .task-card .task-note-preview {
