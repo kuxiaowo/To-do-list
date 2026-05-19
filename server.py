@@ -22,6 +22,9 @@ PORT = int(os.environ.get('TODO_PORT', '8092'))
 PASSWORD_ITERATIONS = 260_000
 SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
 
+# Weekday keys follow JavaScript Date.getDay(): 0 is Sunday, 1 is Monday.
+# The frontend also keeps a fallback copy, but this server-side value is the
+# canonical default returned by /api/schedule-config.
 DEFAULT_WEEK_SLOTS = {
     '0': [
         {'keyBase': '0-09:00', 'label': '上午', 'start': '09:00', 'end': '10:00'},
@@ -79,6 +82,7 @@ DEFAULT_WEEK_SLOTS = {
 
 
 def init_db() -> None:
+    """Create the SQLite schema and apply small in-place migrations."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
@@ -188,6 +192,7 @@ def now_iso() -> str:
 
 
 def hash_password(password: str) -> str:
+    """Return a self-describing PBKDF2 hash string for password storage."""
     salt = secrets.token_bytes(16)
     digest = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt, PASSWORD_ITERATIONS)
     return 'pbkdf2_sha256${}${}${}'.format(
@@ -211,6 +216,7 @@ def verify_password(password: str, stored_hash: str) -> bool:
 
 
 def normalize_task(task: dict, user_id: int) -> dict:
+    """Normalize external task JSON to the internal/public field names."""
     return {
         'id': str(task.get('id', '')).strip(),
         'userId': user_id,
@@ -267,6 +273,7 @@ def is_valid_time_text(value: str) -> bool:
 
 
 def weekday_for_date(date_key: str) -> str:
+    """Convert an ISO date to the weekday key used by DEFAULT_WEEK_SLOTS."""
     try:
         import datetime as _datetime
 
@@ -286,6 +293,7 @@ def parse_slots_json(raw: str | None):
 
 
 def normalize_slot_list(slots, path: str = 'slots'):
+    """Validate and normalize one day's editable time slots."""
     if not isinstance(slots, list):
         return None, f'{path} must be a list'
     normalized = []
@@ -327,6 +335,7 @@ def slot_key(date_key: str, slot: dict) -> str:
 
 
 def week_slots_for_date(conn: sqlite3.Connection, user_id: int, date_key: str) -> dict:
+    """Return the latest weekly template version effective on date_key."""
     row = conn.execute(
         '''
         SELECT slots_json FROM schedule_template_versions
@@ -340,6 +349,7 @@ def week_slots_for_date(conn: sqlite3.Connection, user_id: int, date_key: str) -
 
 
 def effective_slots_for_date(conn: sqlite3.Connection, user_id: int, date_key: str) -> list[dict]:
+    """Return the slots for a date, with single-day overrides taking priority."""
     override = conn.execute(
         'SELECT slots_json FROM schedule_day_overrides WHERE user_id = ? AND schedule_date = ?',
         (user_id, date_key),
@@ -358,6 +368,7 @@ def conflict_with_existing_items(
     dates: list[str],
     new_slots_by_date: dict[str, list[dict]],
 ):
+    """Reject slot config changes that would strand or shrink existing items."""
     for date_key in dates:
         rows = conn.execute(
             '''
@@ -450,8 +461,6 @@ class TodoHandler(SimpleHTTPRequestHandler):
 
     def do_PUT(self):
         path = urlparse(self.path).path
-        if path == '/api/tasks/bulk':
-            return self.handle_bulk_replace()
         if path.startswith('/api/tasks/'):
             return self.handle_update_task(path.rsplit('/', 1)[-1])
         if path.startswith('/api/schedule-items/'):
@@ -475,6 +484,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
         self.send_error(HTTPStatus.NOT_FOUND, 'Not found')
 
     def current_user(self):
+        """Resolve the bearer token and slide the session expiration forward."""
         auth = self.headers.get('Authorization', '')
         if not auth.lower().startswith('bearer '):
             return None
@@ -624,56 +634,6 @@ class TodoHandler(SimpleHTTPRequestHandler):
         if cursor.rowcount == 0:
             return self.write_json({'error': 'task not found'}, status=HTTPStatus.NOT_FOUND)
         return self.write_json({'ok': True})
-
-    def handle_bulk_replace(self):
-        user = self.require_user()
-        if not user:
-            return
-
-        payload = self.read_json_body()
-        if payload is None:
-            return
-
-        tasks = payload.get('tasks')
-        if not isinstance(tasks, list):
-            return self.write_json({'error': 'tasks must be a list'}, status=HTTPStatus.BAD_REQUEST)
-
-        normalized = []
-        for task in tasks:
-            if not isinstance(task, dict):
-                return self.write_json({'error': 'each task must be an object'}, status=HTTPStatus.BAD_REQUEST)
-            item = normalize_task(task, int(user['id']))
-            if not item['id'] or not item['title']:
-                return self.write_json({'error': 'task id/title are required'}, status=HTTPStatus.BAD_REQUEST)
-            normalized.append(item)
-
-        with get_db() as conn:
-            conn.execute('BEGIN')
-            conn.execute('DELETE FROM tasks WHERE user_id = ?', (user['id'],))
-            conn.executemany(
-                '''
-                INSERT INTO tasks (id, user_id, title, subject, due_at, priority, note, completed, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''',
-                [
-                    (
-                        item['id'],
-                        item['userId'],
-                        item['title'],
-                        item['subject'],
-                        item['dueAt'],
-                        item['priority'],
-                        item['note'],
-                        1 if item['completed'] else 0,
-                        item['createdAt'],
-                        item['updatedAt'],
-                    )
-                    for item in normalized
-                ],
-            )
-            conn.commit()
-
-        return self.write_json({'ok': True, 'count': len(normalized), 'user': public_user(user)})
 
     def handle_list_schedule_items(self):
         user = self.current_user()
@@ -871,6 +831,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
         return self.write_json({'ok': True})
 
     def validate_schedule_payload(self, payload: dict, user_id: int, existing_id: str | None = None):
+        """Validate schedule item edits and enforce per-slot capacity."""
         task_id = str(payload.get('taskId', '')).strip()
         schedule_date = str(payload.get('date', '')).strip()
         slot_key = str(payload.get('slotKey', '')).strip()
@@ -1072,6 +1033,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
         return self.write_json({'token': token, 'user': public_user(user)})
 
     def read_json_body(self):
+        """Decode a JSON request body and write a 400 response on parse errors."""
         try:
             length = int(self.headers.get('Content-Length', '0'))
         except ValueError:

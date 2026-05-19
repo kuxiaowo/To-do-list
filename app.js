@@ -1,8 +1,5 @@
 ﻿const { createApp } = Vue;
-const LEGACY_STORAGE_KEY = 'todo-list-timeline-v1';
-const LEGACY_MIGRATION_KEY = 'todo-list-timeline-migrated-v1';
 const TASKS_API = '/api/tasks';
-const TASKS_BULK_API = '/api/tasks/bulk';
 const AUTH_API = '/api/auth';
 const SCHEDULE_API = '/api/schedule-items';
 const SCHEDULE_CONFIG_API = '/api/schedule-config';
@@ -10,6 +7,7 @@ const SCHEDULE_TEMPLATE_API = '/api/schedule-template';
 const SCHEDULE_DAY_SLOTS_API = '/api/schedule-day-slots';
 const AUTH_TOKEN_KEY = 'todo-list-auth-token-v1';
 const THEME_STORAGE_KEY = 'todo-list-theme-v1';
+// JavaScript Date months are zero-based, so 4 means May.
 const TIMELINE_START_MONTH = 4;
 const TIMELINE_START_DAY = 1;
 const PRIORITY_ORDER = { high: 0, medium: 1, low: 2 };
@@ -234,21 +232,11 @@ createApp({
         completed: false
       };
     },
-    getLegacyTasks() {
-      const raw = localStorage.getItem(LEGACY_STORAGE_KEY);
-      if (!raw) return [];
-      try {
-        const parsed = JSON.parse(raw);
-        return Array.isArray(parsed) ? parsed : [];
-      } catch (error) {
-        console.error('读取旧 localStorage 失败：', error);
-        return [];
-      }
-    },
     authHeaders() {
       return this.authToken ? { Authorization: `Bearer ${this.authToken}` } : {};
     },
     async apiJson(url, options = {}) {
+      // Centralized JSON fetch wrapper for authenticated API requests.
       const response = await fetch(url, {
         ...options,
         headers: {
@@ -332,25 +320,11 @@ createApp({
         if (!response.ok) throw new Error('服务器读取失败');
         const payload = await response.json();
         const serverTasks = Array.isArray(payload.tasks) ? payload.tasks : [];
-        if (serverTasks.length === 0 && localStorage.getItem(LEGACY_MIGRATION_KEY) !== 'done') {
-          const legacyTasks = this.getLegacyTasks();
-          if (legacyTasks.length) {
-            this.tasks = legacyTasks;
-            await this.persistTasks();
-            localStorage.setItem(LEGACY_MIGRATION_KEY, 'done');
-            ElementPlus.ElMessage.success('已把旧浏览器本地任务迁移到服务器。');
-            return;
-          }
-        }
         this.tasks = serverTasks;
       } catch (error) {
         console.error('读取服务器任务失败：', error);
-        this.tasks = this.getLegacyTasks();
-        if (this.tasks.length) {
-          ElementPlus.ElMessage.warning('服务器暂时不可用，先加载了浏览器本地旧数据。');
-        } else {
-          ElementPlus.ElMessage.error('任务数据读取失败，请检查服务是否正常运行。');
-        }
+        this.tasks = [];
+        ElementPlus.ElMessage.error('任务数据读取失败，请检查服务是否正常运行。');
       }
     },
     async loadScheduleItems() {
@@ -390,6 +364,7 @@ createApp({
       }, {});
     },
     weekTemplateForDate(dateKey) {
+      // Template versions are append-only; the latest version before dateKey wins.
       const versions = [...this.scheduleTemplateVersions]
         .filter(version => version.effectiveFrom <= dateKey)
         .sort((a, b) => {
@@ -400,6 +375,7 @@ createApp({
       return this.normalizeWeekSlots(latest ? latest.slots : this.defaultWeekSlots);
     },
     slotsForDate(dateKey) {
+      // A single-day override always takes priority over the weekly template.
       if (this.scheduleDayOverrides[dateKey]) return this.cloneSlots(this.scheduleDayOverrides[dateKey]);
       const weekday = String(new Date(`${dateKey}T00:00:00`).getDay());
       return this.weekTemplateForDate(dateKey)[weekday] || [];
@@ -648,25 +624,11 @@ createApp({
         }
       }).catch(() => {});
     },
-    async persistTasks() {
-      if (!this.currentUser) throw new Error('请先登录后再保存');
-      const response = await fetch(TASKS_BULK_API, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json', ...this.authHeaders() },
-        body: JSON.stringify({ tasks: this.tasks })
-      });
-      if (!response.ok) {
-        const payload = await response.json().catch(() => ({}));
-        throw new Error(payload.error || '服务器保存失败');
-      }
-      localStorage.setItem(LEGACY_MIGRATION_KEY, 'done');
-    },
     async createTaskOnServer(task) {
       const payload = await this.apiJson(TASKS_API, {
         method: 'POST',
         body: JSON.stringify(task)
       });
-      localStorage.setItem(LEGACY_MIGRATION_KEY, 'done');
       return payload.task;
     },
     async updateTaskOnServer(taskId, task) {
@@ -674,12 +636,10 @@ createApp({
         method: 'PUT',
         body: JSON.stringify(task)
       });
-      localStorage.setItem(LEGACY_MIGRATION_KEY, 'done');
       return payload.task;
     },
     async deleteTaskOnServer(taskId) {
       await this.apiJson(`${TASKS_API}/${encodeURIComponent(taskId)}`, { method: 'DELETE' });
-      localStorage.setItem(LEGACY_MIGRATION_KEY, 'done');
     },
     compareTasks(a, b) {
       const aUnscheduled = !a.dueAt;
@@ -787,6 +747,7 @@ createApp({
       this.dialogVisible = true;
     },
     buildDueAt() {
+      // Empty dueAt means the task stays in the unscheduled/flexible pool.
       if (this.isCreatingArrangement) return '';
       if (this.form.unscheduled) return '';
       if (!this.form.date || !this.form.time) return null;
