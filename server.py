@@ -321,6 +321,7 @@ def normalize_slot_list(slots, path: str = 'slots'):
             return None, f'{path}[{index}] keyBase is duplicated'
         seen_keys.add(key_base)
         normalized.append({'keyBase': key_base, 'label': label[:40], 'start': start, 'end': end})
+    normalized.sort(key=lambda slot: (slot['start'], slot['end']))
     return normalized, None
 
 

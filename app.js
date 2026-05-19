@@ -394,9 +394,16 @@ createApp({
     },
     slotsForDate(dateKey) {
       // A single-day override always takes priority over the weekly template.
-      if (this.scheduleDayOverrides[dateKey]) return this.cloneSlots(this.scheduleDayOverrides[dateKey]);
+      if (this.scheduleDayOverrides[dateKey]) return this.sortSlots(this.cloneSlots(this.scheduleDayOverrides[dateKey]));
       const weekday = String(new Date(`${dateKey}T00:00:00`).getDay());
-      return this.weekTemplateForDate(dateKey)[weekday] || [];
+      return this.sortSlots(this.weekTemplateForDate(dateKey)[weekday] || []);
+    },
+    sortSlots(slots) {
+      return [...(slots || [])].sort((a, b) => {
+        const startDiff = String(a.start || '').localeCompare(String(b.start || ''));
+        if (startDiff !== 0) return startDiff;
+        return String(a.end || '').localeCompare(String(b.end || ''));
+      });
     },
     scheduleSlotKeyFromBase(date, keyBase) {
       return `${date}-${keyBase}`;
@@ -586,12 +593,17 @@ createApp({
       }
       try {
         if (this.slotEditorMode === 'day') {
+          this.slotEditorSlots = this.sortSlots(this.slotEditorSlots);
           await this.apiJson(`${SCHEDULE_DAY_SLOTS_API}/${this.slotEditorDate}`, {
             method: 'PUT',
             body: JSON.stringify({ slots: this.slotEditorSlots })
           });
           ElementPlus.ElMessage.success('当天时间格子已保存。');
         } else {
+          this.slotEditorWeekSlots = ['0', '1', '2', '3', '4', '5', '6'].reduce((week, key) => {
+            week[key] = this.sortSlots(this.slotEditorWeekSlots[key] || []);
+            return week;
+          }, {});
           await this.apiJson(SCHEDULE_TEMPLATE_API, {
             method: 'PUT',
             body: JSON.stringify({ effectiveFrom: this.slotEditorDate, slots: this.slotEditorWeekSlots })
