@@ -84,6 +84,7 @@ createApp({
       dialogMode: 'create',
       createDialogType: 'task',
       activeTaskId: null,
+      activeTaskPool: 'todo',
       currentViewDateKey: '',
       form: this.emptyForm(),
       dayRange: { past: 90, future: 90 },
@@ -117,17 +118,25 @@ createApp({
     },
     unscheduledTasks() {
       return this.filteredTasks
-        .filter(task => !task.dueAt)
+        .filter(task => !task.dueAt && this.taskPool(task) === 'todo')
         .sort((a, b) => this.compareTasks(a, b));
     },
+    arrangementTasks() {
+      return this.filteredTasks
+        .filter(task => !task.dueAt && this.taskPool(task) === 'arrangement')
+        .sort((a, b) => this.compareTasks(a, b));
+    },
+    activePoolTasks() {
+      return this.activePage === 'daily' ? this.arrangementTasks : this.unscheduledTasks;
+    },
     unscheduledCount() {
-      return this.unscheduledTasks.length;
+      return this.activePoolTasks.length;
     },
     unscheduledByPriority() {
       return ['high', 'medium', 'low'].map(priority => ({
         key: priority,
         label: PRIORITY_LABELS[priority],
-        tasks: this.unscheduledTasks.filter(task => task.priority === priority)
+        tasks: this.activePoolTasks.filter(task => task.priority === priority)
       }));
     },
     dayColumns() {
@@ -138,7 +147,7 @@ createApp({
       for (let date = new Date(start); date <= end; date = this.addDays(date, 1)) {
         const offset = this.daysBetween(base, date);
         const key = this.formatDateKey(date);
-        const tasks = this.filteredTasks.filter(task => task.dueAt && task.dueAt.startsWith(key));
+        const tasks = this.filteredTasks.filter(task => task.dueAt && this.taskPool(task) === 'todo' && task.dueAt.startsWith(key));
         days.push({
           key,
           label: this.formatDateLabel(date),
@@ -154,10 +163,13 @@ createApp({
       return source.trim().slice(0, 1).toUpperCase();
     },
     ddlTasks() {
-      return this.sortedTasks.filter(task => task.dueAt && !task.completed);
+      return this.sortedTasks.filter(task => task.dueAt && this.taskPool(task) === 'todo' && !task.completed);
     },
     isCreatingArrangement() {
       return this.dialogMode === 'create' && this.createDialogType === 'arrangement';
+    },
+    isArrangementDialog() {
+      return this.isCreatingArrangement || (this.dialogMode === 'edit' && this.activeTaskPool === 'arrangement');
     },
     scheduleItemsBySlot() {
       return this.scheduleItems.reduce((groups, item) => {
@@ -319,7 +331,7 @@ createApp({
         const response = await fetch(TASKS_API, { cache: 'no-store', headers: this.authHeaders() });
         if (!response.ok) throw new Error('服务器读取失败');
         const payload = await response.json();
-        const serverTasks = Array.isArray(payload.tasks) ? payload.tasks : [];
+        const serverTasks = Array.isArray(payload.tasks) ? payload.tasks.map(task => this.normalizeTaskPool(task)) : [];
         this.tasks = serverTasks;
       } catch (error) {
         console.error('读取服务器任务失败：', error);
@@ -355,6 +367,12 @@ createApp({
     },
     cloneSlots(value) {
       return JSON.parse(JSON.stringify(value || {}));
+    },
+    taskPool(task) {
+      return task && task.pool === 'arrangement' ? 'arrangement' : 'todo';
+    },
+    normalizeTaskPool(task) {
+      return { ...task, pool: task && task.pool === 'arrangement' ? 'arrangement' : 'todo' };
     },
     normalizeWeekSlots(value) {
       const source = value || {};
@@ -717,6 +735,7 @@ createApp({
       this.dialogMode = 'create';
       this.createDialogType = this.activePage === 'daily' ? 'arrangement' : 'task';
       this.activeTaskId = null;
+      this.activeTaskPool = this.createDialogType === 'arrangement' ? 'arrangement' : 'todo';
       this.form = this.emptyForm();
       if (this.createDialogType === 'arrangement') {
         this.form.unscheduled = true;
@@ -733,13 +752,14 @@ createApp({
       this.dialogMode = 'edit';
       this.createDialogType = 'task';
       this.activeTaskId = task.id;
+      this.activeTaskPool = this.taskPool(task);
       const due = task.dueAt ? new Date(task.dueAt) : new Date();
       this.form = {
         title: task.title,
         subject: task.subject || '',
         date: task.dueAt ? this.formatDateKey(due) : this.formatDateKey(new Date()),
         time: task.dueAt ? this.formatTime(due) : '23:59',
-        unscheduled: !task.dueAt,
+        unscheduled: this.taskPool(task) === 'arrangement' || !task.dueAt,
         priority: task.priority,
         note: task.note || '',
         completed: !!task.completed
@@ -748,7 +768,7 @@ createApp({
     },
     buildDueAt() {
       // Empty dueAt means the task stays in the unscheduled/flexible pool.
-      if (this.isCreatingArrangement) return '';
+      if (this.isArrangementDialog) return '';
       if (this.form.unscheduled) return '';
       if (!this.form.date || !this.form.time) return null;
       if (!this.isValidTimeText(this.form.time)) return null;
@@ -759,7 +779,7 @@ createApp({
         ElementPlus.ElMessage.warning('请先登录或注册，再保存任务。');
         return;
       }
-      if (this.isCreatingArrangement) {
+      if (this.isArrangementDialog) {
         this.form.unscheduled = true;
         this.form.date = '';
         this.form.time = '';
@@ -776,11 +796,12 @@ createApp({
         title,
         subject,
         dueAt,
+        pool: this.isArrangementDialog ? 'arrangement' : 'todo',
         priority: this.form.priority,
         note: this.form.note.trim(),
         completed: !!this.form.completed
       };
-      if (this.isCreatingArrangement) payload.dueAt = '';
+      if (this.isArrangementDialog) payload.dueAt = '';
 
       try {
         if (this.dialogMode === 'create') {

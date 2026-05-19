@@ -116,6 +116,7 @@ def init_db() -> None:
                 title TEXT NOT NULL,
                 subject TEXT NOT NULL DEFAULT '',
                 due_at TEXT NOT NULL,
+                pool TEXT NOT NULL DEFAULT 'todo',
                 priority TEXT NOT NULL,
                 note TEXT NOT NULL DEFAULT '',
                 completed INTEGER NOT NULL DEFAULT 0,
@@ -177,7 +178,10 @@ def init_db() -> None:
             conn.execute("ALTER TABLE tasks ADD COLUMN subject TEXT NOT NULL DEFAULT ''")
         if 'user_id' not in task_columns:
             conn.execute('ALTER TABLE tasks ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1')
+        if 'pool' not in task_columns:
+            conn.execute("ALTER TABLE tasks ADD COLUMN pool TEXT NOT NULL DEFAULT 'todo'")
         conn.execute('UPDATE tasks SET user_id = 1 WHERE user_id IS NULL OR user_id = 0')
+        conn.execute("UPDATE tasks SET pool = 'todo' WHERE pool IS NULL OR pool = ''")
         conn.commit()
 
 
@@ -223,6 +227,7 @@ def normalize_task(task: dict, user_id: int) -> dict:
         'title': str(task.get('title', '')).strip(),
         'subject': str(task.get('subject', '')).strip(),
         'dueAt': str(task.get('dueAt', '')).strip(),
+        'pool': str(task.get('pool', 'todo')).strip() or 'todo',
         'priority': str(task.get('priority', 'medium')).strip() or 'medium',
         'note': str(task.get('note', '') or ''),
         'completed': bool(task.get('completed', False)),
@@ -238,6 +243,7 @@ def public_task(row: sqlite3.Row) -> dict:
         'title': row['title'],
         'subject': row['subject'],
         'dueAt': row['due_at'],
+        'pool': row['pool'],
         'priority': row['priority'],
         'note': row['note'],
         'completed': bool(row['completed']),
@@ -422,6 +428,7 @@ def public_schedule_item(row: sqlite3.Row) -> dict:
             'title': row['task_title'],
             'subject': row['task_subject'],
             'dueAt': row['task_due_at'],
+            'pool': row['task_pool'],
             'priority': row['task_priority'],
         },
     }
@@ -527,7 +534,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
         with get_db() as conn:
             rows = conn.execute(
                 '''
-                SELECT id, user_id, title, subject, due_at, priority, note, completed, created_at, updated_at
+                SELECT id, user_id, title, subject, due_at, pool, priority, note, completed, created_at, updated_at
                 FROM tasks
                 WHERE user_id = ?
                 ORDER BY due_at ASC, CASE priority
@@ -551,6 +558,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return None, {'error': 'task title is required'}
         if task['priority'] not in {'high', 'medium', 'low'}:
             return None, {'error': 'invalid priority'}
+        if task['pool'] not in {'todo', 'arrangement'}:
+            return None, {'error': 'invalid task pool'}
         now = now_iso()
         if not task['createdAt']:
             task['createdAt'] = now
@@ -572,11 +581,11 @@ class TodoHandler(SimpleHTTPRequestHandler):
             try:
                 conn.execute(
                     '''
-                    INSERT INTO tasks (id, user_id, title, subject, due_at, priority, note, completed, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO tasks (id, user_id, title, subject, due_at, pool, priority, note, completed, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ''',
                     (
-                        task['id'], task['userId'], task['title'], task['subject'], task['dueAt'],
+                        task['id'], task['userId'], task['title'], task['subject'], task['dueAt'], task['pool'],
                         task['priority'], task['note'], 1 if task['completed'] else 0,
                         task['createdAt'], task['updatedAt'],
                     ),
@@ -585,7 +594,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
             except sqlite3.IntegrityError:
                 return self.write_json({'error': 'task id already exists'}, status=HTTPStatus.CONFLICT)
             row = conn.execute(
-                'SELECT id, user_id, title, subject, due_at, priority, note, completed, created_at, updated_at FROM tasks WHERE id = ? AND user_id = ?',
+                'SELECT id, user_id, title, subject, due_at, pool, priority, note, completed, created_at, updated_at FROM tasks WHERE id = ? AND user_id = ?',
                 (task['id'], user['id']),
             ).fetchone()
         return self.write_json({'ok': True, 'task': public_task(row)}, status=HTTPStatus.CREATED)
@@ -608,17 +617,17 @@ class TodoHandler(SimpleHTTPRequestHandler):
             conn.execute(
                 '''
                 UPDATE tasks
-                SET title = ?, subject = ?, due_at = ?, priority = ?, note = ?, completed = ?, updated_at = ?
+                SET title = ?, subject = ?, due_at = ?, pool = ?, priority = ?, note = ?, completed = ?, updated_at = ?
                 WHERE id = ? AND user_id = ?
                 ''',
                 (
-                    task['title'], task['subject'], task['dueAt'], task['priority'], task['note'],
+                    task['title'], task['subject'], task['dueAt'], task['pool'], task['priority'], task['note'],
                     1 if task['completed'] else 0, task['updatedAt'], task_id, user['id'],
                 ),
             )
             conn.commit()
             row = conn.execute(
-                'SELECT id, user_id, title, subject, due_at, priority, note, completed, created_at, updated_at FROM tasks WHERE id = ? AND user_id = ?',
+                'SELECT id, user_id, title, subject, due_at, pool, priority, note, completed, created_at, updated_at FROM tasks WHERE id = ? AND user_id = ?',
                 (task_id, user['id']),
             ).fetchone()
         return self.write_json({'ok': True, 'task': public_task(row)})
@@ -644,7 +653,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
             rows = conn.execute(
                 """
                 SELECT schedule_items.*, tasks.title AS task_title, tasks.subject AS task_subject,
-                       tasks.due_at AS task_due_at, tasks.priority AS task_priority
+                       tasks.due_at AS task_due_at, tasks.pool AS task_pool, tasks.priority AS task_priority
                 FROM schedule_items
                 JOIN tasks ON tasks.id = schedule_items.task_id AND tasks.user_id = schedule_items.user_id
                 WHERE schedule_items.user_id = ?

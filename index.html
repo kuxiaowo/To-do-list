@@ -286,7 +286,7 @@
           <el-input v-model="form.subject" placeholder="例如：数学 / 物理 / 英语" maxlength="30" show-word-limit></el-input>
         </el-form-item>
 
-        <el-form-item v-if="isCreatingArrangement" label="时间安排">
+        <el-form-item v-if="isArrangementDialog" label="时间安排">
           <el-tag type="info" effect="plain">放入弹性任务池</el-tag>
         </el-form-item>
 
@@ -294,7 +294,7 @@
           <el-switch v-model="form.unscheduled" :active-text="activePage === 'daily' ? '先放入弹性任务池' : '先放入未排期待办池'" inactive-text="设置截止时间"></el-switch>
         </el-form-item>
 
-        <el-form-item label="截止日期" v-if="!isCreatingArrangement && !form.unscheduled">
+        <el-form-item label="截止日期" v-if="!isArrangementDialog && !form.unscheduled">
           <el-date-picker
             v-model="form.date"
             type="date"
@@ -304,7 +304,7 @@
           ></el-date-picker>
         </el-form-item>
 
-        <el-form-item label="截止时间" v-if="!isCreatingArrangement && !form.unscheduled">
+        <el-form-item label="截止时间" v-if="!isArrangementDialog && !form.unscheduled">
           <el-input v-model="form.time" placeholder="例如：23:59" maxlength="5"></el-input>
         </el-form-item>
 
@@ -423,7 +423,7 @@
 
   <script src="./vendor/vue.global.prod.js"></script>
   <script src="./vendor/element-plus.full.min.js"></script>
-  <script src="./app.js?v=arrangement-pool-20260518"></script>
+  <script src="./app.js?v=separate-pools-20260519"></script>
 </body>
 </html>
 
