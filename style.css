@@ -760,14 +760,151 @@ body {
 .ddl-card.priority-medium { border-left-color: var(--warning); }
 .ddl-card.priority-low { border-left-color: var(--success); }
 
+.admin-shell {
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr);
+  min-height: 100vh;
+  gap: 18px;
+  padding: 20px;
+}
+
+.admin-sidebar,
+.admin-panel {
+  background: rgba(var(--panel-rgb), 0.94);
+  border: 1px solid var(--panel-border);
+  box-shadow: var(--shadow);
+}
+
+.admin-sidebar {
+  position: sticky;
+  top: 20px;
+  align-self: start;
+  min-height: calc(100vh - 40px);
+  border-radius: 22px;
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.admin-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.admin-nav-button {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  color: var(--text);
+  padding: 11px 12px;
+  text-align: left;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.admin-nav-button.active {
+  background: var(--brand-soft);
+  border-color: var(--brand-line);
+  color: var(--brand);
+}
+
+.admin-sidebar-footer {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.admin-main,
+.admin-timeline {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.admin-panel {
+  border-radius: 22px;
+  padding: 18px;
+}
+
+.admin-panel-header,
+.admin-timeline-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.admin-panel h2,
+.admin-timeline-toolbar h2 {
+  margin: 0;
+  font-size: 1.2rem;
+}
+
+.admin-panel p,
+.admin-timeline-toolbar p {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
+.admin-selector-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin: 0 0 14px;
+}
+
+.admin-timeline-toolbar .admin-selector-row {
+  margin: 0;
+}
+
+.admin-pagination {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 14px;
+}
+
+.admin-readonly-board {
+  padding: 0;
+  min-height: 0;
+  grid-template-columns: 300px minmax(0, 1fr);
+}
+
+.admin-readonly-board .summary-panel {
+  top: 20px;
+}
+
+.admin-readonly-board .summary-task,
+.admin-readonly-board .task-card,
+.admin-readonly-board .schedule-card,
+.admin-readonly-board .ddl-card {
+  cursor: default;
+}
+
 @media (max-width: 1100px) {
   .app-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-shell,
+  .admin-readonly-board {
     grid-template-columns: 1fr;
   }
 
   .summary-panel {
     position: static;
     max-height: none;
+  }
+
+  .admin-sidebar {
+    position: static;
+    min-height: auto;
   }
 
   .timeline-columns {
@@ -782,6 +919,11 @@ body {
   }
 
   .app-shell {
+    padding: 12px;
+    gap: 12px;
+  }
+
+  .admin-shell {
     padding: 12px;
     gap: 12px;
   }

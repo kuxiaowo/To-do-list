@@ -11,11 +11,11 @@
       document.documentElement.dataset.theme = savedTheme === 'dark' ? 'dark' : 'light';
     })();
   </script>
-  <link rel="stylesheet" href="./style.css?v=display-clamp-20260519" />
+  <link rel="stylesheet" href="./style.css?v=admin-backstage-20260520" />
 </head>
 <body>
   <div id="app" v-cloak>
-    <div class="app-shell">
+    <div v-if="!adminMode" class="app-shell">
       <aside class="summary-panel">
         <div class="summary-header">
           <div>
@@ -118,6 +118,7 @@
                 </div>
 
                 <div v-if="currentUser" class="auth-form">
+                  <el-button v-if="isAdmin" type="primary" plain @click="openAdminMode('users')">进入管理员后台</el-button>
                   <el-button plain @click="logout">退出账号，重新登录</el-button>
                 </div>
 
@@ -268,6 +269,254 @@
             <div v-else class="empty-column">暂无带 DDL 时间的任务。</div>
           </div>
         </div>
+      </main>
+    </div>
+
+    <div v-else class="admin-shell">
+      <aside class="admin-sidebar">
+        <div>
+          <h1 class="summary-title">管理员后台</h1>
+          <p class="summary-subtitle">按用户查看列表、日志、DDL 时间线和每日安排。</p>
+        </div>
+        <nav class="admin-nav">
+          <button class="admin-nav-button" :class="{ active: adminSection === 'users' }" type="button" @click="switchAdminSection('users')">用户列表</button>
+          <button class="admin-nav-button" :class="{ active: adminSection === 'logs' }" type="button" @click="switchAdminSection('logs')">用户日志</button>
+          <button class="admin-nav-button" :class="{ active: adminSection === 'timeline' }" type="button" @click="switchAdminSection('timeline')">用户时间表</button>
+        </nav>
+        <div class="admin-sidebar-footer">
+          <div class="auth-status">当前管理员：{{ currentUser ? currentUser.nickname : '' }}</div>
+          <el-button plain @click="exitAdminMode">返回主页</el-button>
+        </div>
+      </aside>
+
+      <main class="admin-main" v-loading="adminLoading">
+        <section v-if="adminSection === 'users'" class="admin-panel">
+          <div class="admin-panel-header">
+            <div>
+              <h2>用户列表</h2>
+              <p>查看所有用户的任务数量、每日安排数量和最近活动。</p>
+            </div>
+            <el-button plain @click="loadAdminUsers">刷新</el-button>
+          </div>
+          <el-table :data="adminUsers" style="width: 100%;">
+            <el-table-column prop="id" label="ID" width="80"></el-table-column>
+            <el-table-column prop="name" label="姓名" min-width="120"></el-table-column>
+            <el-table-column prop="nickname" label="昵称" min-width="130"></el-table-column>
+            <el-table-column prop="role" label="角色" width="100"></el-table-column>
+            <el-table-column prop="taskCount" label="任务" width="90"></el-table-column>
+            <el-table-column prop="scheduleItemCount" label="每日安排" width="110"></el-table-column>
+            <el-table-column label="最近登录" min-width="160">
+              <template #default="{ row }">{{ formatDateTime(row.lastLoginAt) }}</template>
+            </el-table-column>
+            <el-table-column label="最近操作" min-width="160">
+              <template #default="{ row }">{{ formatDateTime(row.lastOperationAt) }}</template>
+            </el-table-column>
+          </el-table>
+        </section>
+
+        <section v-else-if="adminSection === 'logs'" class="admin-panel">
+          <div class="admin-panel-header">
+            <div>
+              <h2>用户日志</h2>
+              <p>先选择用户，再查看该用户的登录、任务和每日安排操作记录。</p>
+            </div>
+          </div>
+          <div class="admin-selector-row">
+            <el-select v-model="adminSelectedUserId" filterable placeholder="选择用户" style="width: min(420px, 100%);" @change="handleAdminUserChange">
+              <el-option v-for="user in adminUserOptions" :key="user.id" :label="user.label" :value="String(user.id)"></el-option>
+            </el-select>
+            <el-button plain :disabled="!adminSelectedUserId" @click="loadAdminLogs(1)">刷新日志</el-button>
+          </div>
+          <el-table :data="adminLogs" style="width: 100%;">
+            <el-table-column label="时间" min-width="160">
+              <template #default="{ row }">{{ formatDateTime(row.createdAt) }}</template>
+            </el-table-column>
+            <el-table-column label="操作" min-width="140">
+              <template #default="{ row }">{{ adminActionLabel(row.action) }}</template>
+            </el-table-column>
+            <el-table-column prop="entityType" label="对象" width="120"></el-table-column>
+            <el-table-column prop="entityId" label="对象 ID" min-width="180"></el-table-column>
+            <el-table-column label="详情" min-width="260">
+              <template #default="{ row }">{{ adminLogDetail(row) || '—' }}</template>
+            </el-table-column>
+            <el-table-column prop="ip" label="IP" width="140"></el-table-column>
+          </el-table>
+          <div class="admin-pagination">
+            <el-pagination
+              background
+              layout="prev, pager, next, total"
+              :total="adminLogsTotal"
+              :page-size="adminLogsPageSize"
+              :current-page="adminLogsPage"
+              @current-change="loadAdminLogs"
+            ></el-pagination>
+          </div>
+        </section>
+
+        <section v-else class="admin-timeline">
+          <div class="admin-panel">
+            <div class="admin-panel-header">
+              <div>
+                <h2>用户时间表</h2>
+                <p>先选择用户，再按主页标准格式只读查看 DDL 时间线和每日安排。</p>
+              </div>
+            </div>
+            <div class="admin-selector-row">
+              <el-select v-model="adminSelectedUserId" filterable placeholder="选择用户" style="width: min(420px, 100%);" @change="handleAdminUserChange">
+                <el-option v-for="user in adminUserOptions" :key="user.id" :label="user.label" :value="String(user.id)"></el-option>
+              </el-select>
+              <el-button plain :disabled="!adminSelectedUserId" @click="loadAdminTimeline">刷新时间表</el-button>
+            </div>
+          </div>
+
+          <div class="app-shell admin-readonly-board" v-if="selectedAdminUser">
+            <aside class="summary-panel">
+              <div class="summary-header">
+                <div>
+                  <h1 class="summary-title">{{ selectedAdminUser.name }}</h1>
+                  <p class="summary-subtitle">{{ selectedAdminUser.nickname }} 的只读任务池。</p>
+                </div>
+              </div>
+              <div class="toolbar">
+                <div class="toolbar-row">
+                  <el-switch v-model="showCompleted" active-text="显示已完成" inactive-text="隐藏已完成"></el-switch>
+                </div>
+                <div class="toolbar-row">
+                  <el-button plain @click="scrollToToday">定位今天</el-button>
+                  <el-button plain @click="jumpToOffset(-7)">前一周</el-button>
+                  <el-button plain @click="jumpToOffset(7)">后一周</el-button>
+                </div>
+              </div>
+              <section class="summary-section">
+                <h3>
+                  <span>{{ activePage === 'daily' ? '弹性任务池' : '未排期待办池' }}</span>
+                  <span class="day-subtitle">{{ unscheduledCount }} 项</span>
+                </h3>
+                <div v-for="group in unscheduledByPriority" :key="group.key" class="summary-card">
+                  <div class="summary-card-header">
+                    <div class="summary-card-title">{{ group.label }}</div>
+                    <span class="day-subtitle">{{ group.tasks.length }} 项</span>
+                  </div>
+                  <div v-if="group.tasks.length">
+                    <div v-for="task in group.tasks" :key="task.id" class="summary-task">
+                      <div class="task-main">
+                        <div style="min-width: 0; flex: 1;">
+                          <div class="task-title">{{ task.title }}</div>
+                          <div class="task-meta">
+                            <span v-if="task.subject" class="meta-chip subject-chip">{{ task.subject }}</span>
+                            <span>{{ priorityLabel(task.priority) }}</span>
+                            <span v-if="task.completed" class="meta-chip completed-badge">已完成</span>
+                          </div>
+                          <div v-if="task.note" class="task-note-preview">{{ task.note }}</div>
+                        </div>
+                        <div class="priority-dot" :class="priorityClass(task.priority)"></div>
+                      </div>
+                    </div>
+                  </div>
+                  <div v-else class="summary-empty">这一档暂无任务。</div>
+                </div>
+              </section>
+            </aside>
+
+            <main class="timeline-area">
+              <div class="timeline-header">
+                <div class="timeline-title">
+                  <div class="page-nav">
+                    <button class="page-nav-button" :class="{ active: activePage === 'ddl' }" type="button" @click="switchPage('ddl')">DDL日期时间线</button>
+                    <button class="page-nav-button" :class="{ active: activePage === 'daily' }" type="button" @click="switchPage('daily')">每日安排</button>
+                  </div>
+                  <p>只读查看 {{ selectedAdminUser.name }} 的时间表。</p>
+                </div>
+                <div class="toolbar-row priority-tags">
+                  <el-tag type="danger">高优先级</el-tag>
+                  <el-tag type="warning">中优先级</el-tag>
+                  <el-tag type="success">低优先级</el-tag>
+                </div>
+              </div>
+
+              <div v-if="activePage === 'ddl'" class="timeline-scroll" ref="timelineScroll">
+                <div class="timeline-columns">
+                  <section v-for="day in dayColumns" :key="day.key" class="day-column" :data-day="day.key">
+                    <div class="day-header">
+                      <div class="day-label">{{ day.label }}</div>
+                      <div class="day-subtitle">{{ day.subtitle }}</div>
+                    </div>
+                    <div class="column-task-list" v-if="day.tasks.length">
+                      <article v-for="task in day.tasks" :key="task.id" class="task-card" :class="[priorityClass(task.priority), { completed: task.completed }]">
+                        <div class="task-title">{{ task.title }}</div>
+                        <div class="task-meta">
+                          <span class="task-time">{{ formatTime(task.dueAt) }}</span>
+                          <span v-if="task.subject" class="meta-chip subject-chip">{{ task.subject }}</span>
+                          <span v-if="task.completed" class="meta-chip completed-badge">已完成</span>
+                        </div>
+                        <div v-if="task.note" class="task-note-preview">{{ task.note }}</div>
+                      </article>
+                    </div>
+                    <div v-else class="empty-column">这一天暂无任务。</div>
+                  </section>
+                </div>
+              </div>
+
+              <div v-else class="daily-board">
+                <div class="daily-tools">
+                  <div>
+                    <div class="daily-tools-title">时间格子</div>
+                    <div class="daily-tools-subtitle">后台只读展示模板和单日自定义。</div>
+                  </div>
+                  <el-tag type="info" effect="plain">只读</el-tag>
+                </div>
+                <div class="timeline-scroll" ref="dailyScroll">
+                  <div class="timeline-columns">
+                    <section v-for="day in scheduleDayColumns" :key="day.key" class="day-column" :data-day="day.key">
+                      <div class="day-header">
+                        <div>
+                          <div class="day-label">{{ day.label }}</div>
+                          <div class="day-subtitle">{{ day.subtitle }}<span v-if="day.hasOverride"> · 单日自定义</span></div>
+                        </div>
+                      </div>
+                      <div v-for="slot in day.slots" :key="slot.key" class="schedule-slot">
+                        <div class="slot-header">
+                          <div>
+                            <div class="slot-title">{{ slot.label }}</div>
+                            <div class="slot-time">{{ slot.start }} - {{ slot.end }}</div>
+                          </div>
+                          <div class="slot-capacity">{{ slotUsedMinutes(day.key, slot.key) }} / {{ slot.duration }} 分钟</div>
+                        </div>
+                        <article v-for="item in scheduleItemsForSlot(day.key, slot.key)" :key="item.id" class="schedule-card" :class="[priorityClass(item.task.priority), { completed: item.completed }]">
+                          <div class="task-title">{{ item.task.title }}</div>
+                          <div class="task-meta">
+                            <span v-if="item.task.subject" class="meta-chip subject-chip">{{ item.task.subject }}</span>
+                            <span>{{ item.durationMinutes }} 分钟</span>
+                          </div>
+                          <div v-if="item.note" class="task-note-preview">{{ item.note }}</div>
+                          <span v-if="item.completed" class="schedule-check">✓</span>
+                        </article>
+                      </div>
+                    </section>
+                  </div>
+                </div>
+                <div class="ddl-dock">
+                  <div class="ddl-dock-header">
+                    <div class="card-title">按时间排序的 DDL</div>
+                    <span class="day-subtitle">后台只读</span>
+                  </div>
+                  <div class="ddl-list" v-if="ddlTasks.length">
+                    <article v-for="task in ddlTasks" :key="task.id" class="ddl-card" :class="priorityClass(task.priority)">
+                      <div class="task-title">{{ task.title }}</div>
+                      <div class="task-meta">
+                        <span v-if="task.subject" class="meta-chip subject-chip">{{ task.subject }}</span>
+                        <span>{{ formatDateLabel(task.dueAt) }} {{ formatTime(task.dueAt) }}</span>
+                      </div>
+                      <div v-if="task.note" class="task-note-preview">{{ task.note }}</div>
+                    </article>
+                  </div>
+                  <div v-else class="empty-column">暂无带 DDL 时间的任务。</div>
+                </div>
+              </div>
+            </main>
+          </div>
+          <div v-else class="admin-panel empty-column">请选择用户。</div>
+        </section>
       </main>
     </div>
 
@@ -423,7 +672,7 @@
 
   <script src="./vendor/vue.global.prod.js"></script>
   <script src="./vendor/element-plus.full.min.js"></script>
-  <script src="./app.js?v=separate-pools-20260519"></script>
+  <script src="./app.js?v=admin-backstage-20260520"></script>
 </body>
 </html>
 

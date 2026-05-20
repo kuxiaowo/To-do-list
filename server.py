@@ -12,7 +12,7 @@ import time
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / 'data'
@@ -170,6 +170,23 @@ def init_db() -> None:
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY(user_id, schedule_date),
                 FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            '''
+        )
+        conn.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS operation_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                actor_user_id INTEGER,
+                target_user_id INTEGER NOT NULL,
+                action TEXT NOT NULL,
+                entity_type TEXT NOT NULL,
+                entity_id TEXT,
+                detail_json TEXT NOT NULL DEFAULT '{}',
+                ip TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(actor_user_id) REFERENCES users(id) ON DELETE SET NULL,
+                FOREIGN KEY(target_user_id) REFERENCES users(id) ON DELETE CASCADE
             )
             '''
         )
@@ -445,12 +462,32 @@ def public_schedule_item(row: sqlite3.Row) -> dict:
     }
 
 
+def public_operation_log(row: sqlite3.Row) -> dict:
+    try:
+        detail = json.loads(row['detail_json'] or '{}')
+    except json.JSONDecodeError:
+        detail = {}
+    return {
+        'id': row['id'],
+        'actorUserId': row['actor_user_id'],
+        'targetUserId': row['target_user_id'],
+        'action': row['action'],
+        'entityType': row['entity_type'],
+        'entityId': row['entity_id'],
+        'detail': detail,
+        'ip': row['ip'],
+        'createdAt': row['created_at'],
+    }
+
+
 class TodoHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(BASE_DIR), **kwargs)
 
     def do_GET(self):
         path = urlparse(self.path).path
+        if path.startswith('/api/admin/'):
+            return self.handle_admin_get(path)
         if path == '/api/tasks':
             return self.handle_list_tasks()
         if path == '/api/schedule-items':
@@ -537,26 +574,236 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return None
         return user
 
+    def require_admin(self):
+        user = self.require_user()
+        if not user:
+            return None
+        if user['role'] != 'admin':
+            self.write_json({'error': 'admin required'}, status=HTTPStatus.FORBIDDEN)
+            return None
+        return user
+
+    def log_operation(
+        self,
+        conn: sqlite3.Connection,
+        actor_user_id: int | None,
+        target_user_id: int,
+        action: str,
+        entity_type: str,
+        entity_id: str | None = None,
+        detail: dict | None = None,
+    ) -> None:
+        conn.execute(
+            '''
+            INSERT INTO operation_logs
+            (actor_user_id, target_user_id, action, entity_type, entity_id, detail_json, ip, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''',
+            (
+                actor_user_id,
+                target_user_id,
+                action,
+                entity_type,
+                entity_id,
+                json.dumps(detail or {}, ensure_ascii=False),
+                self.client_address[0] if self.client_address else '',
+                now_iso(),
+            ),
+        )
+
+    def fetch_tasks_for_user(self, conn: sqlite3.Connection, user_id: int) -> list[dict]:
+        rows = conn.execute(
+            '''
+            SELECT id, user_id, title, subject, due_at, pool, priority, note, completed, created_at, updated_at
+            FROM tasks
+            WHERE user_id = ?
+            ORDER BY due_at ASC, CASE priority
+                WHEN 'high' THEN 0
+                WHEN 'medium' THEN 1
+                ELSE 2
+            END ASC, title COLLATE NOCASE ASC
+            ''',
+            (user_id,),
+        ).fetchall()
+        return [public_task(row) for row in rows]
+
+    def fetch_schedule_items_for_user(self, conn: sqlite3.Connection, user_id: int) -> list[dict]:
+        rows = conn.execute(
+            """
+            SELECT schedule_items.*, tasks.title AS task_title, tasks.subject AS task_subject,
+                   tasks.due_at AS task_due_at, tasks.pool AS task_pool, tasks.priority AS task_priority
+            FROM schedule_items
+            JOIN tasks ON tasks.id = schedule_items.task_id AND tasks.user_id = schedule_items.user_id
+            WHERE schedule_items.user_id = ?
+            ORDER BY schedule_items.schedule_date ASC, schedule_items.slot_start ASC, schedule_items.created_at ASC
+            """,
+            (user_id,),
+        ).fetchall()
+        return [public_schedule_item(row) for row in rows]
+
+    def fetch_schedule_config_for_user(self, conn: sqlite3.Connection, user_id: int) -> dict:
+        versions = conn.execute(
+            '''
+            SELECT id, effective_from, slots_json, created_at, updated_at
+            FROM schedule_template_versions
+            WHERE user_id = ?
+            ORDER BY effective_from ASC, id ASC
+            ''',
+            (user_id,),
+        ).fetchall()
+        overrides = conn.execute(
+            '''
+            SELECT schedule_date, slots_json
+            FROM schedule_day_overrides
+            WHERE user_id = ?
+            ORDER BY schedule_date ASC
+            ''',
+            (user_id,),
+        ).fetchall()
+        return {
+            'defaultWeekSlots': DEFAULT_WEEK_SLOTS,
+            'templateVersions': [
+                {
+                    'id': row['id'],
+                    'effectiveFrom': row['effective_from'],
+                    'slots': parse_slots_json(row['slots_json']) or DEFAULT_WEEK_SLOTS,
+                    'createdAt': row['created_at'],
+                    'updatedAt': row['updated_at'],
+                }
+                for row in versions
+            ],
+            'dayOverrides': {
+                row['schedule_date']: json.loads(row['slots_json'])
+                for row in overrides
+            },
+            'readOnly': False,
+        }
+
+    def handle_admin_get(self, path: str):
+        admin = self.require_admin()
+        if not admin:
+            return
+        parts = path.strip('/').split('/')
+        if parts == ['api', 'admin', 'users']:
+            return self.handle_admin_users()
+        if len(parts) == 5 and parts[:3] == ['api', 'admin', 'users']:
+            try:
+                target_user_id = int(parts[3])
+            except ValueError:
+                return self.write_json({'error': 'invalid user id'}, status=HTTPStatus.BAD_REQUEST)
+            if parts[4] == 'tasks':
+                return self.handle_admin_user_tasks(target_user_id)
+            if parts[4] == 'schedule-items':
+                return self.handle_admin_user_schedule_items(target_user_id)
+            if parts[4] == 'schedule-config':
+                return self.handle_admin_user_schedule_config(target_user_id)
+            if parts[4] == 'logs':
+                return self.handle_admin_user_logs(target_user_id)
+        return self.write_json({'error': 'not found'}, status=HTTPStatus.NOT_FOUND)
+
+    def ensure_user_exists(self, conn: sqlite3.Connection, user_id: int):
+        row = conn.execute('SELECT id, name, nickname, role, created_at FROM users WHERE id = ?', (user_id,)).fetchone()
+        return row
+
+    def handle_admin_users(self):
+        with get_db() as conn:
+            rows = conn.execute(
+                '''
+                SELECT users.id, users.name, users.nickname, users.role, users.created_at,
+                       COUNT(DISTINCT tasks.id) AS task_count,
+                       COUNT(DISTINCT schedule_items.id) AS schedule_item_count,
+                       MAX(operation_logs.created_at) AS last_operation_at,
+                       MAX(CASE WHEN operation_logs.action = 'auth.login' THEN operation_logs.created_at END) AS last_login_at
+                FROM users
+                LEFT JOIN tasks ON tasks.user_id = users.id
+                LEFT JOIN schedule_items ON schedule_items.user_id = users.id
+                LEFT JOIN operation_logs ON operation_logs.target_user_id = users.id
+                GROUP BY users.id
+                ORDER BY users.created_at DESC, users.id DESC
+                '''
+            ).fetchall()
+        return self.write_json({
+            'users': [
+                {
+                    'id': row['id'],
+                    'name': row['name'],
+                    'nickname': row['nickname'],
+                    'role': row['role'],
+                    'createdAt': row['created_at'],
+                    'taskCount': row['task_count'],
+                    'scheduleItemCount': row['schedule_item_count'],
+                    'lastOperationAt': row['last_operation_at'],
+                    'lastLoginAt': row['last_login_at'],
+                }
+                for row in rows
+            ]
+        })
+
+    def handle_admin_user_tasks(self, user_id: int):
+        with get_db() as conn:
+            user = self.ensure_user_exists(conn, user_id)
+            if not user:
+                return self.write_json({'error': 'user not found'}, status=HTTPStatus.NOT_FOUND)
+            tasks = self.fetch_tasks_for_user(conn, user_id)
+        return self.write_json({'tasks': tasks, 'readOnly': True, 'user': public_user(user)})
+
+    def handle_admin_user_schedule_items(self, user_id: int):
+        with get_db() as conn:
+            user = self.ensure_user_exists(conn, user_id)
+            if not user:
+                return self.write_json({'error': 'user not found'}, status=HTTPStatus.NOT_FOUND)
+            items = self.fetch_schedule_items_for_user(conn, user_id)
+        return self.write_json({'items': items, 'readOnly': True, 'user': public_user(user)})
+
+    def handle_admin_user_schedule_config(self, user_id: int):
+        with get_db() as conn:
+            user = self.ensure_user_exists(conn, user_id)
+            if not user:
+                return self.write_json({'error': 'user not found'}, status=HTTPStatus.NOT_FOUND)
+            config = self.fetch_schedule_config_for_user(conn, user_id)
+        return self.write_json({**config, 'readOnly': True, 'user': public_user(user)})
+
+    def handle_admin_user_logs(self, user_id: int):
+        query = parse_qs(urlparse(self.path).query)
+        try:
+            page = max(1, int(query.get('page', ['1'])[0]))
+            page_size = min(100, max(1, int(query.get('pageSize', ['50'])[0])))
+        except ValueError:
+            return self.write_json({'error': 'invalid pagination'}, status=HTTPStatus.BAD_REQUEST)
+        offset = (page - 1) * page_size
+        with get_db() as conn:
+            user = self.ensure_user_exists(conn, user_id)
+            if not user:
+                return self.write_json({'error': 'user not found'}, status=HTTPStatus.NOT_FOUND)
+            total = conn.execute(
+                'SELECT COUNT(*) FROM operation_logs WHERE target_user_id = ?',
+                (user_id,),
+            ).fetchone()[0]
+            rows = conn.execute(
+                '''
+                SELECT id, actor_user_id, target_user_id, action, entity_type, entity_id, detail_json, ip, created_at
+                FROM operation_logs
+                WHERE target_user_id = ?
+                ORDER BY created_at DESC, id DESC
+                LIMIT ? OFFSET ?
+                ''',
+                (user_id, page_size, offset),
+            ).fetchall()
+        return self.write_json({
+            'logs': [public_operation_log(row) for row in rows],
+            'total': total,
+            'page': page,
+            'pageSize': page_size,
+            'user': public_user(user),
+        })
+
     def handle_list_tasks(self):
         user = self.current_user()
         if not user:
             return self.write_json({'tasks': [], 'readOnly': True})
 
         with get_db() as conn:
-            rows = conn.execute(
-                '''
-                SELECT id, user_id, title, subject, due_at, pool, priority, note, completed, created_at, updated_at
-                FROM tasks
-                WHERE user_id = ?
-                ORDER BY due_at ASC, CASE priority
-                    WHEN 'high' THEN 0
-                    WHEN 'medium' THEN 1
-                    ELSE 2
-                END ASC, title COLLATE NOCASE ASC
-                ''',
-                (user['id'],),
-            ).fetchall()
-        tasks = [public_task(row) for row in rows]
+            tasks = self.fetch_tasks_for_user(conn, int(user['id']))
         return self.write_json({'tasks': tasks, 'readOnly': False, 'user': public_user(user)})
 
     def validate_task_payload(self, payload: dict, user_id: int, task_id: str | None = None):
@@ -601,6 +848,15 @@ class TodoHandler(SimpleHTTPRequestHandler):
                         task['createdAt'], task['updatedAt'],
                     ),
                 )
+                self.log_operation(
+                    conn,
+                    int(user['id']),
+                    int(user['id']),
+                    'task.create',
+                    'task',
+                    task['id'],
+                    {'title': task['title'], 'pool': task['pool'], 'dueAt': task['dueAt']},
+                )
                 conn.commit()
             except sqlite3.IntegrityError:
                 return self.write_json({'error': 'task id already exists'}, status=HTTPStatus.CONFLICT)
@@ -622,7 +878,10 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return self.write_json(error, status=HTTPStatus.BAD_REQUEST)
 
         with get_db() as conn:
-            existing = conn.execute('SELECT created_at FROM tasks WHERE id = ? AND user_id = ?', (task_id, user['id'])).fetchone()
+            existing = conn.execute(
+                'SELECT id, title, completed FROM tasks WHERE id = ? AND user_id = ?',
+                (task_id, user['id']),
+            ).fetchone()
             if not existing:
                 return self.write_json({'error': 'task not found'}, status=HTTPStatus.NOT_FOUND)
             conn.execute(
@@ -636,6 +895,18 @@ class TodoHandler(SimpleHTTPRequestHandler):
                     1 if task['completed'] else 0, task['updatedAt'], task_id, user['id'],
                 ),
             )
+            action = 'task.update'
+            if bool(existing['completed']) != bool(task['completed']):
+                action = 'task.complete' if task['completed'] else 'task.reopen'
+            self.log_operation(
+                conn,
+                int(user['id']),
+                int(user['id']),
+                action,
+                'task',
+                task_id,
+                {'title': task['title'], 'previousTitle': existing['title']},
+            )
             conn.commit()
             row = conn.execute(
                 'SELECT id, user_id, title, subject, due_at, pool, priority, note, completed, created_at, updated_at FROM tasks WHERE id = ? AND user_id = ?',
@@ -648,11 +919,21 @@ class TodoHandler(SimpleHTTPRequestHandler):
         if not user:
             return
         with get_db() as conn:
+            existing = conn.execute('SELECT title FROM tasks WHERE id = ? AND user_id = ?', (task_id, user['id'])).fetchone()
+            if not existing:
+                return self.write_json({'error': 'task not found'}, status=HTTPStatus.NOT_FOUND)
             conn.execute('DELETE FROM schedule_items WHERE task_id = ? AND user_id = ?', (task_id, user['id']))
             cursor = conn.execute('DELETE FROM tasks WHERE id = ? AND user_id = ?', (task_id, user['id']))
+            self.log_operation(
+                conn,
+                int(user['id']),
+                int(user['id']),
+                'task.delete',
+                'task',
+                task_id,
+                {'title': existing['title']},
+            )
             conn.commit()
-        if cursor.rowcount == 0:
-            return self.write_json({'error': 'task not found'}, status=HTTPStatus.NOT_FOUND)
         return self.write_json({'ok': True})
 
     def handle_list_schedule_items(self):
@@ -661,18 +942,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return self.write_json({'items': [], 'readOnly': True})
 
         with get_db() as conn:
-            rows = conn.execute(
-                """
-                SELECT schedule_items.*, tasks.title AS task_title, tasks.subject AS task_subject,
-                       tasks.due_at AS task_due_at, tasks.pool AS task_pool, tasks.priority AS task_priority
-                FROM schedule_items
-                JOIN tasks ON tasks.id = schedule_items.task_id AND tasks.user_id = schedule_items.user_id
-                WHERE schedule_items.user_id = ?
-                ORDER BY schedule_items.schedule_date ASC, schedule_items.slot_start ASC, schedule_items.created_at ASC
-                """,
-                (user['id'],),
-            ).fetchall()
-        return self.write_json({'items': [public_schedule_item(row) for row in rows], 'readOnly': False})
+            items = self.fetch_schedule_items_for_user(conn, int(user['id']))
+        return self.write_json({'items': items, 'readOnly': False})
 
     def handle_get_schedule_config(self):
         user = self.current_user()
@@ -685,43 +956,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
             })
 
         with get_db() as conn:
-            versions = conn.execute(
-                '''
-                SELECT id, effective_from, slots_json, created_at, updated_at
-                FROM schedule_template_versions
-                WHERE user_id = ?
-                ORDER BY effective_from ASC, id ASC
-                ''',
-                (user['id'],),
-            ).fetchall()
-            overrides = conn.execute(
-                '''
-                SELECT schedule_date, slots_json
-                FROM schedule_day_overrides
-                WHERE user_id = ?
-                ORDER BY schedule_date ASC
-                ''',
-                (user['id'],),
-            ).fetchall()
-
-        return self.write_json({
-            'defaultWeekSlots': DEFAULT_WEEK_SLOTS,
-            'templateVersions': [
-                {
-                    'id': row['id'],
-                    'effectiveFrom': row['effective_from'],
-                    'slots': parse_slots_json(row['slots_json']) or DEFAULT_WEEK_SLOTS,
-                    'createdAt': row['created_at'],
-                    'updatedAt': row['updated_at'],
-                }
-                for row in versions
-            ],
-            'dayOverrides': {
-                row['schedule_date']: json.loads(row['slots_json'])
-                for row in overrides
-            },
-            'readOnly': False,
-        })
+            config = self.fetch_schedule_config_for_user(conn, int(user['id']))
+        return self.write_json(config)
 
     def handle_update_schedule_template(self):
         user = self.require_user()
@@ -779,6 +1015,15 @@ class TodoHandler(SimpleHTTPRequestHandler):
                 ''',
                 (user['id'], effective_from, json.dumps(week_slots, ensure_ascii=False), now, now),
             )
+            self.log_operation(
+                conn,
+                int(user['id']),
+                int(user['id']),
+                'schedule_config.template_update',
+                'schedule_config',
+                effective_from,
+                {'effectiveFrom': effective_from},
+            )
             conn.commit()
         return self.write_json({'ok': True})
 
@@ -807,6 +1052,15 @@ class TodoHandler(SimpleHTTPRequestHandler):
                 ''',
                 (user['id'], date_key, json.dumps(slots, ensure_ascii=False), now, now),
             )
+            self.log_operation(
+                conn,
+                int(user['id']),
+                int(user['id']),
+                'schedule_config.day_update',
+                'schedule_config',
+                date_key,
+                {'date': date_key},
+            )
             conn.commit()
         return self.write_json({'ok': True})
 
@@ -820,6 +1074,15 @@ class TodoHandler(SimpleHTTPRequestHandler):
             if conflict:
                 return self.write_json(conflict, status=HTTPStatus.CONFLICT)
             conn.execute('DELETE FROM schedule_day_overrides WHERE user_id = ? AND schedule_date = ?', (user['id'], date_key))
+            self.log_operation(
+                conn,
+                int(user['id']),
+                int(user['id']),
+                'schedule_config.day_reset',
+                'schedule_config',
+                date_key,
+                {'date': date_key},
+            )
             conn.commit()
         return self.write_json({'ok': True})
 
@@ -847,6 +1110,15 @@ class TodoHandler(SimpleHTTPRequestHandler):
                 return self.write_json(conflict, status=HTTPStatus.CONFLICT)
             conn.execute('DELETE FROM schedule_day_overrides WHERE user_id = ?', (user['id'],))
             conn.execute('DELETE FROM schedule_template_versions WHERE user_id = ?', (user['id'],))
+            self.log_operation(
+                conn,
+                int(user['id']),
+                int(user['id']),
+                'schedule_config.reset',
+                'schedule_config',
+                None,
+                {},
+            )
             conn.commit()
         return self.write_json({'ok': True})
 
@@ -935,6 +1207,15 @@ class TodoHandler(SimpleHTTPRequestHandler):
                     0, now_iso(), now_iso(),
                 ),
             )
+            self.log_operation(
+                conn,
+                int(user['id']),
+                int(user['id']),
+                'schedule_item.create',
+                'schedule_item',
+                item_id,
+                {'taskId': item['taskId'], 'date': item['date'], 'slotLabel': item['slotLabel']},
+            )
             conn.commit()
         return self.write_json({'ok': True, 'id': item_id}, status=HTTPStatus.CREATED)
 
@@ -973,6 +1254,18 @@ class TodoHandler(SimpleHTTPRequestHandler):
                 """,
                 (item['durationMinutes'], item['note'], 1 if completed else 0, now_iso(), item_id, user['id']),
             )
+            action = 'schedule_item.update'
+            if bool(existing['completed']) != completed:
+                action = 'schedule_item.complete' if completed else 'schedule_item.reopen'
+            self.log_operation(
+                conn,
+                int(user['id']),
+                int(user['id']),
+                action,
+                'schedule_item',
+                item_id,
+                {'taskId': item['taskId'], 'date': item['date'], 'slotLabel': item['slotLabel']},
+            )
             conn.commit()
         return self.write_json({'ok': True, 'id': item_id})
 
@@ -981,10 +1274,23 @@ class TodoHandler(SimpleHTTPRequestHandler):
         if not user:
             return
         with get_db() as conn:
+            existing = conn.execute(
+                'SELECT task_id, schedule_date, slot_label FROM schedule_items WHERE id = ? AND user_id = ?',
+                (item_id, user['id']),
+            ).fetchone()
+            if not existing:
+                return self.write_json({'error': 'schedule item not found'}, status=HTTPStatus.NOT_FOUND)
             cursor = conn.execute('DELETE FROM schedule_items WHERE id = ? AND user_id = ?', (item_id, user['id']))
+            self.log_operation(
+                conn,
+                int(user['id']),
+                int(user['id']),
+                'schedule_item.delete',
+                'schedule_item',
+                item_id,
+                {'taskId': existing['task_id'], 'date': existing['schedule_date'], 'slotLabel': existing['slot_label']},
+            )
             conn.commit()
-        if cursor.rowcount == 0:
-            return self.write_json({'error': 'schedule item not found'}, status=HTTPStatus.NOT_FOUND)
         return self.write_json({'ok': True})
 
     def handle_auth_register(self):
@@ -1007,8 +1313,17 @@ class TodoHandler(SimpleHTTPRequestHandler):
                     'INSERT INTO users (name, nickname, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?)',
                     (name, nickname, hash_password(password), 'student', now_iso()),
                 )
-                conn.commit()
                 user_id = cursor.lastrowid
+                self.log_operation(
+                    conn,
+                    user_id,
+                    user_id,
+                    'auth.register',
+                    'user',
+                    str(user_id),
+                    {'nickname': nickname},
+                )
+                conn.commit()
             except sqlite3.IntegrityError:
                 return self.write_json({'error': 'nickname already exists'}, status=HTTPStatus.CONFLICT)
             user = conn.execute('SELECT id, name, nickname, role FROM users WHERE id = ?', (user_id,)).fetchone()
@@ -1022,6 +1337,19 @@ class TodoHandler(SimpleHTTPRequestHandler):
         password = str(payload.get('password', ''))
         with get_db() as conn:
             user = conn.execute('SELECT * FROM users WHERE lower(nickname) = lower(?)', (nickname,)).fetchone()
+            if user and verify_password(password, user['password_hash']):
+                self.log_operation(
+                    conn,
+                    int(user['id']),
+                    int(user['id']),
+                    'auth.login',
+                    'user',
+                    str(user['id']),
+                    {'nickname': user['nickname']},
+                )
+                conn.commit()
+            else:
+                user = None
         if not user or not verify_password(password, user['password_hash']):
             return self.write_json({'error': 'invalid nickname or password'}, status=HTTPStatus.UNAUTHORIZED)
         return self.issue_session_response(user)

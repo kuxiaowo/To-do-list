@@ -5,6 +5,7 @@ const SCHEDULE_API = '/api/schedule-items';
 const SCHEDULE_CONFIG_API = '/api/schedule-config';
 const SCHEDULE_TEMPLATE_API = '/api/schedule-template';
 const SCHEDULE_DAY_SLOTS_API = '/api/schedule-day-slots';
+const ADMIN_API = '/api/admin';
 const AUTH_TOKEN_KEY = 'todo-list-auth-token-v1';
 const THEME_STORAGE_KEY = 'todo-list-theme-v1';
 // JavaScript Date months are zero-based, so 4 means May.
@@ -106,10 +107,33 @@ createApp({
       slotEditorSlots: [],
       slotEditorWeekSlots: JSON.parse(JSON.stringify(DEFAULT_WEEK_SLOTS)),
       loginForm: { nickname: '', password: '' },
-      registerForm: { name: '', nickname: '', password: '' }
+      registerForm: { name: '', nickname: '', password: '' },
+      adminMode: false,
+      adminSection: 'users',
+      adminUsers: [],
+      adminSelectedUserId: '',
+      adminLogs: [],
+      adminLogsTotal: 0,
+      adminLogsPage: 1,
+      adminLogsPageSize: 50,
+      adminLoading: false,
+      adminTimelineLoadedUserId: ''
     };
   },
   computed: {
+    isAdmin() {
+      return this.currentUser && this.currentUser.role === 'admin';
+    },
+    selectedAdminUser() {
+      const id = Number(this.adminSelectedUserId);
+      return this.adminUsers.find(user => Number(user.id) === id) || null;
+    },
+    adminUserOptions() {
+      return this.adminUsers.map(user => ({
+        ...user,
+        label: `${user.name}（${user.nickname}）`
+      }));
+    },
     sortedTasks() {
       return [...this.tasks].sort((a, b) => this.compareTasks(a, b));
     },
@@ -261,6 +285,125 @@ createApp({
       if (!response.ok) throw new Error(payload.message || payload.error || '请求失败');
       return payload;
     },
+    async openAdminMode(section = 'users') {
+      if (!this.isAdmin) {
+        ElementPlus.ElMessage.warning('只有管理员可以进入后台。');
+        return;
+      }
+      this.accountMenuOpen = false;
+      this.adminMode = true;
+      this.adminSection = section;
+      await this.loadAdminUsers();
+      if (!this.adminSelectedUserId && this.adminUsers.length) {
+        this.adminSelectedUserId = String(this.adminUsers[0].id);
+      }
+      if (this.adminSection === 'logs') await this.loadAdminLogs(1);
+      if (this.adminSection === 'timeline') await this.loadAdminTimeline();
+    },
+    async exitAdminMode() {
+      this.adminMode = false;
+      this.adminTimelineLoadedUserId = '';
+      await this.loadScheduleConfig();
+      await this.loadTasks();
+      await this.loadScheduleItems();
+      this.$nextTick(() => this.scrollToDate(this.currentViewDateKey || new Date(), this.activePage, 'instant'));
+    },
+    async switchAdminSection(section) {
+      this.adminSection = section;
+      if (section === 'users') await this.loadAdminUsers();
+      if (section === 'logs') await this.loadAdminLogs(1);
+      if (section === 'timeline') await this.loadAdminTimeline();
+    },
+    async loadAdminUsers() {
+      if (!this.isAdmin) return;
+      this.adminLoading = true;
+      try {
+        const payload = await this.apiJson(`${ADMIN_API}/users`, { cache: 'no-store' });
+        this.adminUsers = Array.isArray(payload.users) ? payload.users : [];
+      } catch (error) {
+        ElementPlus.ElMessage.error(`后台用户列表读取失败：${error.message}`);
+      } finally {
+        this.adminLoading = false;
+      }
+    },
+    async handleAdminUserChange() {
+      if (this.adminSection === 'logs') await this.loadAdminLogs(1);
+      if (this.adminSection === 'timeline') await this.loadAdminTimeline();
+    },
+    async loadAdminLogs(page = this.adminLogsPage) {
+      if (!this.isAdmin || !this.adminSelectedUserId) {
+        this.adminLogs = [];
+        this.adminLogsTotal = 0;
+        return;
+      }
+      this.adminLoading = true;
+      try {
+        const url = `${ADMIN_API}/users/${this.adminSelectedUserId}/logs?page=${page}&pageSize=${this.adminLogsPageSize}`;
+        const payload = await this.apiJson(url, { cache: 'no-store' });
+        this.adminLogs = Array.isArray(payload.logs) ? payload.logs : [];
+        this.adminLogsTotal = Number(payload.total || 0);
+        this.adminLogsPage = Number(payload.page || page);
+      } catch (error) {
+        ElementPlus.ElMessage.error(`日志读取失败：${error.message}`);
+      } finally {
+        this.adminLoading = false;
+      }
+    },
+    async loadAdminTimeline() {
+      if (!this.isAdmin || !this.adminSelectedUserId) {
+        this.tasks = [];
+        this.scheduleItems = [];
+        return;
+      }
+      this.adminLoading = true;
+      try {
+        const userId = this.adminSelectedUserId;
+        const [taskPayload, itemPayload, configPayload] = await Promise.all([
+          this.apiJson(`${ADMIN_API}/users/${userId}/tasks`, { cache: 'no-store' }),
+          this.apiJson(`${ADMIN_API}/users/${userId}/schedule-items`, { cache: 'no-store' }),
+          this.apiJson(`${ADMIN_API}/users/${userId}/schedule-config`, { cache: 'no-store' })
+        ]);
+        this.tasks = Array.isArray(taskPayload.tasks) ? taskPayload.tasks.map(task => this.normalizeTaskPool(task)) : [];
+        this.scheduleItems = Array.isArray(itemPayload.items) ? itemPayload.items : [];
+        this.defaultWeekSlots = this.cloneSlots(configPayload.defaultWeekSlots || DEFAULT_WEEK_SLOTS);
+        this.scheduleTemplateVersions = Array.isArray(configPayload.templateVersions) ? configPayload.templateVersions : [];
+        this.scheduleDayOverrides = configPayload.dayOverrides && typeof configPayload.dayOverrides === 'object' ? configPayload.dayOverrides : {};
+        this.adminTimelineLoadedUserId = String(userId);
+        this.$nextTick(() => this.scrollToDate(this.currentViewDateKey || new Date(), this.activePage, 'instant'));
+      } catch (error) {
+        ElementPlus.ElMessage.error(`用户时间表读取失败：${error.message}`);
+      } finally {
+        this.adminLoading = false;
+      }
+    },
+    adminActionLabel(action) {
+      const labels = {
+        'auth.register': '注册',
+        'auth.login': '登录',
+        'task.create': '新增任务',
+        'task.update': '更新任务',
+        'task.complete': '完成任务',
+        'task.reopen': '取消完成任务',
+        'task.delete': '删除任务',
+        'schedule_item.create': '新增每日安排',
+        'schedule_item.update': '更新每日安排',
+        'schedule_item.complete': '完成每日安排',
+        'schedule_item.reopen': '取消完成每日安排',
+        'schedule_item.delete': '删除每日安排',
+        'schedule_config.template_update': '更新一周模板',
+        'schedule_config.day_update': '更新单日时间格子',
+        'schedule_config.day_reset': '重置单日时间格子',
+        'schedule_config.reset': '重置全部时间格子'
+      };
+      return labels[action] || action;
+    },
+    adminLogDetail(log) {
+      const detail = log && log.detail ? log.detail : {};
+      return Object.entries(detail)
+        .filter(([, value]) => value !== null && value !== undefined && value !== '')
+        .map(([key, value]) => `${key}: ${value}`)
+        .join('；');
+    },
     async loadCurrentUser() {
       if (!this.authToken) return;
       try {
@@ -314,6 +457,13 @@ createApp({
       }
       this.authToken = '';
       this.currentUser = null;
+      this.adminMode = false;
+      this.adminSection = 'users';
+      this.adminUsers = [];
+      this.adminSelectedUserId = '';
+      this.adminLogs = [];
+      this.adminLogsTotal = 0;
+      this.adminTimelineLoadedUserId = '';
       this.tasks = [];
       this.scheduleItems = [];
       this.scheduleTemplateVersions = [];
@@ -425,10 +575,12 @@ createApp({
       return `${date}::${slotKey}`;
     },
     startTaskDrag(task) {
+      if (this.adminMode) return;
       if (this.activePage !== 'daily') return;
       this.draggedTaskId = task.id;
     },
     handleDropOnSlot(day, slot) {
+      if (this.adminMode) return;
       if (!this.currentUser) {
         ElementPlus.ElMessage.warning('请先登录或注册，再创建安排。');
         return;
@@ -445,6 +597,7 @@ createApp({
       this.draggedTaskId = null;
     },
     openScheduleEditDialog(item) {
+      if (this.adminMode) return;
       if (!this.currentUser) {
         ElementPlus.ElMessage.warning('请先登录或注册，再编辑安排。');
         return;
@@ -528,6 +681,7 @@ createApp({
       }).catch(() => {});
     },
     openDaySlotEditor(day) {
+      if (this.adminMode) return;
       if (!this.currentUser) {
         ElementPlus.ElMessage.warning('请先登录或注册，再修改时间格子。');
         return;
@@ -538,6 +692,7 @@ createApp({
       this.slotEditorVisible = true;
     },
     openWeekSlotEditor() {
+      if (this.adminMode) return;
       if (!this.currentUser) {
         ElementPlus.ElMessage.warning('请先登录或注册，再修改时间格子。');
         return;
@@ -625,6 +780,7 @@ createApp({
       }
     },
     resetDaySlots(day) {
+      if (this.adminMode) return;
       if (!this.currentUser) {
         ElementPlus.ElMessage.warning('请先登录或注册，再重置时间格子。');
         return;
@@ -644,6 +800,7 @@ createApp({
       }).catch(() => {});
     },
     resetAllScheduleConfig() {
+      if (this.adminMode) return;
       if (!this.currentUser) {
         ElementPlus.ElMessage.warning('请先登录或注册，再重置时间格子。');
         return;
@@ -729,6 +886,12 @@ createApp({
       const date = new Date(dateLike);
       return `${this.pad(date.getHours())}:${this.pad(date.getMinutes())}`;
     },
+    formatDateTime(dateLike) {
+      if (!dateLike) return '—';
+      const date = new Date(dateLike);
+      if (Number.isNaN(date.getTime())) return String(dateLike);
+      return `${date.getFullYear()}-${this.pad(date.getMonth() + 1)}-${this.pad(date.getDate())} ${this.pad(date.getHours())}:${this.pad(date.getMinutes())}`;
+    },
     relativeLabel(offset) {
       if (offset === 0) return '今天';
       if (offset === 1) return '明天';
@@ -748,6 +911,7 @@ createApp({
       return WEEKDAY_TEXT[Number(key)] || key;
     },
     openCreateDialog() {
+      if (this.adminMode) return;
       if (!this.currentUser) {
         ElementPlus.ElMessage.warning('请先登录或注册，再新增任务。');
         return;
@@ -765,6 +929,7 @@ createApp({
       this.dialogVisible = true;
     },
     openEditDialog(task) {
+      if (this.adminMode) return;
       if (!this.currentUser) {
         ElementPlus.ElMessage.warning('请先登录或注册，再编辑任务。');
         return;
