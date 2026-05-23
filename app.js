@@ -156,13 +156,6 @@ createApp({
     unscheduledCount() {
       return this.activePoolTasks.length;
     },
-    unscheduledByPriority() {
-      return ['high', 'medium', 'low'].map(priority => ({
-        key: priority,
-        label: PRIORITY_LABELS[priority],
-        tasks: this.activePoolTasks.filter(task => task.priority === priority)
-      }));
-    },
     dayColumns() {
       const base = this.startOfDay(new Date());
       const start = this.timelineStartDate();

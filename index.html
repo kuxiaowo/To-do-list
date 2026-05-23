@@ -41,14 +41,14 @@
             <span>{{ activePage === 'daily' ? '弹性任务池' : '未排期待办池' }}</span>
             <span class="day-subtitle">{{ unscheduledCount }} 项</span>
           </h3>
-          <div v-for="group in unscheduledByPriority" :key="group.key" class="summary-card">
+          <div class="summary-card">
             <div class="summary-card-header">
-              <div class="summary-card-title">{{ group.label }}</div>
-              <span class="day-subtitle">{{ group.tasks.length }} 项</span>
+              <div class="summary-card-title">按优先级排序</div>
+              <span class="day-subtitle">{{ unscheduledCount }} 项</span>
             </div>
-            <template v-if="group.tasks.length">
+            <template v-if="activePoolTasks.length">
               <div
-                v-for="task in group.tasks"
+                v-for="task in activePoolTasks"
                 :key="task.id"
                 class="summary-task"
                 :draggable="activePage === 'daily'"
@@ -69,10 +69,9 @@
                 </div>
               </div>
             </template>
-            <div v-else class="summary-empty">{{ activePage === 'daily' ? '这一档暂时没有弹性任务。' : '这一档暂时没有未排期事项。' }}</div>
-          </div>
-          <div v-if="!unscheduledCount" class="summary-empty">
-            {{ activePage === 'daily' ? '任务池是空的；临时或长期任务可以先放这里，再拖进每日安排。' : '待办池是空的；还没想好时间的任务可以先扔这里。' }}
+            <div v-else class="summary-empty">
+              {{ activePage === 'daily' ? '任务池是空的；临时或长期任务可以先放这里，再拖进每日安排。' : '待办池是空的；还没想好时间的任务可以先扔这里。' }}
+            </div>
           </div>
         </section>
       </aside>
@@ -392,13 +391,13 @@
                   <span>{{ activePage === 'daily' ? '弹性任务池' : '未排期待办池' }}</span>
                   <span class="day-subtitle">{{ unscheduledCount }} 项</span>
                 </h3>
-                <div v-for="group in unscheduledByPriority" :key="group.key" class="summary-card">
+                <div class="summary-card">
                   <div class="summary-card-header">
-                    <div class="summary-card-title">{{ group.label }}</div>
-                    <span class="day-subtitle">{{ group.tasks.length }} 项</span>
+                    <div class="summary-card-title">按优先级排序</div>
+                    <span class="day-subtitle">{{ unscheduledCount }} 项</span>
                   </div>
-                  <div v-if="group.tasks.length">
-                    <div v-for="task in group.tasks" :key="task.id" class="summary-task">
+                  <div v-if="activePoolTasks.length">
+                    <div v-for="task in activePoolTasks" :key="task.id" class="summary-task">
                       <div class="task-main">
                         <div style="min-width: 0; flex: 1;">
                           <div class="task-title">{{ task.title }}</div>
@@ -413,7 +412,9 @@
                       </div>
                     </div>
                   </div>
-                  <div v-else class="summary-empty">这一档暂无任务。</div>
+                  <div v-else class="summary-empty">
+                    {{ activePage === 'daily' ? '任务池是空的；临时或长期任务可以先放这里，再拖进每日安排。' : '待办池是空的；还没想好时间的任务可以先扔这里。' }}
+                  </div>
                 </div>
               </section>
             </aside>
