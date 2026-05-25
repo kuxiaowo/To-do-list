@@ -222,7 +222,7 @@
                   </div>
 
                   <article
-                    v-for="item in scheduleItemsForSlot(day.key, slot.key)"
+                    v-for="item in visibleScheduleItemsForSlot(day.key, slot.key)"
                     :key="item.id"
                     class="schedule-card"
                     :class="[priorityClass(item.task.priority), { completed: item.completed }]"
@@ -483,7 +483,7 @@
                           </div>
                           <div class="slot-capacity">{{ slotUsedMinutes(day.key, slot.key) }} / {{ slot.duration }} 分钟</div>
                         </div>
-                        <article v-for="item in scheduleItemsForSlot(day.key, slot.key)" :key="item.id" class="schedule-card" :class="[priorityClass(item.task.priority), { completed: item.completed }]">
+                        <article v-for="item in visibleScheduleItemsForSlot(day.key, slot.key)" :key="item.id" class="schedule-card" :class="[priorityClass(item.task.priority), { completed: item.completed }]">
                           <div class="task-title">{{ item.task.title }}</div>
                           <div class="task-meta">
                             <span v-if="item.task.subject" class="meta-chip subject-chip">{{ item.task.subject }}</span>

@@ -559,6 +559,10 @@ createApp({
     scheduleItemsForSlot(date, slotKey) {
       return this.scheduleItemsBySlot[this.scheduleSlotKey(date, slotKey)] || [];
     },
+    visibleScheduleItemsForSlot(date, slotKey) {
+      return this.scheduleItemsForSlot(date, slotKey)
+        .filter(item => this.showCompleted || !item.completed);
+    },
     slotUsedMinutes(date, slotKey, excludeId = null) {
       return this.scheduleItemsForSlot(date, slotKey)
         .filter(item => item.id !== excludeId)
