@@ -138,6 +138,7 @@ def init_db() -> None:
                 slot_start TEXT NOT NULL,
                 slot_end TEXT NOT NULL,
                 duration_minutes INTEGER NOT NULL,
+                sort_order REAL NOT NULL DEFAULT 0,
                 note TEXT NOT NULL DEFAULT '',
                 completed INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT,
@@ -147,6 +148,24 @@ def init_db() -> None:
             )
             '''
         )
+        columns = {row[1] for row in conn.execute('PRAGMA table_info(schedule_items)').fetchall()}
+        if 'sort_order' not in columns:
+            conn.execute('ALTER TABLE schedule_items ADD COLUMN sort_order REAL NOT NULL DEFAULT 0')
+            rows = conn.execute(
+                '''
+                SELECT id, user_id, schedule_date, slot_key
+                FROM schedule_items
+                ORDER BY user_id ASC, schedule_date ASC, slot_start ASC, created_at ASC, id ASC
+                '''
+            ).fetchall()
+            slot_counts = {}
+            for row in rows:
+                key = (row[1], row[2], row[3])
+                slot_counts[key] = slot_counts.get(key, 0) + 1
+                conn.execute(
+                    'UPDATE schedule_items SET sort_order = ? WHERE id = ?',
+                    (slot_counts[key] * 1024, row[0]),
+                )
         conn.execute(
             '''
             CREATE TABLE IF NOT EXISTS schedule_template_versions (
@@ -447,6 +466,7 @@ def public_schedule_item(row: sqlite3.Row) -> dict:
         'slotStart': row['slot_start'],
         'slotEnd': row['slot_end'],
         'durationMinutes': row['duration_minutes'],
+        'sortOrder': row['sort_order'],
         'note': row['note'],
         'completed': bool(row['completed']),
         'createdAt': row['created_at'],
@@ -635,7 +655,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
             FROM schedule_items
             JOIN tasks ON tasks.id = schedule_items.task_id AND tasks.user_id = schedule_items.user_id
             WHERE schedule_items.user_id = ?
-            ORDER BY schedule_items.schedule_date ASC, schedule_items.slot_start ASC, schedule_items.created_at ASC
+            ORDER BY schedule_items.schedule_date ASC, schedule_items.slot_start ASC, schedule_items.sort_order ASC, schedule_items.created_at ASC
             """,
             (user_id,),
         ).fetchall()
@@ -1135,6 +1155,14 @@ class TodoHandler(SimpleHTTPRequestHandler):
             duration_minutes = int(payload.get('durationMinutes'))
         except Exception:
             return None, {'error': 'durationMinutes must be an integer'}
+        raw_sort_order = payload.get('sortOrder', None)
+        if raw_sort_order in (None, ''):
+            sort_order = None
+        else:
+            try:
+                sort_order = float(raw_sort_order)
+            except Exception:
+                return None, {'error': 'sortOrder must be a number'}
 
         if not task_id or not schedule_date or not slot_key or not slot_start or not slot_end:
             return None, {'error': 'taskId, date, slotKey, slotStart and slotEnd are required'}
@@ -1179,6 +1207,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
             'slotStart': slot_start,
             'slotEnd': slot_end,
             'durationMinutes': duration_minutes,
+            'sortOrder': sort_order,
             'note': note,
         }, None
 
@@ -1194,16 +1223,25 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return self.write_json(error, status=HTTPStatus.BAD_REQUEST)
         item_id = f"schedule-{int(time.time() * 1000)}-{secrets.token_hex(4)}"
         with get_db() as conn:
+            sort_order = item['sortOrder']
+            if sort_order is None:
+                sort_order = float(conn.execute(
+                    """
+                    SELECT COALESCE(MAX(sort_order), 0) + 1024 FROM schedule_items
+                    WHERE user_id = ? AND schedule_date = ? AND slot_key = ?
+                    """,
+                    (user['id'], item['date'], item['slotKey']),
+                ).fetchone()[0])
             conn.execute(
                 """
                 INSERT INTO schedule_items
                 (id, user_id, task_id, schedule_date, slot_key, slot_label, slot_start, slot_end,
-                 duration_minutes, note, completed, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 duration_minutes, sort_order, note, completed, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     item_id, user['id'], item['taskId'], item['date'], item['slotKey'], item['slotLabel'],
-                    item['slotStart'], item['slotEnd'], item['durationMinutes'], item['note'],
+                    item['slotStart'], item['slotEnd'], item['durationMinutes'], sort_order, item['note'],
                     0, now_iso(), now_iso(),
                 ),
             )
@@ -1233,26 +1271,34 @@ class TodoHandler(SimpleHTTPRequestHandler):
 
         merged = {
             'taskId': existing['task_id'],
-            'date': existing['schedule_date'],
-            'slotKey': existing['slot_key'],
-            'slotLabel': existing['slot_label'],
-            'slotStart': existing['slot_start'],
-            'slotEnd': existing['slot_end'],
+            'date': payload.get('date', existing['schedule_date']),
+            'slotKey': payload.get('slotKey', existing['slot_key']),
+            'slotLabel': payload.get('slotLabel', existing['slot_label']),
+            'slotStart': payload.get('slotStart', existing['slot_start']),
+            'slotEnd': payload.get('slotEnd', existing['slot_end']),
             'durationMinutes': payload.get('durationMinutes', existing['duration_minutes']),
+            'sortOrder': payload.get('sortOrder', existing['sort_order']),
             'note': payload.get('note', existing['note']),
         }
         item, error = self.validate_schedule_payload(merged, int(user['id']), existing_id=item_id)
         if error:
             return self.write_json(error, status=HTTPStatus.BAD_REQUEST)
+        if item['sortOrder'] is None:
+            item['sortOrder'] = existing['sort_order']
         completed = bool(payload.get('completed')) if 'completed' in payload else bool(existing['completed'])
         with get_db() as conn:
             conn.execute(
                 """
                 UPDATE schedule_items
-                SET duration_minutes = ?, note = ?, completed = ?, updated_at = ?
+                SET schedule_date = ?, slot_key = ?, slot_label = ?, slot_start = ?, slot_end = ?,
+                    duration_minutes = ?, sort_order = ?, note = ?, completed = ?, updated_at = ?
                 WHERE id = ? AND user_id = ?
                 """,
-                (item['durationMinutes'], item['note'], 1 if completed else 0, now_iso(), item_id, user['id']),
+                (
+                    item['date'], item['slotKey'], item['slotLabel'], item['slotStart'], item['slotEnd'],
+                    item['durationMinutes'], item['sortOrder'], item['note'], 1 if completed else 0,
+                    now_iso(), item_id, user['id'],
+                ),
             )
             action = 'schedule_item.update'
             if bool(existing['completed']) != completed:

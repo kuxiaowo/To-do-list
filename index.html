@@ -11,7 +11,7 @@
       document.documentElement.dataset.theme = savedTheme === 'dark' ? 'dark' : 'light';
     })();
   </script>
-  <link rel="stylesheet" href="./style.css?v=admin-backstage-20260520" />
+  <link rel="stylesheet" href="./style.css?v=schedule-insert-line-20260525" />
 </head>
 <body>
   <div id="app" v-cloak>
@@ -52,7 +52,8 @@
                 :key="task.id"
                 class="summary-task"
                 :draggable="activePage === 'daily'"
-                @dragstart="startTaskDrag(task)"
+                @dragstart="startTaskDrag(task, $event)"
+                @dragend="clearScheduleDragState"
                 @click="openEditDialog(task)"
               >
                 <div class="task-main">
@@ -210,8 +211,10 @@
                   v-for="slot in day.slots"
                   :key="slot.key"
                   class="schedule-slot"
-                  @dragover.prevent
-                  @drop="handleDropOnSlot(day, slot)"
+                  :class="{ 'is-drag-target': isScheduleDropPosition(day, slot) }"
+                  @dragenter.prevent="updateScheduleDropPosition($event, day, slot)"
+                  @dragover.prevent="updateScheduleDropPosition($event, day, slot)"
+                  @drop.prevent="handleDropOnSlot($event, day, slot)"
                 >
                   <div class="slot-header">
                     <div>
@@ -221,22 +224,38 @@
                     <div class="slot-capacity">{{ slotUsedMinutes(day.key, slot.key) }} / {{ slot.duration }} 分钟</div>
                   </div>
 
-                  <article
-                    v-for="item in visibleScheduleItemsForSlot(day.key, slot.key)"
-                    :key="item.id"
-                    class="schedule-card"
-                    :class="[priorityClass(item.task.priority), { completed: item.completed }]"
-                    @click="openScheduleEditDialog(item)"
-                  >
-                    <div class="task-title">{{ item.task.title }}</div>
-                    <div class="task-meta">
-                      <span v-if="item.task.subject" class="meta-chip subject-chip">{{ item.task.subject }}</span>
-                      <span>{{ item.durationMinutes }} 分钟</span>
-                    </div>
-                    <div v-if="item.note" class="task-note-preview">{{ item.note }}</div>
-                    <span v-if="item.completed" class="schedule-check">✓</span>
-                  </article>
-
+                  <div class="schedule-card-list">
+                    <template
+                      v-for="(item, itemIndex) in visibleScheduleItemsForSlot(day.key, slot.key)"
+                      :key="item.id"
+                    >
+                      <div
+                        v-if="isScheduleInsertIndex(day, slot, itemIndex)"
+                        class="schedule-insert-line"
+                      ></div>
+                      <article
+                        class="schedule-card"
+                        :class="[priorityClass(item.task.priority), { completed: item.completed, 'is-dragging': draggedScheduleItemId === item.id }]"
+                        :data-schedule-id="item.id"
+                        draggable="true"
+                        @dragstart.stop="startScheduleDrag(item, $event)"
+                        @dragend="clearScheduleDragState"
+                        @click="openScheduleEditDialog(item)"
+                      >
+                        <div class="task-title">{{ item.task.title }}</div>
+                        <div class="task-meta">
+                          <span v-if="item.task.subject" class="meta-chip subject-chip">{{ item.task.subject }}</span>
+                          <span>{{ item.durationMinutes }} 分钟</span>
+                        </div>
+                        <div v-if="item.note" class="task-note-preview">{{ item.note }}</div>
+                        <span v-if="item.completed" class="schedule-check">✓</span>
+                      </article>
+                    </template>
+                    <div
+                      v-if="isScheduleInsertIndex(day, slot, visibleScheduleItemsForSlot(day.key, slot.key).length)"
+                      class="schedule-insert-line"
+                    ></div>
+                  </div>
 
                 </div>
               </section>
@@ -255,7 +274,8 @@
                 class="ddl-card"
                 :class="priorityClass(task.priority)"
                 draggable="true"
-                @dragstart="startTaskDrag(task)"
+                @dragstart="startTaskDrag(task, $event)"
+                @dragend="clearScheduleDragState"
               >
                 <div class="task-title">{{ task.title }}</div>
                 <div class="task-meta">
@@ -673,7 +693,7 @@
 
   <script src="./vendor/vue.global.prod.js"></script>
   <script src="./vendor/element-plus.full.min.js"></script>
-  <script src="./app.js?v=admin-backstage-20260520"></script>
+  <script src="./app.js?v=schedule-insert-line-20260525"></script>
 </body>
 </html>
 

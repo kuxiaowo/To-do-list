@@ -26,6 +26,7 @@
   --task-completed-bg: #f8fafc;
   --slot-border: #cbd5e1;
   --slot-hover-border: #818cf8;
+  --insert-line: #111827;
   --body-gradient: linear-gradient(180deg, #f8faff 0%, #f3f6fb 100%);
   --day-header-gradient: linear-gradient(180deg, rgba(255,255,255,0.98), rgba(255,255,255,0.92));
   --shadow: 0 12px 30px rgba(15, 23, 42, 0.08);
@@ -75,6 +76,7 @@
     --task-completed-bg: #1e293b;
     --slot-border: #475569;
     --slot-hover-border: #818cf8;
+    --insert-line: #f8fafc;
     --body-gradient: linear-gradient(180deg, #0f172a 0%, #111827 100%);
     --day-header-gradient: linear-gradient(180deg, rgba(23,32,51,0.98), rgba(23,32,51,0.92));
     --shadow: 0 16px 38px rgba(0, 0, 0, 0.34);
@@ -622,6 +624,7 @@ body {
 }
 
 .schedule-slot {
+  position: relative;
   border: 1px dashed var(--slot-border);
   background: var(--panel-muted);
   border-radius: 16px;
@@ -633,6 +636,10 @@ body {
 .schedule-slot:hover {
   border-color: var(--slot-hover-border);
   background: var(--brand-soft);
+}
+
+.schedule-slot.is-drag-target {
+  border-color: var(--insert-line);
 }
 
 .slot-header {
@@ -655,6 +662,42 @@ body {
   line-height: 1.4;
 }
 
+.schedule-card-list {
+  position: relative;
+}
+
+.schedule-insert-line {
+  position: relative;
+  width: calc(100% - 4px);
+  height: 4px;
+  margin: 10px 2px 2px;
+  border-radius: 999px;
+  background: var(--insert-line);
+  pointer-events: none;
+  z-index: 2;
+  box-shadow: 0 0 0 2px rgba(var(--panel-rgb), 0.9);
+}
+
+.schedule-insert-line::before,
+.schedule-insert-line::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--insert-line);
+  transform: translateY(-50%);
+}
+
+.schedule-insert-line::before {
+  left: -2px;
+}
+
+.schedule-insert-line::after {
+  right: -2px;
+}
+
 .schedule-card {
   position: relative;
   padding: 10px 12px;
@@ -664,6 +707,19 @@ body {
   margin-top: 8px;
   cursor: pointer;
   box-shadow: var(--schedule-shadow);
+}
+
+.schedule-card[draggable="true"] {
+  cursor: grab;
+}
+
+.schedule-card[draggable="true"]:active {
+  cursor: grabbing;
+}
+
+.schedule-card.is-dragging {
+  opacity: 0.48;
+  outline: 2px solid var(--insert-line);
 }
 
 .schedule-card.priority-high { border-left-color: var(--danger); background: var(--task-high-bg); }

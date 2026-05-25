@@ -94,11 +94,14 @@ createApp({
       authMode: 'login',
       accountMenuOpen: false,
       draggedTaskId: null,
+      draggedScheduleItemId: null,
+      scheduleDropPosition: null,
       scheduleDialogVisible: false,
       scheduleDialogMode: 'create',
       activeScheduleItemId: null,
       activeScheduleTask: null,
       activeScheduleSlot: null,
+      activeScheduleSortOrder: null,
       scheduleForm: { durationMinutes: 30, note: '', completed: false },
       slotEditorVisible: false,
       slotEditorMode: 'day',
@@ -193,6 +196,7 @@ createApp({
         const key = this.scheduleSlotKey(item.date, item.slotKey);
         if (!groups[key]) groups[key] = [];
         groups[key].push(item);
+        groups[key].sort((a, b) => this.compareScheduleItems(a, b));
         return groups;
       }, {});
     },
@@ -571,27 +575,158 @@ createApp({
     scheduleSlotKey(date, slotKey) {
       return `${date}::${slotKey}`;
     },
-    startTaskDrag(task) {
+    scheduleSortValue(item) {
+      const value = Number(item && item.sortOrder);
+      return Number.isFinite(value) ? value : 0;
+    },
+    compareScheduleItems(a, b) {
+      const sortDiff = this.scheduleSortValue(a) - this.scheduleSortValue(b);
+      if (sortDiff !== 0) return sortDiff;
+      return String(a.createdAt || '').localeCompare(String(b.createdAt || ''));
+    },
+    prepareScheduleDragEvent(event, id) {
+      if (!event || !event.dataTransfer) return;
+      event.dataTransfer.effectAllowed = 'move';
+      event.dataTransfer.setData('text/plain', id);
+    },
+    startTaskDrag(task, event = null) {
       if (this.adminMode) return;
       if (this.activePage !== 'daily') return;
+      this.prepareScheduleDragEvent(event, task.id);
       this.draggedTaskId = task.id;
+      this.draggedScheduleItemId = null;
+      this.scheduleDropPosition = null;
     },
-    handleDropOnSlot(day, slot) {
+    startScheduleDrag(item, event = null) {
+      if (this.adminMode) return;
+      if (this.activePage !== 'daily') return;
+      this.prepareScheduleDragEvent(event, item.id);
+      this.draggedScheduleItemId = item.id;
+      this.draggedTaskId = null;
+      this.scheduleDropPosition = null;
+    },
+    clearScheduleDragState() {
+      this.draggedTaskId = null;
+      this.draggedScheduleItemId = null;
+      this.scheduleDropPosition = null;
+    },
+    hasActiveScheduleDrag() {
+      return !!(this.draggedTaskId || this.draggedScheduleItemId);
+    },
+    scheduleDropKey(date, slotKey) {
+      return `${date}::${slotKey}`;
+    },
+    isScheduleDropPosition(day, slot) {
+      return this.scheduleDropPosition
+        && this.scheduleDropPosition.key === this.scheduleDropKey(day.key, slot.key);
+    },
+    isScheduleInsertIndex(day, slot, index) {
+      return this.isScheduleDropPosition(day, slot)
+        && this.scheduleDropPosition.index === index;
+    },
+    updateScheduleDropPosition(event, day, slot) {
+      if (this.adminMode || !this.hasActiveScheduleDrag()) return;
+      const slotElement = event.currentTarget;
+      const cards = Array.from(slotElement.querySelectorAll('.schedule-card'))
+        .filter(card => card.dataset.scheduleId !== this.draggedScheduleItemId);
+      let index = cards.length;
+      if (cards.length) {
+        const targetIndex = cards.findIndex((card) => {
+          const rect = card.getBoundingClientRect();
+          return event.clientY < rect.top + (rect.height / 2);
+        });
+        index = targetIndex < 0 ? cards.length : targetIndex;
+      }
+      this.scheduleDropPosition = {
+        key: this.scheduleDropKey(day.key, slot.key),
+        date: day.key,
+        slotKey: slot.key,
+        index
+      };
+    },
+    dropIndexForSlot(event, day, slot) {
+      if (!this.isScheduleDropPosition(day, slot)) {
+        this.updateScheduleDropPosition(event, day, slot);
+      }
+      return this.isScheduleDropPosition(day, slot)
+        ? this.scheduleDropPosition.index
+        : this.scheduleItemsForSlot(day.key, slot.key).length;
+    },
+    handleDropOnSlot(event, day, slot) {
       if (this.adminMode) return;
       if (!this.currentUser) {
         ElementPlus.ElMessage.warning('请先登录或注册，再创建安排。');
+        this.clearScheduleDragState();
         return;
       }
+      const dropIndex = this.dropIndexForSlot(event, day, slot);
+      if (this.draggedScheduleItemId) {
+        this.moveScheduleItemToSlot(day, slot, dropIndex);
+        return;
+      }
+      if (this.draggedTaskId) {
+        this.openScheduleCreateDialog(day, slot, dropIndex);
+      }
+    },
+    openScheduleCreateDialog(day, slot, dropIndex = null) {
       const task = this.tasks.find(item => item.id === this.draggedTaskId);
       if (!task) return;
+      const remaining = slot.duration - this.slotUsedMinutes(day.key, slot.key);
+      if (remaining <= 0) {
+        ElementPlus.ElMessage.warning('这个时间格子已经排满了。');
+        this.clearScheduleDragState();
+        return;
+      }
       this.scheduleDialogMode = 'create';
       this.activeScheduleItemId = null;
       this.activeScheduleTask = task;
       this.activeScheduleSlot = { ...slot, date: day.key, dateLabel: day.label };
-      const remaining = Math.max(1, slot.duration - this.slotUsedMinutes(day.key, slot.key));
+      this.activeScheduleSortOrder = Number.isInteger(dropIndex)
+        ? this.sortOrderForIndex(day.key, slot.key, null, dropIndex)
+        : null;
       this.scheduleForm = { durationMinutes: Math.min(30, remaining), note: '', completed: false };
       this.scheduleDialogVisible = true;
-      this.draggedTaskId = null;
+      this.clearScheduleDragState();
+    },
+    sortOrderForIndex(date, slotKey, draggedId, dropIndex) {
+      const items = this.scheduleItemsForSlot(date, slotKey)
+        .filter(item => item.id !== draggedId)
+        .sort((a, b) => this.compareScheduleItems(a, b));
+      const index = Math.max(0, Math.min(Number(dropIndex || 0), items.length));
+      const next = items[index];
+      const prev = items[index - 1];
+      if (!prev && !next) return 1024;
+      if (!prev) return this.scheduleSortValue(next) - 1024;
+      if (!next) return this.scheduleSortValue(prev) + 1024;
+      return (this.scheduleSortValue(prev) + this.scheduleSortValue(next)) / 2;
+    },
+    async moveScheduleItemToSlot(day, slot, dropIndex) {
+      const item = this.scheduleItems.find(entry => entry.id === this.draggedScheduleItemId);
+      if (!item) {
+        this.clearScheduleDragState();
+        return;
+      }
+      const sortOrder = this.sortOrderForIndex(day.key, slot.key, item.id, dropIndex);
+      const payload = {
+        date: day.key,
+        slotKey: slot.key,
+        slotLabel: slot.label,
+        slotStart: slot.start,
+        slotEnd: slot.end,
+        durationMinutes: item.durationMinutes,
+        sortOrder,
+        note: item.note || '',
+        completed: !!item.completed
+      };
+      try {
+        await this.apiJson(`${SCHEDULE_API}/${item.id}`, { method: 'PUT', body: JSON.stringify(payload) });
+        await this.loadScheduleItems();
+        ElementPlus.ElMessage.success('安排已调整。');
+      } catch (error) {
+        ElementPlus.ElMessage.error(`调整失败：${error.message}`);
+      } finally {
+        this.clearScheduleDragState();
+      }
     },
     openScheduleEditDialog(item) {
       if (this.adminMode) return;
@@ -603,6 +738,7 @@ createApp({
       this.scheduleDialogMode = 'edit';
       this.activeScheduleItemId = item.id;
       this.activeScheduleTask = task;
+      this.activeScheduleSortOrder = null;
       this.activeScheduleSlot = {
         key: item.slotKey,
         label: item.slotLabel,
@@ -642,6 +778,9 @@ createApp({
         note: this.scheduleForm.note.trim(),
         completed: !!this.scheduleForm.completed
       };
+      if (this.activeScheduleSortOrder !== null) {
+        payload.sortOrder = this.activeScheduleSortOrder;
+      }
       try {
         if (this.scheduleDialogMode === 'create') {
           await this.apiJson(SCHEDULE_API, { method: 'POST', body: JSON.stringify(payload) });
@@ -651,6 +790,7 @@ createApp({
           ElementPlus.ElMessage.success('安排已更新。');
         }
         this.scheduleDialogVisible = false;
+        this.activeScheduleSortOrder = null;
         await this.loadScheduleItems();
       } catch (error) {
         ElementPlus.ElMessage.error(`保存失败：${error.message}`);
