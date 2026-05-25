@@ -536,6 +536,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
 
     def do_PUT(self):
         path = urlparse(self.path).path
+        if path.startswith('/api/admin/users/'):
+            return self.handle_admin_update_user(path.rsplit('/', 1)[-1])
         if path.startswith('/api/tasks/'):
             return self.handle_update_task(path.rsplit('/', 1)[-1])
         if path.startswith('/api/schedule-items/'):
@@ -548,6 +550,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
 
     def do_DELETE(self):
         path = urlparse(self.path).path
+        if path.startswith('/api/admin/users/'):
+            return self.handle_admin_delete_user(path.rsplit('/', 1)[-1])
         if path.startswith('/api/tasks/'):
             return self.handle_delete_task(path.rsplit('/', 1)[-1])
         if path.startswith('/api/schedule-items/'):
@@ -758,6 +762,95 @@ class TodoHandler(SimpleHTTPRequestHandler):
                 for row in rows
             ]
         })
+
+    def handle_admin_update_user(self, user_id_text: str):
+        admin = self.require_admin()
+        if not admin:
+            return
+        try:
+            user_id = int(user_id_text)
+        except ValueError:
+            return self.write_json({'error': 'invalid user id'}, status=HTTPStatus.BAD_REQUEST)
+        payload = self.read_json_body()
+        if payload is None:
+            return
+        name = str(payload.get('name', '')).strip()
+        if not name:
+            return self.write_json({'error': 'name is required', 'message': '姓名不能为空。'}, status=HTTPStatus.BAD_REQUEST)
+        if len(name) > 80:
+            return self.write_json({'error': 'name is too long', 'message': '姓名不能超过 80 个字符。'}, status=HTTPStatus.BAD_REQUEST)
+        with get_db() as conn:
+            user = self.ensure_user_exists(conn, user_id)
+            if not user:
+                return self.write_json({'error': 'user not found'}, status=HTTPStatus.NOT_FOUND)
+            if user['name'] == name:
+                return self.write_json({'ok': True, 'user': public_user(user)})
+            conn.execute('UPDATE users SET name = ? WHERE id = ?', (name, user_id))
+            self.log_operation(
+                conn,
+                int(admin['id']),
+                user_id,
+                'admin.user.update',
+                'user',
+                str(user_id),
+                {'oldName': user['name'], 'newName': name, 'nickname': user['nickname']},
+            )
+            conn.commit()
+            updated = self.ensure_user_exists(conn, user_id)
+        return self.write_json({'ok': True, 'user': public_user(updated)})
+
+    def handle_admin_delete_user(self, user_id_text: str):
+        admin = self.require_admin()
+        if not admin:
+            return
+        try:
+            user_id = int(user_id_text)
+        except ValueError:
+            return self.write_json({'error': 'invalid user id'}, status=HTTPStatus.BAD_REQUEST)
+        if user_id == int(admin['id']):
+            return self.write_json(
+                {'error': 'cannot delete current admin', 'message': '不能删除当前登录的管理员账号。'},
+                status=HTTPStatus.BAD_REQUEST,
+            )
+        with get_db() as conn:
+            user = self.ensure_user_exists(conn, user_id)
+            if not user:
+                return self.write_json({'error': 'user not found'}, status=HTTPStatus.NOT_FOUND)
+            task_count = conn.execute('SELECT COUNT(*) FROM tasks WHERE user_id = ?', (user_id,)).fetchone()[0]
+            schedule_count = conn.execute('SELECT COUNT(*) FROM schedule_items WHERE user_id = ?', (user_id,)).fetchone()[0]
+            log_count = conn.execute('SELECT COUNT(*) FROM operation_logs WHERE target_user_id = ?', (user_id,)).fetchone()[0]
+
+            conn.execute('DELETE FROM sessions WHERE user_id = ?', (user_id,))
+            conn.execute('DELETE FROM schedule_items WHERE user_id = ?', (user_id,))
+            conn.execute('DELETE FROM tasks WHERE user_id = ?', (user_id,))
+            conn.execute('DELETE FROM schedule_template_versions WHERE user_id = ?', (user_id,))
+            conn.execute('DELETE FROM schedule_day_overrides WHERE user_id = ?', (user_id,))
+            conn.execute('UPDATE operation_logs SET actor_user_id = NULL WHERE actor_user_id = ?', (user_id,))
+            conn.execute('DELETE FROM operation_logs WHERE target_user_id = ?', (user_id,))
+            cursor = conn.execute('DELETE FROM users WHERE id = ?', (user_id,))
+            if cursor.rowcount != 1:
+                return self.write_json({'error': 'user not found'}, status=HTTPStatus.NOT_FOUND)
+            self.log_operation(
+                conn,
+                int(admin['id']),
+                int(admin['id']),
+                'admin.user.delete',
+                'user',
+                str(user_id),
+                {
+                    'deletedUser': {
+                        'id': user['id'],
+                        'name': user['name'],
+                        'nickname': user['nickname'],
+                        'role': user['role'],
+                    },
+                    'deletedTaskCount': int(task_count),
+                    'deletedScheduleItemCount': int(schedule_count),
+                    'deletedLogCount': int(log_count),
+                },
+            )
+            conn.commit()
+        return self.write_json({'ok': True, 'id': user_id})
 
     def handle_admin_user_tasks(self, user_id: int):
         with get_db() as conn:

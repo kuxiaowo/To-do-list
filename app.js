@@ -115,6 +115,8 @@ createApp({
       adminSection: 'users',
       adminUsers: [],
       adminSelectedUserId: '',
+      adminEditingUserId: '',
+      adminEditingName: '',
       adminLogs: [],
       adminLogsTotal: 0,
       adminLogsPage: 1,
@@ -323,6 +325,83 @@ createApp({
         this.adminLoading = false;
       }
     },
+    startAdminUserNameEdit(user) {
+      if (!this.isAdmin || !user) return;
+      this.adminEditingUserId = String(user.id);
+      this.adminEditingName = user.name || '';
+    },
+    cancelAdminUserNameEdit() {
+      this.adminEditingUserId = '';
+      this.adminEditingName = '';
+    },
+    async saveAdminUserName(user) {
+      if (!this.isAdmin || !user) return;
+      const name = this.adminEditingName.trim();
+      if (!name) {
+        ElementPlus.ElMessage.warning('姓名不能为空。');
+        return;
+      }
+      if (name === user.name) {
+        this.cancelAdminUserNameEdit();
+        return;
+      }
+      this.adminLoading = true;
+      try {
+        const payload = await this.apiJson(`${ADMIN_API}/users/${encodeURIComponent(user.id)}`, {
+          method: 'PUT',
+          body: JSON.stringify({ name })
+        });
+        const updatedUser = payload.user || { ...user, name };
+        this.adminUsers = this.adminUsers.map(item => (
+          String(item.id) === String(user.id) ? { ...item, name: updatedUser.name || name } : item
+        ));
+        if (this.currentUser && Number(this.currentUser.id) === Number(user.id)) {
+          this.currentUser = { ...this.currentUser, name: updatedUser.name || name };
+        }
+        this.cancelAdminUserNameEdit();
+        ElementPlus.ElMessage.success('姓名已更新。');
+      } catch (error) {
+        ElementPlus.ElMessage.error(`姓名更新失败：${error.message}`);
+      } finally {
+        this.adminLoading = false;
+      }
+    },
+    deleteAdminUser(user) {
+      if (!this.isAdmin || !user) return;
+      if (this.currentUser && Number(user.id) === Number(this.currentUser.id)) {
+        ElementPlus.ElMessage.warning('不能删除当前登录的管理员账号。');
+        return;
+      }
+      ElementPlus.ElMessageBox.confirm(
+        `确定删除用户「${user.name}（${user.nickname}）」？该用户的任务、每日安排、时间格子配置和登录会话都会被删除。`,
+        '删除用户',
+        {
+          confirmButtonText: '删除',
+          cancelButtonText: '取消',
+          type: 'warning'
+        }
+      ).then(async () => {
+        this.adminLoading = true;
+        try {
+          await this.apiJson(`${ADMIN_API}/users/${encodeURIComponent(user.id)}`, { method: 'DELETE' });
+          if (String(this.adminSelectedUserId) === String(user.id)) {
+            this.adminSelectedUserId = '';
+            this.adminLogs = [];
+            this.adminLogsTotal = 0;
+            this.adminTimelineLoadedUserId = '';
+          }
+          await this.loadAdminUsers();
+          if (!this.adminSelectedUserId && this.adminUsers.length) {
+            this.adminSelectedUserId = String(this.adminUsers[0].id);
+          }
+          ElementPlus.ElMessage.success('用户已删除。');
+        } catch (error) {
+          ElementPlus.ElMessage.error(`删除用户失败：${error.message}`);
+        } finally {
+          this.adminLoading = false;
+        }
+      }).catch(() => {});
+    },
     async handleAdminUserChange() {
       if (this.adminSection === 'logs') await this.loadAdminLogs(1);
       if (this.adminSection === 'timeline') await this.loadAdminTimeline();
@@ -390,7 +469,9 @@ createApp({
         'schedule_config.template_update': '更新一周模板',
         'schedule_config.day_update': '更新单日时间格子',
         'schedule_config.day_reset': '重置单日时间格子',
-        'schedule_config.reset': '重置全部时间格子'
+        'schedule_config.reset': '重置全部时间格子',
+        'admin.user.delete': '删除用户',
+        'admin.user.update': '更新用户'
       };
       return labels[action] || action;
     },
@@ -458,6 +539,8 @@ createApp({
       this.adminSection = 'users';
       this.adminUsers = [];
       this.adminSelectedUserId = '';
+      this.adminEditingUserId = '';
+      this.adminEditingName = '';
       this.adminLogs = [];
       this.adminLogsTotal = 0;
       this.adminTimelineLoadedUserId = '';

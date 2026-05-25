@@ -920,6 +920,24 @@ body {
   margin: 0;
 }
 
+.admin-name-editor,
+.admin-name-display {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.admin-name-editor .el-input {
+  max-width: 180px;
+}
+
+.admin-name-display span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .admin-pagination {
   display: flex;
   justify-content: flex-end;
