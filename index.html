@@ -20,7 +20,6 @@
         <div class="summary-header">
           <div>
             <h1 class="summary-title">To-Do List</h1>
-            <p class="summary-subtitle">{{ activePage === 'daily' ? '左侧收纳临时或长期任务；右侧把任务拖进时间格子生成每日安排。' : '左侧收纳还没分配时间的待办池；右侧横向滚动查看已经安排截止时间的任务。' }}</p>
           </div>
           <el-button type="primary" :disabled="!currentUser" @click="openCreateDialog">{{ activePage === 'daily' ? '新增安排' : '新增任务' }}</el-button>
         </div>
@@ -38,9 +37,10 @@
 
         <section class="summary-section">
           <h3>
-            <span>{{ activePage === 'daily' ? '弹性任务池' : '未排期待办池' }}</span>
+            <span>{{ activePage === 'daily' ? '弹性任务池' : '待安排DDL' }}</span>
             <span class="day-subtitle">{{ unscheduledCount }} 项</span>
           </h3>
+          <p class="summary-subtitle">{{ activePage === 'daily' ? '临时或长期任务，不从属于有DDL的任务' : '还没想好截止日期的任务' }}</p>
           <div class="summary-card">
             <div class="summary-card-header">
               <div class="summary-card-title">按优先级排序</div>
@@ -71,7 +71,7 @@
               </div>
             </template>
             <div v-else class="summary-empty">
-              {{ activePage === 'daily' ? '任务池是空的；临时或长期任务可以先放这里，再拖进每日安排。' : '待办池是空的；还没想好时间的任务可以先扔这里。' }}
+              {{ activePage === 'daily' ? '任务池是空的' : '待安排DDL是空的' }}
             </div>
           </div>
         </section>
@@ -84,7 +84,7 @@
               <button class="page-nav-button" :class="{ active: activePage === 'ddl' }" type="button" @click="switchPage('ddl')">DDL日期时间线</button>
               <button class="page-nav-button" :class="{ active: activePage === 'daily' }" type="button" @click="switchPage('daily')">每日安排</button>
             </div>
-            <p>{{ activePage === 'ddl' ? '有截止时间的任务会按时间自动排序；没想好时间的事项会留在左侧待办池。' : '把左侧弹性任务池或下方 DDL 拖到每天的时间栏里，创建可完成的学习安排。' }}</p>
+            <p>{{ activePage === 'ddl' ? '任务自动按截至日期排序' : '把左侧弹性任务池或下方 DDL 拖到每天的时间栏里，创建可完成的学习安排。' }}</p>
           </div>
           <div class="timeline-header-actions">
             <div class="toolbar-row priority-tags">
@@ -439,9 +439,10 @@
               </div>
               <section class="summary-section">
                 <h3>
-                  <span>{{ activePage === 'daily' ? '弹性任务池' : '未排期待办池' }}</span>
+                  <span>{{ activePage === 'daily' ? '弹性任务池' : '待安排DDL' }}</span>
                   <span class="day-subtitle">{{ unscheduledCount }} 项</span>
                 </h3>
+                <p class="summary-subtitle">{{ activePage === 'daily' ? '临时或长期任务，不从属于有DDL的任务' : '还没想好截止日期的任务' }}</p>
                 <div class="summary-card">
                   <div class="summary-card-header">
                     <div class="summary-card-title">按优先级排序</div>
@@ -464,7 +465,7 @@
                     </div>
                   </div>
                   <div v-else class="summary-empty">
-                    {{ activePage === 'daily' ? '任务池是空的；临时或长期任务可以先放这里，再拖进每日安排。' : '待办池是空的；还没想好时间的任务可以先扔这里。' }}
+                    {{ activePage === 'daily' ? '任务池是空的' : '待安排DDL是空的' }}
                   </div>
                 </div>
               </section>
@@ -592,7 +593,7 @@
         </el-form-item>
 
         <el-form-item v-else label="时间安排">
-          <el-switch v-model="form.unscheduled" :active-text="activePage === 'daily' ? '先放入弹性任务池' : '先放入未排期待办池'" inactive-text="设置截止时间"></el-switch>
+          <el-switch v-model="form.unscheduled" :active-text="activePage === 'daily' ? '先放入弹性任务池' : '先放入待安排DDL'" inactive-text="设置截止时间"></el-switch>
         </el-form-item>
 
         <el-form-item label="截止日期" v-if="!isArrangementDialog && !form.unscheduled">

@@ -264,8 +264,12 @@ body {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin: 0 0 10px;
+  margin: 0;
   font-size: 1rem;
+}
+
+.summary-section .summary-subtitle {
+  margin-bottom: 10px;
 }
 
 .summary-card {
