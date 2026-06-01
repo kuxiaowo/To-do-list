@@ -11,7 +11,7 @@
       document.documentElement.dataset.theme = savedTheme === 'dark' ? 'dark' : 'light';
     })();
   </script>
-  <link rel="stylesheet" href="./style.css?v=admin-edit-user-20260525" />
+  <link rel="stylesheet" href="./style.css?v=guide-20260601" />
 </head>
 <body>
   <div id="app" v-cloak>
@@ -21,7 +21,7 @@
           <div>
             <h1 class="summary-title">To-Do List</h1>
           </div>
-          <el-button type="primary" :disabled="!currentUser" @click="openCreateDialog">{{ activePage === 'daily' ? '新增安排' : '新增任务' }}</el-button>
+          <el-button data-guide="add-task" type="primary" :disabled="!currentUser" @click="openCreateDialog">{{ activePage === 'daily' ? '新增安排' : '新增任务' }}</el-button>
         </div>
 
         <div class="toolbar">
@@ -41,7 +41,7 @@
             <span class="day-subtitle">{{ unscheduledCount }} 项</span>
           </h3>
           <p class="summary-subtitle">{{ activePage === 'daily' ? '临时或长期任务，不从属于有DDL的任务' : '还没想好截止日期的任务' }}</p>
-          <div class="summary-card">
+          <div class="summary-card" data-guide="task-pool">
             <div class="summary-card-header">
               <div class="summary-card-title">按优先级排序</div>
               <span class="day-subtitle">{{ unscheduledCount }} 项</span>
@@ -80,7 +80,7 @@
       <main class="timeline-area">
         <div class="timeline-header">
           <div class="timeline-title">
-            <div class="page-nav">
+            <div class="page-nav" data-guide="page-nav">
               <button class="page-nav-button" :class="{ active: activePage === 'ddl' }" type="button" @click="switchPage('ddl')">DDL日期时间线</button>
               <button class="page-nav-button" :class="{ active: activePage === 'daily' }" type="button" @click="switchPage('daily')">每日安排</button>
             </div>
@@ -98,10 +98,11 @@
             </div>
 
             <div class="feedback-quick-action">
-              <el-button type="primary" plain :disabled="!currentUser" @click="openFeedbackDialog">反馈</el-button>
+              <el-button type="primary" plain :disabled="!currentUser" @click="openFeedbackDialog" data-guide="feedback">反馈</el-button>
+              <el-button plain @click="startGuide">帮助</el-button>
             </div>
 
-            <div class="account-menu" @click.stop>
+            <div class="account-menu" data-guide="account" @click.stop>
               <button
                 class="avatar-button"
                 :class="{ 'is-guest': !currentUser }"
@@ -152,7 +153,7 @@
           </div>
         </div>
 
-        <div v-if="activePage === 'ddl'" class="timeline-scroll" ref="timelineScroll">
+        <div v-if="activePage === 'ddl'" class="timeline-scroll" ref="timelineScroll" data-guide="ddl-timeline">
           <div class="timeline-columns">
             <section v-for="day in dayColumns" :key="day.key" class="day-column" :data-day="day.key">
               <div class="day-header">
@@ -188,7 +189,7 @@
         </div>
 
         <div v-else class="daily-board">
-          <div class="daily-tools">
+          <div class="daily-tools" data-guide="daily-tools">
             <div>
               <div class="daily-tools-title">时间格子</div>
               <div class="daily-tools-subtitle">模板会从当前查看日期开始影响之后未单独自定义的日期。</div>
@@ -267,7 +268,7 @@
             </div>
           </div>
 
-          <div class="ddl-dock">
+          <div class="ddl-dock" data-guide="ddl-dock">
             <div class="ddl-dock-header">
               <div class="card-title">按时间排序的 DDL</div>
               <span class="day-subtitle">可重复拖动同一个 DDL</span>
@@ -631,6 +632,30 @@
       </main>
     </div>
 
+    <div v-if="guideVisible" class="guide-layer" @click.self="skipGuide">
+      <div class="guide-backdrop" @click="skipGuide"></div>
+      <div v-if="guideTargetBox" class="guide-highlight" :style="guideTargetBox"></div>
+      <section class="guide-popover" :style="guidePopoverStyle" role="dialog" aria-modal="true" aria-label="新手指引">
+        <div class="guide-kicker">新手指引 {{ guideStepLabel }}</div>
+        <h2>{{ currentGuideStep ? currentGuideStep.title : '' }}</h2>
+        <p>{{ currentGuideStep ? currentGuideStep.text : '' }}</p>
+        <div class="guide-progress" :style="{ '--guide-step-count': guideSteps.length }" aria-hidden="true">
+          <span
+            v-for="(step, index) in guideSteps"
+            :key="step.key"
+            :class="{ active: index === guideStepIndex, done: index < guideStepIndex }"
+          ></span>
+        </div>
+        <div class="guide-actions">
+          <el-button plain @click="skipGuide">跳过</el-button>
+          <div>
+            <el-button plain :disabled="guideStepIndex === 0" @click="prevGuideStep">上一步</el-button>
+            <el-button type="primary" @click="nextGuideStep">{{ guideStepIndex === guideSteps.length - 1 ? '完成' : '下一步' }}</el-button>
+          </div>
+        </div>
+      </section>
+    </div>
+
     <el-dialog
       v-model="feedbackDialogVisible"
       title="反馈"
@@ -863,7 +888,7 @@
 
   <script src="./vendor/vue.global.prod.js"></script>
   <script src="./vendor/element-plus.full.min.js"></script>
-  <script src="./app.js?v=admin-edit-user-20260525"></script>
+  <script src="./app.js?v=guide-20260601"></script>
 </body>
 </html>
 

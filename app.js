@@ -9,6 +9,7 @@ const ADMIN_API = '/api/admin';
 const FEEDBACK_API = '/api/feedback';
 const AUTH_TOKEN_KEY = 'todo-list-auth-token-v1';
 const THEME_STORAGE_KEY = 'todo-list-theme-v1';
+const GUIDE_STORAGE_KEY = 'todo-list-guide-v1';
 // JavaScript Date months are zero-based, so 4 means May.
 const TIMELINE_START_MONTH = 4;
 const TIMELINE_START_DAY = 1;
@@ -134,10 +135,85 @@ createApp({
       adminFeedbackActive: null,
       adminFeedbackReply: '',
       adminLoading: false,
-      adminTimelineLoadedUserId: ''
+      adminTimelineLoadedUserId: '',
+      guideVisible: false,
+      guideStepIndex: 0,
+      guideTargetBox: null,
+      guidePopoverStyle: {},
+      guideSteps: [
+        {
+          key: 'account',
+          target: 'account',
+          title: '先登录自己的账号',
+          text: '登录后会读取并保存你的待办、每日安排和反馈记录。未登录时可以浏览页面，但不能新增或编辑。',
+          page: null
+        },
+        {
+          key: 'add-task',
+          target: 'add-task',
+          title: '从这里新增任务',
+          text: '在 DDL 页面新增带截止时间的任务，在每日安排页面新增弹性任务。按钮会根据当前页面自动切换文案。',
+          page: 'ddl'
+        },
+        {
+          key: 'task-pool',
+          target: 'task-pool',
+          title: '左侧是待安排任务池',
+          text: '没有截止时间的任务会先放在这里。切到每日安排后，这里会变成可拖拽的弹性任务池。',
+          page: 'ddl'
+        },
+        {
+          key: 'page-nav',
+          target: 'page-nav',
+          title: '两个核心视图',
+          text: 'DDL 日期时间线用于看截止日期，每日安排用于把任务拆到具体时间格子里执行。',
+          page: null
+        },
+        {
+          key: 'ddl-timeline',
+          target: 'ddl-timeline',
+          title: 'DDL 会按日期展开',
+          text: '带截止时间的任务会自动落到对应日期列。可以用定位今天、前一周、后一周快速移动。',
+          page: 'ddl'
+        },
+        {
+          key: 'daily-tools',
+          target: 'daily-tools',
+          title: '每日安排使用时间格子',
+          text: '你可以维护一周模板，也可以只编辑某一天的时间格子，让安排贴合当天节奏。',
+          page: 'daily'
+        },
+        {
+          key: 'flex-pool',
+          target: 'task-pool',
+          title: '弹性任务池',
+          text: '这里放没有固定 DDL、但需要安排时间推进的任务。把任务从这里拖到右侧某个时间格子，就会生成当天的一次学习安排。',
+          page: 'daily'
+        },
+        {
+          key: 'ddl-dock',
+          target: 'ddl-dock',
+          title: '把 DDL 拖进每天的计划',
+          text: '每日安排底部会显示按时间排序的 DDL。把任务拖到上方时间格子，就能生成一次可完成的安排。',
+          page: 'daily'
+        },
+        {
+          key: 'feedback',
+          target: 'feedback',
+          title: '遇到问题可以反馈',
+          text: '这里可以提交使用问题或改进建议，并查看管理员回复。',
+          page: null
+        }
+      ]
     };
   },
   computed: {
+    currentGuideStep() {
+      return this.guideSteps[this.guideStepIndex] || null;
+    },
+    guideStepLabel() {
+      return `${this.guideStepIndex + 1} / ${this.guideSteps.length}`;
+    },
     isAdmin() {
       return this.currentUser && this.currentUser.role === 'admin';
     },
@@ -248,10 +324,17 @@ createApp({
     await this.loadScheduleConfig();
     await this.loadTasks();
     await this.loadScheduleItems();
-    this.$nextTick(() => this.scrollToDate(this.currentViewDateKey, 'ddl', 'instant'));
+    window.addEventListener('resize', this.updateGuideTarget);
+    window.addEventListener('scroll', this.updateGuideTarget, true);
+    this.$nextTick(() => {
+      this.scrollToDate(this.currentViewDateKey, 'ddl', 'instant');
+      this.maybeStartGuide();
+    });
   },
   beforeUnmount() {
     document.removeEventListener('click', this.closeAccountMenu);
+    window.removeEventListener('resize', this.updateGuideTarget);
+    window.removeEventListener('scroll', this.updateGuideTarget, true);
   },
   methods: {
     applyTheme() {
@@ -265,6 +348,93 @@ createApp({
     },
     closeAccountMenu() {
       this.accountMenuOpen = false;
+    },
+    maybeStartGuide() {
+      if (this.adminMode || localStorage.getItem(GUIDE_STORAGE_KEY) === 'done') return;
+      this.startGuide(false);
+    },
+    startGuide(force = true) {
+      if (this.adminMode) {
+        if (force) ElementPlus.ElMessage.info('新手指引仅在普通待办页面可用。');
+        return;
+      }
+      this.accountMenuOpen = false;
+      this.guideStepIndex = 0;
+      this.guideVisible = true;
+      this.showGuideStep();
+    },
+    showGuideStep() {
+      const step = this.currentGuideStep;
+      if (!step) {
+        this.finishGuide();
+        return;
+      }
+      if (step.page && step.page !== this.activePage) {
+        this.switchPage(step.page);
+      }
+      this.$nextTick(() => {
+        window.setTimeout(() => this.updateGuideTarget(), 80);
+      });
+    },
+    nextGuideStep() {
+      if (this.guideStepIndex >= this.guideSteps.length - 1) {
+        this.finishGuide();
+        return;
+      }
+      this.guideStepIndex += 1;
+      this.showGuideStep();
+    },
+    prevGuideStep() {
+      if (this.guideStepIndex <= 0) return;
+      this.guideStepIndex -= 1;
+      this.showGuideStep();
+    },
+    skipGuide() {
+      this.finishGuide();
+    },
+    finishGuide() {
+      this.guideVisible = false;
+      this.guideTargetBox = null;
+      this.guidePopoverStyle = {};
+      localStorage.setItem(GUIDE_STORAGE_KEY, 'done');
+    },
+    updateGuideTarget() {
+      if (!this.guideVisible || !this.currentGuideStep) return;
+      const target = document.querySelector(`[data-guide="${this.currentGuideStep.target}"]`);
+      if (!target) {
+        this.guideTargetBox = null;
+        this.guidePopoverStyle = {};
+        return;
+      }
+
+      const rect = target.getBoundingClientRect();
+      const padding = 8;
+      const top = Math.max(8, rect.top - padding);
+      const left = Math.max(8, rect.left - padding);
+      const width = Math.min(window.innerWidth - left - 8, rect.width + padding * 2);
+      const height = Math.min(window.innerHeight - top - 8, rect.height + padding * 2);
+      this.guideTargetBox = {
+        top: `${top}px`,
+        left: `${left}px`,
+        width: `${Math.max(44, width)}px`,
+        height: `${Math.max(36, height)}px`
+      };
+
+      const popoverWidth = Math.min(340, window.innerWidth - 24);
+      let popoverLeft = Math.min(window.innerWidth - popoverWidth - 12, Math.max(12, rect.left));
+      let popoverTop = rect.bottom + 16;
+      if (popoverTop + 220 > window.innerHeight) {
+        popoverTop = Math.max(12, rect.top - 236);
+      }
+      if (window.innerWidth <= 720) {
+        popoverLeft = 12;
+        popoverTop = Math.max(12, Math.min(window.innerHeight - 230, rect.bottom + 12));
+      }
+      this.guidePopoverStyle = {
+        top: `${popoverTop}px`,
+        left: `${popoverLeft}px`,
+        width: `${popoverWidth}px`
+      };
     },
     emptyForm() {
       const now = new Date();

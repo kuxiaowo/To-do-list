@@ -485,12 +485,19 @@ body {
   flex-wrap: wrap;
 }
 
+.timeline-title {
+  flex: 1 1 360px;
+  min-width: 0;
+}
+
 .timeline-header-actions {
   margin-left: auto;
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: flex-end;
   gap: 12px;
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
 }
 
 .priority-tags {
@@ -644,6 +651,7 @@ body {
 .feedback-quick-action {
   display: flex;
   align-items: center;
+  gap: 8px;
 }
 
 .feedback-quick-action .el-button {
@@ -897,6 +905,94 @@ body {
 .ddl-card.priority-medium { border-left-color: var(--warning); }
 .ddl-card.priority-low { border-left-color: var(--success); }
 
+.guide-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 3000;
+  pointer-events: auto;
+}
+
+.guide-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.58);
+}
+
+.guide-highlight {
+  position: fixed;
+  z-index: 3001;
+  border: 2px solid var(--brand-strong);
+  border-radius: 18px;
+  box-shadow:
+    0 0 0 9999px rgba(15, 23, 42, 0.48),
+    0 0 0 6px rgba(37, 99, 235, 0.16),
+    0 16px 36px rgba(15, 23, 42, 0.24);
+  pointer-events: none;
+  transition: top 0.18s ease, left 0.18s ease, width 0.18s ease, height 0.18s ease;
+}
+
+.guide-popover {
+  position: fixed;
+  z-index: 3002;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--panel-border);
+  border-radius: 18px;
+  box-shadow: 0 24px 60px rgba(15, 23, 42, 0.28);
+  padding: 18px;
+}
+
+.guide-kicker {
+  color: var(--brand);
+  font-size: 0.82rem;
+  font-weight: 800;
+  margin-bottom: 8px;
+}
+
+.guide-popover h2 {
+  margin: 0;
+  color: var(--text-strong);
+  font-size: 1.1rem;
+  line-height: 1.35;
+}
+
+.guide-popover p {
+  margin: 10px 0 14px;
+  color: var(--note);
+  font-size: 0.92rem;
+  line-height: 1.65;
+}
+
+.guide-progress {
+  display: grid;
+  grid-template-columns: repeat(var(--guide-step-count), minmax(0, 1fr));
+  gap: 6px;
+  margin-bottom: 16px;
+}
+
+.guide-progress span {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--line);
+}
+
+.guide-progress span.active,
+.guide-progress span.done {
+  background: var(--brand-strong);
+}
+
+.guide-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+
+.guide-actions > div {
+  display: flex;
+  gap: 8px;
+}
+
 .admin-shell {
   display: grid;
   grid-template-columns: 240px minmax(0, 1fr);
@@ -1110,6 +1206,21 @@ body {
 
   .daily-tools-actions {
     justify-content: flex-start;
+  }
+
+  .guide-popover {
+    max-width: calc(100vw - 24px);
+    border-radius: 16px;
+    padding: 16px;
+  }
+
+  .guide-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .guide-actions > div {
+    justify-content: flex-end;
   }
 
   .slot-editor-row {
