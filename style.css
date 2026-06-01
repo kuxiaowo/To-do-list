@@ -447,6 +447,7 @@ body {
 
 .summary-task[draggable="true"] {
   cursor: grab;
+  touch-action: none;
 }
 
 .summary-task[draggable="true"]:active {
@@ -800,6 +801,7 @@ body {
 
 .schedule-card[draggable="true"] {
   cursor: grab;
+  touch-action: none;
 }
 
 .schedule-card[draggable="true"]:active {
@@ -809,6 +811,11 @@ body {
 .schedule-card.is-dragging {
   opacity: 0.48;
   outline: 2px solid var(--insert-line);
+}
+
+body.is-schedule-touch-dragging,
+body.is-schedule-touch-dragging * {
+  user-select: none;
 }
 
 .schedule-card.priority-high { border-left-color: var(--danger); background: var(--task-high-bg); }
@@ -898,6 +905,7 @@ body {
   background: var(--panel);
   padding: 12px;
   cursor: grab;
+  touch-action: none;
   border-left: 5px solid transparent;
 }
 

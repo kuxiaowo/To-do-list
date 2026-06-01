@@ -54,7 +54,8 @@
                 :draggable="activePage === 'daily'"
                 @dragstart="startTaskDrag(task, $event)"
                 @dragend="clearScheduleDragState"
-                @click="openEditDialog(task)"
+                @pointerdown="startTaskPointerDrag(task, $event)"
+                @click="openTaskFromPointerClick(task)"
               >
                 <div class="task-main">
                   <div style="min-width: 0; flex: 1;">
@@ -217,6 +218,8 @@
                   :key="slot.key"
                   class="schedule-slot"
                   :class="{ 'is-drag-target': isScheduleDropPosition(day, slot) }"
+                  :data-schedule-date="day.key"
+                  :data-schedule-slot-key="slot.key"
                   @dragenter.prevent="updateScheduleDropPosition($event, day, slot)"
                   @dragover.prevent="updateScheduleDropPosition($event, day, slot)"
                   @drop.prevent="handleDropOnSlot($event, day, slot)"
@@ -245,7 +248,8 @@
                         draggable="true"
                         @dragstart.stop="startScheduleDrag(item, $event)"
                         @dragend="clearScheduleDragState"
-                        @click="openScheduleEditDialog(item)"
+                        @pointerdown="startSchedulePointerDragForItem(item, $event)"
+                        @click="openScheduleFromPointerClick(item)"
                       >
                         <div class="task-title">{{ item.task.title }}</div>
                         <div class="task-meta">
@@ -281,6 +285,7 @@
                 draggable="true"
                 @dragstart="startTaskDrag(task, $event)"
                 @dragend="clearScheduleDragState"
+                @pointerdown="startTaskPointerDrag(task, $event)"
               >
                 <div class="task-title">{{ task.title }}</div>
                 <div class="task-meta">

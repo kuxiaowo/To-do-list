@@ -98,6 +98,8 @@ createApp({
       draggedTaskId: null,
       draggedScheduleItemId: null,
       scheduleDropPosition: null,
+      schedulePointerDrag: null,
+      suppressNextScheduleClick: false,
       scheduleDialogVisible: false,
       scheduleDialogMode: 'create',
       activeScheduleItemId: null,
@@ -351,6 +353,7 @@ createApp({
     document.removeEventListener('click', this.closeAccountMenu);
     window.removeEventListener('resize', this.updateGuideTarget);
     window.removeEventListener('scroll', this.updateGuideTarget, true);
+    this.removeSchedulePointerListeners();
   },
   methods: {
     applyTheme() {
@@ -1002,6 +1005,118 @@ createApp({
       this.draggedTaskId = null;
       this.scheduleDropPosition = null;
     },
+    startTaskPointerDrag(task, event) {
+      this.startSchedulePointerDrag('task', task.id, event);
+    },
+    startSchedulePointerDragForItem(item, event) {
+      this.startSchedulePointerDrag('schedule', item.id, event);
+    },
+    startSchedulePointerDrag(type, id, event) {
+      if (this.adminMode || this.activePage !== 'daily') return;
+      if (!event || event.pointerType === 'mouse' || event.button !== 0) return;
+      this.schedulePointerDrag = {
+        type,
+        id,
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        clientX: event.clientX,
+        clientY: event.clientY,
+        dragging: false
+      };
+      window.addEventListener('pointermove', this.handleSchedulePointerMove, { passive: false });
+      window.addEventListener('pointerup', this.finishSchedulePointerDrag, { passive: false });
+      window.addEventListener('pointercancel', this.cancelSchedulePointerDrag, { passive: false });
+    },
+    handleSchedulePointerMove(event) {
+      const drag = this.schedulePointerDrag;
+      if (!drag || event.pointerId !== drag.pointerId) return;
+      drag.clientX = event.clientX;
+      drag.clientY = event.clientY;
+      const distance = Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY);
+      if (!drag.dragging && distance < 8) return;
+      event.preventDefault();
+      if (!drag.dragging) {
+        drag.dragging = true;
+        document.body.classList.add('is-schedule-touch-dragging');
+        if (drag.type === 'task') {
+          this.draggedTaskId = drag.id;
+          this.draggedScheduleItemId = null;
+        } else {
+          this.draggedScheduleItemId = drag.id;
+          this.draggedTaskId = null;
+        }
+        this.scheduleDropPosition = null;
+      }
+      const slotElement = this.scheduleSlotElementFromPoint(event.clientX, event.clientY);
+      const context = this.scheduleSlotContextFromElement(slotElement);
+      if (!context) {
+        this.scheduleDropPosition = null;
+        return;
+      }
+      this.updateScheduleDropPosition({
+        currentTarget: slotElement,
+        clientY: event.clientY
+      }, context.day, context.slot);
+    },
+    finishSchedulePointerDrag(event) {
+      const drag = this.schedulePointerDrag;
+      if (!drag || event.pointerId !== drag.pointerId) return;
+      if (drag.dragging) {
+        event.preventDefault();
+        const slotElement = this.scheduleSlotElementFromPoint(event.clientX, event.clientY);
+        const context = this.scheduleSlotContextFromElement(slotElement);
+        if (context) {
+          this.handleDropOnSlot({
+            currentTarget: slotElement,
+            clientY: event.clientY
+          }, context.day, context.slot);
+        } else {
+          this.clearScheduleDragState();
+        }
+        this.suppressNextScheduleClick = true;
+        window.setTimeout(() => {
+          this.suppressNextScheduleClick = false;
+        }, 200);
+      }
+      this.schedulePointerDrag = null;
+      document.body.classList.remove('is-schedule-touch-dragging');
+      this.removeSchedulePointerListeners();
+    },
+    cancelSchedulePointerDrag(event = null) {
+      const drag = this.schedulePointerDrag;
+      if (event && drag && event.pointerId !== drag.pointerId) return;
+      this.schedulePointerDrag = null;
+      document.body.classList.remove('is-schedule-touch-dragging');
+      this.removeSchedulePointerListeners();
+      this.clearScheduleDragState();
+    },
+    removeSchedulePointerListeners() {
+      window.removeEventListener('pointermove', this.handleSchedulePointerMove);
+      window.removeEventListener('pointerup', this.finishSchedulePointerDrag);
+      window.removeEventListener('pointercancel', this.cancelSchedulePointerDrag);
+    },
+    scheduleSlotElementFromPoint(clientX, clientY) {
+      const element = document.elementFromPoint(clientX, clientY);
+      return element ? element.closest('.schedule-slot') : null;
+    },
+    scheduleSlotContextFromElement(slotElement) {
+      if (!slotElement) return null;
+      const date = slotElement.dataset.scheduleDate;
+      const slotKey = slotElement.dataset.scheduleSlotKey;
+      if (!date || !slotKey) return null;
+      const day = this.scheduleDayColumns.find(item => item.key === date);
+      const slot = day ? day.slots.find(item => item.key === slotKey) : null;
+      return day && slot ? { day, slot } : null;
+    },
+    openTaskFromPointerClick(task) {
+      if (this.suppressNextScheduleClick) return;
+      this.openEditDialog(task);
+    },
+    openScheduleFromPointerClick(item) {
+      if (this.suppressNextScheduleClick) return;
+      this.openScheduleEditDialog(item);
+    },
     clearScheduleDragState() {
       this.draggedTaskId = null;
       this.draggedScheduleItemId = null;
@@ -1025,7 +1140,7 @@ createApp({
       if (this.adminMode || !this.hasActiveScheduleDrag()) return;
       const slotElement = event.currentTarget;
       const cards = Array.from(slotElement.querySelectorAll('.schedule-card'))
-        .filter(card => card.dataset.scheduleId !== this.draggedScheduleItemId);
+        .filter(card => String(card.dataset.scheduleId) !== String(this.draggedScheduleItemId));
       let index = cards.length;
       if (cards.length) {
         const targetIndex = cards.findIndex((card) => {
