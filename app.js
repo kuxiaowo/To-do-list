@@ -6,6 +6,7 @@ const SCHEDULE_CONFIG_API = '/api/schedule-config';
 const SCHEDULE_TEMPLATE_API = '/api/schedule-template';
 const SCHEDULE_DAY_SLOTS_API = '/api/schedule-day-slots';
 const ADMIN_API = '/api/admin';
+const FEEDBACK_API = '/api/feedback';
 const AUTH_TOKEN_KEY = 'todo-list-auth-token-v1';
 const THEME_STORAGE_KEY = 'todo-list-theme-v1';
 // JavaScript Date months are zero-based, so 4 means May.
@@ -111,6 +112,10 @@ createApp({
       slotEditorWeekSlots: JSON.parse(JSON.stringify(DEFAULT_WEEK_SLOTS)),
       loginForm: { nickname: '', password: '' },
       registerForm: { name: '', nickname: '', password: '' },
+      feedbackDialogVisible: false,
+      feedbackForm: { content: '' },
+      feedbackItems: [],
+      feedbackLoading: false,
       adminMode: false,
       adminSection: 'users',
       adminUsers: [],
@@ -121,6 +126,13 @@ createApp({
       adminLogsTotal: 0,
       adminLogsPage: 1,
       adminLogsPageSize: 50,
+      adminFeedback: [],
+      adminFeedbackTotal: 0,
+      adminFeedbackPage: 1,
+      adminFeedbackPageSize: 50,
+      adminFeedbackReplyVisible: false,
+      adminFeedbackActive: null,
+      adminFeedbackReply: '',
       adminLoading: false,
       adminTimelineLoadedUserId: ''
     };
@@ -298,6 +310,7 @@ createApp({
       }
       if (this.adminSection === 'logs') await this.loadAdminLogs(1);
       if (this.adminSection === 'timeline') await this.loadAdminTimeline();
+      if (this.adminSection === 'feedback') await this.loadAdminFeedback(1);
     },
     async exitAdminMode() {
       this.adminMode = false;
@@ -312,6 +325,7 @@ createApp({
       if (section === 'users') await this.loadAdminUsers();
       if (section === 'logs') await this.loadAdminLogs(1);
       if (section === 'timeline') await this.loadAdminTimeline();
+      if (section === 'feedback') await this.loadAdminFeedback(1);
     },
     async loadAdminUsers() {
       if (!this.isAdmin) return;
@@ -425,6 +439,55 @@ createApp({
         this.adminLoading = false;
       }
     },
+    async loadAdminFeedback(page = this.adminFeedbackPage) {
+      if (!this.isAdmin) {
+        this.adminFeedback = [];
+        this.adminFeedbackTotal = 0;
+        return;
+      }
+      this.adminLoading = true;
+      try {
+        const url = `${ADMIN_API}/feedback?page=${page}&pageSize=${this.adminFeedbackPageSize}`;
+        const payload = await this.apiJson(url, { cache: 'no-store' });
+        this.adminFeedback = Array.isArray(payload.feedback) ? payload.feedback : [];
+        this.adminFeedbackTotal = Number(payload.total || 0);
+        this.adminFeedbackPage = Number(payload.page || page);
+      } catch (error) {
+        ElementPlus.ElMessage.error(`反馈读取失败：${error.message}`);
+      } finally {
+        this.adminLoading = false;
+      }
+    },
+    openAdminFeedbackReply(row) {
+      if (!this.isAdmin || !row) return;
+      this.adminFeedbackActive = row;
+      this.adminFeedbackReply = row.adminReply || '';
+      this.adminFeedbackReplyVisible = true;
+    },
+    async saveAdminFeedbackReply() {
+      if (!this.isAdmin || !this.adminFeedbackActive) return;
+      const reply = this.adminFeedbackReply.trim();
+      if (!reply) {
+        ElementPlus.ElMessage.warning('回复内容不能为空。');
+        return;
+      }
+      this.adminLoading = true;
+      try {
+        await this.apiJson(`${ADMIN_API}/feedback/${encodeURIComponent(this.adminFeedbackActive.id)}/reply`, {
+          method: 'PUT',
+          body: JSON.stringify({ reply })
+        });
+        this.adminFeedbackReplyVisible = false;
+        this.adminFeedbackActive = null;
+        this.adminFeedbackReply = '';
+        await this.loadAdminFeedback(this.adminFeedbackPage);
+        ElementPlus.ElMessage.success('反馈回复已保存。');
+      } catch (error) {
+        ElementPlus.ElMessage.error(`回复保存失败：${error.message}`);
+      } finally {
+        this.adminLoading = false;
+      }
+    },
     async loadAdminTimeline() {
       if (!this.isAdmin || !this.adminSelectedUserId) {
         this.tasks = [];
@@ -471,7 +534,9 @@ createApp({
         'schedule_config.day_reset': '重置单日时间格子',
         'schedule_config.reset': '重置全部时间格子',
         'admin.user.delete': '删除用户',
-        'admin.user.update': '更新用户'
+        'admin.user.update': '更新用户',
+        'feedback.create': '提交反馈',
+        'admin.feedback.reply': '回复反馈'
       };
       return labels[action] || action;
     },
@@ -529,6 +594,61 @@ createApp({
         ElementPlus.ElMessage.error(`注册失败：${error.message}`);
       }
     },
+    async openFeedbackDialog() {
+      if (!this.currentUser) {
+        ElementPlus.ElMessage.warning('请先登录后再提交反馈。');
+        return;
+      }
+      this.accountMenuOpen = false;
+      this.feedbackDialogVisible = true;
+      await this.loadFeedback();
+    },
+    async loadFeedback() {
+      if (!this.currentUser) {
+        this.feedbackItems = [];
+        return;
+      }
+      this.feedbackLoading = true;
+      try {
+        const payload = await this.apiJson(FEEDBACK_API, { cache: 'no-store' });
+        this.feedbackItems = Array.isArray(payload.feedback) ? payload.feedback : [];
+      } catch (error) {
+        ElementPlus.ElMessage.error(`反馈读取失败：${error.message}`);
+      } finally {
+        this.feedbackLoading = false;
+      }
+    },
+    async submitFeedback() {
+      if (!this.currentUser) {
+        ElementPlus.ElMessage.warning('请先登录后再提交反馈。');
+        return;
+      }
+      const content = this.feedbackForm.content.trim();
+      if (!content) {
+        ElementPlus.ElMessage.warning('反馈内容不能为空。');
+        return;
+      }
+      this.feedbackLoading = true;
+      try {
+        await this.apiJson(FEEDBACK_API, {
+          method: 'POST',
+          body: JSON.stringify({ content })
+        });
+        this.feedbackForm.content = '';
+        await this.loadFeedback();
+        ElementPlus.ElMessage.success('反馈已提交。');
+      } catch (error) {
+        ElementPlus.ElMessage.error(`反馈提交失败：${error.message}`);
+      } finally {
+        this.feedbackLoading = false;
+      }
+    },
+    feedbackStatusLabel(status) {
+      return status === 'replied' ? '已回复' : '待回复';
+    },
+    feedbackStatusType(status) {
+      return status === 'replied' ? 'success' : 'warning';
+    },
     async logout() {
       if (this.authToken) {
         await this.apiJson(`${AUTH_API}/logout`, { method: 'POST' }).catch(() => {});
@@ -543,6 +663,14 @@ createApp({
       this.adminEditingName = '';
       this.adminLogs = [];
       this.adminLogsTotal = 0;
+      this.adminFeedback = [];
+      this.adminFeedbackTotal = 0;
+      this.adminFeedbackReplyVisible = false;
+      this.adminFeedbackActive = null;
+      this.adminFeedbackReply = '';
+      this.feedbackDialogVisible = false;
+      this.feedbackForm.content = '';
+      this.feedbackItems = [];
       this.adminTimelineLoadedUserId = '';
       this.tasks = [];
       this.scheduleItems = [];

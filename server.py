@@ -209,6 +209,22 @@ def init_db() -> None:
             )
             '''
         )
+        conn.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS feedback (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                content TEXT NOT NULL,
+                admin_reply TEXT NOT NULL DEFAULT '',
+                replied_by INTEGER,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+                FOREIGN KEY(replied_by) REFERENCES users(id) ON DELETE SET NULL
+            )
+            '''
+        )
         task_columns = {row[1] for row in conn.execute('PRAGMA table_info(tasks)').fetchall()}
         if 'subject' not in task_columns:
             conn.execute("ALTER TABLE tasks ADD COLUMN subject TEXT NOT NULL DEFAULT ''")
@@ -500,6 +516,26 @@ def public_operation_log(row: sqlite3.Row) -> dict:
     }
 
 
+def public_feedback(row: sqlite3.Row, include_user: bool = False) -> dict:
+    payload = {
+        'id': row['id'],
+        'userId': row['user_id'],
+        'content': row['content'],
+        'adminReply': row['admin_reply'],
+        'repliedBy': row['replied_by'],
+        'status': row['status'],
+        'createdAt': row['created_at'],
+        'updatedAt': row['updated_at'],
+    }
+    if include_user:
+        payload['user'] = {
+            'id': row['user_id'],
+            'name': row['user_name'],
+            'nickname': row['user_nickname'],
+        }
+    return payload
+
+
 class TodoHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(BASE_DIR), **kwargs)
@@ -514,6 +550,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return self.handle_list_schedule_items()
         if path == '/api/schedule-config':
             return self.handle_get_schedule_config()
+        if path == '/api/feedback':
+            return self.handle_list_feedback()
         if path == '/api/auth/me':
             return self.handle_auth_me()
         if path == '/api/health':
@@ -532,10 +570,16 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return self.handle_create_task()
         if path == '/api/schedule-items':
             return self.handle_create_schedule_item()
+        if path == '/api/feedback':
+            return self.handle_create_feedback()
         self.send_error(HTTPStatus.NOT_FOUND, 'Not found')
 
     def do_PUT(self):
         path = urlparse(self.path).path
+        if path.startswith('/api/admin/feedback/') and path.endswith('/reply'):
+            parts = path.strip('/').split('/')
+            if len(parts) == 5:
+                return self.handle_admin_reply_feedback(parts[3])
         if path.startswith('/api/admin/users/'):
             return self.handle_admin_update_user(path.rsplit('/', 1)[-1])
         if path.startswith('/api/tasks/'):
@@ -710,6 +754,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
         parts = path.strip('/').split('/')
         if parts == ['api', 'admin', 'users']:
             return self.handle_admin_users()
+        if parts == ['api', 'admin', 'feedback']:
+            return self.handle_admin_feedback()
         if len(parts) == 5 and parts[:3] == ['api', 'admin', 'users']:
             try:
                 target_user_id = int(parts[3])
@@ -762,6 +808,87 @@ class TodoHandler(SimpleHTTPRequestHandler):
                 for row in rows
             ]
         })
+
+    def handle_admin_feedback(self):
+        query = parse_qs(urlparse(self.path).query)
+        try:
+            page = max(1, int(query.get('page', ['1'])[0]))
+            page_size = min(100, max(1, int(query.get('pageSize', ['50'])[0])))
+        except ValueError:
+            return self.write_json({'error': 'invalid pagination'}, status=HTTPStatus.BAD_REQUEST)
+        offset = (page - 1) * page_size
+        with get_db() as conn:
+            total = conn.execute('SELECT COUNT(*) FROM feedback').fetchone()[0]
+            rows = conn.execute(
+                '''
+                SELECT feedback.id, feedback.user_id, feedback.content, feedback.admin_reply,
+                       feedback.replied_by, feedback.status, feedback.created_at, feedback.updated_at,
+                       users.name AS user_name, users.nickname AS user_nickname
+                FROM feedback
+                JOIN users ON users.id = feedback.user_id
+                ORDER BY feedback.created_at DESC, feedback.id DESC
+                LIMIT ? OFFSET ?
+                ''',
+                (page_size, offset),
+            ).fetchall()
+        return self.write_json({
+            'feedback': [public_feedback(row, include_user=True) for row in rows],
+            'total': total,
+            'page': page,
+            'pageSize': page_size,
+        })
+
+    def handle_admin_reply_feedback(self, feedback_id_text: str):
+        admin = self.require_admin()
+        if not admin:
+            return
+        try:
+            feedback_id = int(feedback_id_text)
+        except ValueError:
+            return self.write_json({'error': 'invalid feedback id'}, status=HTTPStatus.BAD_REQUEST)
+        payload = self.read_json_body()
+        if payload is None:
+            return
+        reply = str(payload.get('reply', '')).strip()
+        if not reply:
+            return self.write_json({'error': 'reply is required', 'message': '回复内容不能为空。'}, status=HTTPStatus.BAD_REQUEST)
+        if len(reply) > 1000:
+            return self.write_json({'error': 'reply is too long', 'message': '回复内容不能超过 1000 个字符。'}, status=HTTPStatus.BAD_REQUEST)
+        now = now_iso()
+        with get_db() as conn:
+            row = conn.execute('SELECT id, user_id, content FROM feedback WHERE id = ?', (feedback_id,)).fetchone()
+            if not row:
+                return self.write_json({'error': 'feedback not found'}, status=HTTPStatus.NOT_FOUND)
+            conn.execute(
+                '''
+                UPDATE feedback
+                SET admin_reply = ?, replied_by = ?, status = 'replied', updated_at = ?
+                WHERE id = ?
+                ''',
+                (reply, admin['id'], now, feedback_id),
+            )
+            self.log_operation(
+                conn,
+                int(admin['id']),
+                int(row['user_id']),
+                'admin.feedback.reply',
+                'feedback',
+                str(feedback_id),
+                {'reply': reply},
+            )
+            conn.commit()
+            updated = conn.execute(
+                '''
+                SELECT feedback.id, feedback.user_id, feedback.content, feedback.admin_reply,
+                       feedback.replied_by, feedback.status, feedback.created_at, feedback.updated_at,
+                       users.name AS user_name, users.nickname AS user_nickname
+                FROM feedback
+                JOIN users ON users.id = feedback.user_id
+                WHERE feedback.id = ?
+                ''',
+                (feedback_id,),
+            ).fetchone()
+        return self.write_json({'ok': True, 'feedback': public_feedback(updated, include_user=True)})
 
     def handle_admin_update_user(self, user_id_text: str):
         admin = self.require_admin()
@@ -819,12 +946,15 @@ class TodoHandler(SimpleHTTPRequestHandler):
             task_count = conn.execute('SELECT COUNT(*) FROM tasks WHERE user_id = ?', (user_id,)).fetchone()[0]
             schedule_count = conn.execute('SELECT COUNT(*) FROM schedule_items WHERE user_id = ?', (user_id,)).fetchone()[0]
             log_count = conn.execute('SELECT COUNT(*) FROM operation_logs WHERE target_user_id = ?', (user_id,)).fetchone()[0]
+            feedback_count = conn.execute('SELECT COUNT(*) FROM feedback WHERE user_id = ?', (user_id,)).fetchone()[0]
 
             conn.execute('DELETE FROM sessions WHERE user_id = ?', (user_id,))
             conn.execute('DELETE FROM schedule_items WHERE user_id = ?', (user_id,))
             conn.execute('DELETE FROM tasks WHERE user_id = ?', (user_id,))
             conn.execute('DELETE FROM schedule_template_versions WHERE user_id = ?', (user_id,))
             conn.execute('DELETE FROM schedule_day_overrides WHERE user_id = ?', (user_id,))
+            conn.execute('UPDATE feedback SET replied_by = NULL WHERE replied_by = ?', (user_id,))
+            conn.execute('DELETE FROM feedback WHERE user_id = ?', (user_id,))
             conn.execute('UPDATE operation_logs SET actor_user_id = NULL WHERE actor_user_id = ?', (user_id,))
             conn.execute('DELETE FROM operation_logs WHERE target_user_id = ?', (user_id,))
             cursor = conn.execute('DELETE FROM users WHERE id = ?', (user_id,))
@@ -846,6 +976,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
                     },
                     'deletedTaskCount': int(task_count),
                     'deletedScheduleItemCount': int(schedule_count),
+                    'deletedFeedbackCount': int(feedback_count),
                     'deletedLogCount': int(log_count),
                 },
             )
@@ -909,6 +1040,64 @@ class TodoHandler(SimpleHTTPRequestHandler):
             'pageSize': page_size,
             'user': public_user(user),
         })
+
+    def handle_list_feedback(self):
+        user = self.require_user()
+        if not user:
+            return
+        with get_db() as conn:
+            rows = conn.execute(
+                '''
+                SELECT id, user_id, content, admin_reply, replied_by, status, created_at, updated_at
+                FROM feedback
+                WHERE user_id = ?
+                ORDER BY created_at DESC, id DESC
+                ''',
+                (user['id'],),
+            ).fetchall()
+        return self.write_json({'feedback': [public_feedback(row) for row in rows]})
+
+    def handle_create_feedback(self):
+        user = self.require_user()
+        if not user:
+            return
+        payload = self.read_json_body()
+        if payload is None:
+            return
+        content = str(payload.get('content', '')).strip()
+        if not content:
+            return self.write_json({'error': 'content is required', 'message': '反馈内容不能为空。'}, status=HTTPStatus.BAD_REQUEST)
+        if len(content) > 1000:
+            return self.write_json({'error': 'content is too long', 'message': '反馈内容不能超过 1000 个字符。'}, status=HTTPStatus.BAD_REQUEST)
+        now = now_iso()
+        with get_db() as conn:
+            cursor = conn.execute(
+                '''
+                INSERT INTO feedback (user_id, content, admin_reply, replied_by, status, created_at, updated_at)
+                VALUES (?, ?, '', NULL, 'pending', ?, ?)
+                ''',
+                (user['id'], content, now, now),
+            )
+            feedback_id = cursor.lastrowid
+            self.log_operation(
+                conn,
+                int(user['id']),
+                int(user['id']),
+                'feedback.create',
+                'feedback',
+                str(feedback_id),
+                {'content': content},
+            )
+            conn.commit()
+            row = conn.execute(
+                '''
+                SELECT id, user_id, content, admin_reply, replied_by, status, created_at, updated_at
+                FROM feedback
+                WHERE id = ?
+                ''',
+                (feedback_id,),
+            ).fetchone()
+        return self.write_json({'ok': True, 'feedback': public_feedback(row)}, status=HTTPStatus.CREATED)
 
     def handle_list_tasks(self):
         user = self.current_user()

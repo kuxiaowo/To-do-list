@@ -97,6 +97,10 @@
               <el-switch v-model="isDarkMode" active-text="深色模式" inactive-text="浅色模式" @change="setTheme"></el-switch>
             </div>
 
+            <div class="feedback-quick-action">
+              <el-button type="primary" plain :disabled="!currentUser" @click="openFeedbackDialog">反馈</el-button>
+            </div>
+
             <div class="account-menu" @click.stop>
               <button
                 class="avatar-button"
@@ -119,6 +123,7 @@
 
                 <div v-if="currentUser" class="auth-form">
                   <el-button v-if="isAdmin" type="primary" plain @click="openAdminMode('users')">进入管理员后台</el-button>
+                  <el-button plain @click="openFeedbackDialog">反馈</el-button>
                   <el-button plain @click="logout">退出账号，重新登录</el-button>
                 </div>
 
@@ -300,6 +305,7 @@
         <nav class="admin-nav">
           <button class="admin-nav-button" :class="{ active: adminSection === 'users' }" type="button" @click="switchAdminSection('users')">用户列表</button>
           <button class="admin-nav-button" :class="{ active: adminSection === 'logs' }" type="button" @click="switchAdminSection('logs')">用户日志</button>
+          <button class="admin-nav-button" :class="{ active: adminSection === 'feedback' }" type="button" @click="switchAdminSection('feedback')">用户反馈</button>
           <button class="admin-nav-button" :class="{ active: adminSection === 'timeline' }" type="button" @click="switchAdminSection('timeline')">用户时间表</button>
         </nav>
         <div class="admin-sidebar-footer">
@@ -399,6 +405,58 @@
               :page-size="adminLogsPageSize"
               :current-page="adminLogsPage"
               @current-change="loadAdminLogs"
+            ></el-pagination>
+          </div>
+        </section>
+
+        <section v-else-if="adminSection === 'feedback'" class="admin-panel">
+          <div class="admin-panel-header">
+            <div>
+              <h2>用户反馈</h2>
+              <p>查看所有用户提交的反馈，并给出管理员回复。</p>
+            </div>
+            <el-button plain @click="loadAdminFeedback(1)">刷新反馈</el-button>
+          </div>
+          <el-table :data="adminFeedback" style="width: 100%;">
+            <el-table-column label="时间" min-width="160">
+              <template #default="{ row }">{{ formatDateTime(row.createdAt) }}</template>
+            </el-table-column>
+            <el-table-column label="用户" min-width="180">
+              <template #default="{ row }">
+                {{ row.user ? `${row.user.name}（${row.user.nickname}）` : row.userId }}
+              </template>
+            </el-table-column>
+            <el-table-column label="状态" width="100">
+              <template #default="{ row }">
+                <el-tag :type="feedbackStatusType(row.status)" effect="plain">{{ feedbackStatusLabel(row.status) }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="反馈内容" min-width="260">
+              <template #default="{ row }">
+                <div class="feedback-table-text">{{ row.content }}</div>
+              </template>
+            </el-table-column>
+            <el-table-column label="管理员回复" min-width="260">
+              <template #default="{ row }">
+                <div class="feedback-table-text">{{ row.adminReply || '—' }}</div>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="110" fixed="right">
+              <template #default="{ row }">
+                <el-button size="small" type="primary" plain @click="openAdminFeedbackReply(row)">
+                  {{ row.adminReply ? '编辑回复' : '回复' }}
+                </el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+          <div class="admin-pagination">
+            <el-pagination
+              background
+              layout="prev, pager, next, total"
+              :total="adminFeedbackTotal"
+              :page-size="adminFeedbackPageSize"
+              :current-page="adminFeedbackPage"
+              @current-change="loadAdminFeedback"
             ></el-pagination>
           </div>
         </section>
@@ -572,6 +630,86 @@
         </section>
       </main>
     </div>
+
+    <el-dialog
+      v-model="feedbackDialogVisible"
+      title="反馈"
+      width="min(92vw, 680px)"
+      destroy-on-close
+    >
+      <div class="feedback-dialog" v-loading="feedbackLoading">
+        <el-form :model="feedbackForm" label-width="80px" @submit.prevent>
+          <el-form-item label="反馈内容">
+            <el-input
+              v-model="feedbackForm.content"
+              type="textarea"
+              :rows="5"
+              maxlength="1000"
+              show-word-limit
+              placeholder="写下你遇到的问题、建议或希望改进的地方。"
+            ></el-input>
+          </el-form-item>
+          <el-form-item>
+            <el-button type="primary" @click="submitFeedback">提交反馈</el-button>
+            <el-button plain @click="loadFeedback">刷新历史</el-button>
+          </el-form-item>
+        </el-form>
+
+        <div class="feedback-history">
+          <div class="feedback-history-header">
+            <h3>我的反馈</h3>
+            <span class="day-subtitle">{{ feedbackItems.length }} 条</span>
+          </div>
+          <div v-if="feedbackItems.length" class="feedback-list">
+            <article v-for="item in feedbackItems" :key="item.id" class="feedback-item">
+              <div class="feedback-item-header">
+                <span>{{ formatDateTime(item.createdAt) }}</span>
+                <el-tag :type="feedbackStatusType(item.status)" effect="plain">{{ feedbackStatusLabel(item.status) }}</el-tag>
+              </div>
+              <div class="feedback-content">{{ item.content }}</div>
+              <div v-if="item.adminReply" class="feedback-reply">
+                <strong>管理员回复：</strong>{{ item.adminReply }}
+              </div>
+            </article>
+          </div>
+          <div v-else class="empty-column">暂无反馈记录。</div>
+        </div>
+      </div>
+    </el-dialog>
+
+    <el-dialog
+      v-model="adminFeedbackReplyVisible"
+      title="回复反馈"
+      width="min(92vw, 620px)"
+      destroy-on-close
+    >
+      <div v-if="adminFeedbackActive" class="feedback-reply-dialog">
+        <div class="feedback-reply-source">
+          <div class="day-subtitle">
+            {{ adminFeedbackActive.user ? `${adminFeedbackActive.user.name}（${adminFeedbackActive.user.nickname}）` : adminFeedbackActive.userId }}
+            · {{ formatDateTime(adminFeedbackActive.createdAt) }}
+          </div>
+          <div class="feedback-content">{{ adminFeedbackActive.content }}</div>
+        </div>
+        <el-input
+          v-model="adminFeedbackReply"
+          type="textarea"
+          :rows="5"
+          maxlength="1000"
+          show-word-limit
+          placeholder="填写给用户的回复。"
+        ></el-input>
+      </div>
+      <template #footer>
+        <div class="dialog-footer">
+          <div></div>
+          <div class="right-actions">
+            <el-button @click="adminFeedbackReplyVisible = false">取消</el-button>
+            <el-button type="primary" @click="saveAdminFeedbackReply">保存回复</el-button>
+          </div>
+        </div>
+      </template>
+    </el-dialog>
 
     <el-dialog
       v-model="dialogVisible"
