@@ -82,7 +82,7 @@
           <div class="timeline-title">
             <div class="page-nav" data-guide="page-nav">
               <button class="page-nav-button" :class="{ active: activePage === 'ddl' }" type="button" @click="switchPage('ddl')">DDL日期时间线</button>
-              <button class="page-nav-button" :class="{ active: activePage === 'daily' }" type="button" @click="switchPage('daily')">每日安排</button>
+              <button class="page-nav-button" :class="{ active: activePage === 'daily' }" type="button" data-guide="daily-tab" @click="switchPage('daily')">每日安排</button>
             </div>
             <p>{{ activePage === 'ddl' ? '任务自动按截至日期排序' : '把左侧弹性任务池或下方 DDL 拖到每天的时间栏里，创建可完成的学习安排。' }}</p>
           </div>
@@ -632,7 +632,12 @@
       </main>
     </div>
 
-    <div v-if="guideVisible" class="guide-layer" @click.self="skipGuide">
+    <div
+      v-if="guideVisible"
+      class="guide-layer"
+      :class="{ 'is-target-clickable': currentGuideStep && currentGuideStep.allowTargetClick }"
+      @click.self="skipGuide"
+    >
       <div class="guide-backdrop" @click="skipGuide"></div>
       <div v-if="guideTargetBox" class="guide-highlight" :style="guideTargetBox"></div>
       <section class="guide-popover" :style="guidePopoverStyle" role="dialog" aria-modal="true" aria-label="新手指引">
@@ -650,7 +655,7 @@
           <el-button plain @click="skipGuide">跳过</el-button>
           <div>
             <el-button plain :disabled="guideStepIndex === 0" @click="prevGuideStep">上一步</el-button>
-            <el-button type="primary" @click="nextGuideStep">{{ guideStepIndex === guideSteps.length - 1 ? '完成' : '下一步' }}</el-button>
+            <el-button type="primary" :disabled="guideNextDisabled" @click="nextGuideStep">{{ guideNextText }}</el-button>
           </div>
         </div>
       </section>

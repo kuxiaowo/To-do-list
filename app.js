@@ -145,21 +145,21 @@ createApp({
           key: 'account',
           target: 'account',
           title: '先登录自己的账号',
-          text: '登录后会读取并保存你的待办、每日安排和反馈记录。未登录时可以浏览页面，但不能新增或编辑。',
+          text: '登录后才能保存你的待办、每日安排和反馈记录。',
           page: null
         },
         {
           key: 'add-task',
           target: 'add-task',
           title: '从这里新增任务',
-          text: '在 DDL 页面新增带截止时间的任务，在每日安排页面新增弹性任务。按钮会根据当前页面自动切换文案。',
+          text: '在这里新增带DDL或是弹性的任务安排。',
           page: 'ddl'
         },
         {
           key: 'task-pool',
           target: 'task-pool',
           title: '左侧是待安排任务池',
-          text: '没有截止时间的任务会先放在这里。切到每日安排后，这里会变成可拖拽的弹性任务池。',
+          text: '没有想好截止时间的任务会先放在这里，想好之后在设置截止时间也不迟。',
           page: 'ddl'
         },
         {
@@ -177,6 +177,15 @@ createApp({
           page: 'ddl'
         },
         {
+          key: 'switch-daily',
+          target: 'daily-tab',
+          title: '切到每日安排',
+          text: '请点击上方“每日安排”页签，进入每天的时间格子视图。',
+          page: 'ddl',
+          waitForPage: 'daily',
+          allowTargetClick: true
+        },
+        {
           key: 'daily-tools',
           target: 'daily-tools',
           title: '每日安排使用时间格子',
@@ -187,7 +196,7 @@ createApp({
           key: 'flex-pool',
           target: 'task-pool',
           title: '弹性任务池',
-          text: '这里放没有固定 DDL、但需要安排时间推进的任务。把任务从这里拖到右侧某个时间格子，就会生成当天的一次学习安排。',
+          text: '这里放临时、长期，没有 DDL的任务。把任务从这里拖到右侧某个时间格子，就会生成当天的一次学习安排。',
           page: 'daily'
         },
         {
@@ -213,6 +222,13 @@ createApp({
     },
     guideStepLabel() {
       return `${this.guideStepIndex + 1} / ${this.guideSteps.length}`;
+    },
+    guideNextDisabled() {
+      return !!(this.currentGuideStep && this.currentGuideStep.waitForPage && this.activePage !== this.currentGuideStep.waitForPage);
+    },
+    guideNextText() {
+      if (this.guideNextDisabled) return '请先点击页签';
+      return this.guideStepIndex === this.guideSteps.length - 1 ? '完成' : '下一步';
     },
     isAdmin() {
       return this.currentUser && this.currentUser.role === 'admin';
@@ -1580,7 +1596,12 @@ createApp({
       this.rememberCurrentViewDate(this.activePage);
       this.activePage = page;
       const key = this.pageViewDateKeys[page] || this.currentViewDateKey || this.formatDateKey(new Date());
-      this.$nextTick(() => this.scrollToDate(key, page, 'instant'));
+      this.$nextTick(() => {
+        this.scrollToDate(key, page, 'instant');
+        if (this.guideVisible && this.currentGuideStep && this.currentGuideStep.waitForPage === page) {
+          window.setTimeout(() => this.nextGuideStep(), 120);
+        }
+      });
     },
     scrollToDate(dateLike, page = this.activePage, behavior = 'smooth') {
       const key = this.formatDateKey(dateLike);

@@ -912,10 +912,18 @@ body {
   pointer-events: auto;
 }
 
+.guide-layer.is-target-clickable {
+  pointer-events: none;
+}
+
 .guide-backdrop {
   position: absolute;
   inset: 0;
   background: rgba(15, 23, 42, 0.58);
+}
+
+.guide-layer.is-target-clickable .guide-backdrop {
+  pointer-events: none;
 }
 
 .guide-highlight {
@@ -940,6 +948,7 @@ body {
   border-radius: 18px;
   box-shadow: 0 24px 60px rgba(15, 23, 42, 0.28);
   padding: 18px;
+  pointer-events: auto;
 }
 
 .guide-kicker {
