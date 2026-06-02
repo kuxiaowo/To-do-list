@@ -116,6 +116,10 @@ createApp({
       slotEditorWeekSlots: JSON.parse(JSON.stringify(DEFAULT_WEEK_SLOTS)),
       loginForm: { nickname: '', password: '' },
       registerForm: { name: '', nickname: '', password: '' },
+      nicknameDialogVisible: false,
+      nicknameForm: { nickname: '' },
+      passwordDialogVisible: false,
+      passwordForm: { currentPassword: '', newPassword: '', confirmPassword: '' },
       feedbackDialogVisible: false,
       feedbackForm: { content: '' },
       feedbackItems: [],
@@ -727,6 +731,8 @@ createApp({
         'schedule_config.reset': '重置全部时间格子',
         'admin.user.delete': '删除用户',
         'admin.user.update': '更新用户',
+        'user.nickname.update': '修改昵称',
+        'user.password.update': '修改密码',
         'feedback.create': '提交反馈',
         'admin.feedback.reply': '回复反馈'
       };
@@ -784,6 +790,76 @@ createApp({
         ElementPlus.ElMessage.success('注册成功，已自动登录。');
       } catch (error) {
         ElementPlus.ElMessage.error(`注册失败：${error.message}`);
+      }
+    },
+    openNicknameDialog() {
+      if (!this.currentUser) return;
+      this.accountMenuOpen = false;
+      this.nicknameForm.nickname = this.currentUser.nickname || '';
+      this.nicknameDialogVisible = true;
+    },
+    openPasswordDialog() {
+      if (!this.currentUser) return;
+      this.accountMenuOpen = false;
+      this.passwordForm = { currentPassword: '', newPassword: '', confirmPassword: '' };
+      this.passwordDialogVisible = true;
+    },
+    async saveNickname() {
+      if (!this.currentUser) {
+        ElementPlus.ElMessage.warning('请先登录后再修改昵称。');
+        return;
+      }
+      const nickname = this.nicknameForm.nickname.trim();
+      if (!nickname) {
+        ElementPlus.ElMessage.warning('昵称不能为空。');
+        return;
+      }
+      if (nickname === this.currentUser.nickname) {
+        this.nicknameDialogVisible = false;
+        return;
+      }
+      try {
+        const payload = await this.apiJson(`${AUTH_API}/nickname`, {
+          method: 'PUT',
+          body: JSON.stringify({ nickname })
+        });
+        this.currentUser = payload.user;
+        this.loginForm.nickname = payload.user.nickname;
+        this.nicknameDialogVisible = false;
+        ElementPlus.ElMessage.success('昵称已更新。');
+      } catch (error) {
+        ElementPlus.ElMessage.error(`昵称更新失败：${error.message}`);
+      }
+    },
+    async savePassword() {
+      if (!this.currentUser) {
+        ElementPlus.ElMessage.warning('请先登录后再修改密码。');
+        return;
+      }
+      const currentPassword = this.passwordForm.currentPassword;
+      const newPassword = this.passwordForm.newPassword;
+      if (!currentPassword || !newPassword || !this.passwordForm.confirmPassword) {
+        ElementPlus.ElMessage.warning('请完整填写密码信息。');
+        return;
+      }
+      if (newPassword.length < 6) {
+        ElementPlus.ElMessage.warning('新密码至少需要 6 位。');
+        return;
+      }
+      if (newPassword !== this.passwordForm.confirmPassword) {
+        ElementPlus.ElMessage.warning('两次输入的新密码不一致。');
+        return;
+      }
+      try {
+        await this.apiJson(`${AUTH_API}/password`, {
+          method: 'PUT',
+          body: JSON.stringify({ currentPassword, newPassword })
+        });
+        this.passwordDialogVisible = false;
+        this.passwordForm = { currentPassword: '', newPassword: '', confirmPassword: '' };
+        ElementPlus.ElMessage.success('密码已更新。');
+      } catch (error) {
+        ElementPlus.ElMessage.error(`密码更新失败：${error.message}`);
       }
     },
     async openFeedbackDialog() {
@@ -860,6 +936,10 @@ createApp({
       this.adminFeedbackReplyVisible = false;
       this.adminFeedbackActive = null;
       this.adminFeedbackReply = '';
+      this.nicknameDialogVisible = false;
+      this.nicknameForm.nickname = '';
+      this.passwordDialogVisible = false;
+      this.passwordForm = { currentPassword: '', newPassword: '', confirmPassword: '' };
       this.feedbackDialogVisible = false;
       this.feedbackForm.content = '';
       this.feedbackItems = [];

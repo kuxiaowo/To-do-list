@@ -125,6 +125,10 @@
                 </div>
 
                 <div v-if="currentUser" class="auth-form">
+                  <div class="account-setting-actions">
+                    <el-button text @click="openPasswordDialog">修改密码</el-button>
+                    <el-button text @click="openNicknameDialog">修改昵称</el-button>
+                  </div>
                   <el-button v-if="isAdmin" type="primary" plain @click="openAdminMode('users')">进入管理员后台</el-button>
                   <el-button plain @click="logout">退出账号，重新登录</el-button>
                 </div>
@@ -680,6 +684,82 @@
       <div v-if="scheduleDragPreview.note" class="task-note-preview">{{ scheduleDragPreview.note }}</div>
       <span v-if="scheduleDragPreview.completed" class="schedule-check">✓</span>
     </div>
+
+    <el-dialog
+      v-model="nicknameDialogVisible"
+      title="修改昵称"
+      width="min(92vw, 460px)"
+      destroy-on-close
+    >
+      <el-form :model="nicknameForm" label-width="88px" @submit.prevent>
+        <el-form-item label="新昵称">
+          <el-input
+            v-model="nicknameForm.nickname"
+            maxlength="32"
+            show-word-limit
+            autocomplete="username"
+            placeholder="请输入新的登录昵称"
+            @keyup.enter="saveNickname"
+          ></el-input>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <div class="dialog-footer">
+          <div></div>
+          <div class="right-actions">
+            <el-button @click="nicknameDialogVisible = false">取消</el-button>
+            <el-button type="primary" @click="saveNickname">保存</el-button>
+          </div>
+        </div>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="passwordDialogVisible"
+      title="修改密码"
+      width="min(92vw, 460px)"
+      destroy-on-close
+    >
+      <el-form :model="passwordForm" label-width="88px" @submit.prevent>
+        <el-form-item label="原密码">
+          <el-input
+            v-model="passwordForm.currentPassword"
+            type="password"
+            autocomplete="current-password"
+            show-password
+            @keyup.enter="savePassword"
+          ></el-input>
+        </el-form-item>
+        <el-form-item label="新密码">
+          <el-input
+            v-model="passwordForm.newPassword"
+            type="password"
+            autocomplete="new-password"
+            show-password
+            placeholder="至少 6 位"
+            @keyup.enter="savePassword"
+          ></el-input>
+        </el-form-item>
+        <el-form-item label="确认密码">
+          <el-input
+            v-model="passwordForm.confirmPassword"
+            type="password"
+            autocomplete="new-password"
+            show-password
+            @keyup.enter="savePassword"
+          ></el-input>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <div class="dialog-footer">
+          <div></div>
+          <div class="right-actions">
+            <el-button @click="passwordDialogVisible = false">取消</el-button>
+            <el-button type="primary" @click="savePassword">保存</el-button>
+          </div>
+        </div>
+      </template>
+    </el-dialog>
 
     <el-dialog
       v-model="feedbackDialogVisible"

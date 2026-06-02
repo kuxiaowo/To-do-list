@@ -576,6 +576,10 @@ class TodoHandler(SimpleHTTPRequestHandler):
 
     def do_PUT(self):
         path = urlparse(self.path).path
+        if path == '/api/auth/nickname':
+            return self.handle_auth_update_nickname()
+        if path == '/api/auth/password':
+            return self.handle_auth_update_password()
         if path.startswith('/api/admin/feedback/') and path.endswith('/reply'):
             parts = path.strip('/').split('/')
             if len(parts) == 5:
@@ -1695,6 +1699,81 @@ class TodoHandler(SimpleHTTPRequestHandler):
             with get_db() as conn:
                 conn.execute('DELETE FROM sessions WHERE token = ?', (token,))
                 conn.commit()
+        return self.write_json({'ok': True})
+
+    def handle_auth_update_nickname(self):
+        user = self.require_user()
+        if not user:
+            return
+        payload = self.read_json_body()
+        if payload is None:
+            return
+        nickname = str(payload.get('nickname', '')).strip()
+        if not nickname:
+            return self.write_json({'error': 'nickname is required', 'message': '昵称不能为空。'}, status=HTTPStatus.BAD_REQUEST)
+        if len(nickname) > 32:
+            return self.write_json({'error': 'nickname is too long', 'message': '昵称不能超过 32 个字符。'}, status=HTTPStatus.BAD_REQUEST)
+
+        with get_db() as conn:
+            existing = conn.execute(
+                'SELECT id FROM users WHERE lower(nickname) = lower(?) AND id != ?',
+                (nickname, user['id']),
+            ).fetchone()
+            if existing:
+                return self.write_json({'error': 'nickname already exists', 'message': '这个昵称已被使用。'}, status=HTTPStatus.CONFLICT)
+            current = conn.execute('SELECT id, name, nickname, role FROM users WHERE id = ?', (user['id'],)).fetchone()
+            if not current:
+                return self.write_json({'error': 'user not found'}, status=HTTPStatus.NOT_FOUND)
+            if current['nickname'] == nickname:
+                return self.write_json({'ok': True, 'user': public_user(current)})
+            try:
+                conn.execute('UPDATE users SET nickname = ? WHERE id = ?', (nickname, user['id']))
+            except sqlite3.IntegrityError:
+                return self.write_json({'error': 'nickname already exists', 'message': '这个昵称已被使用。'}, status=HTTPStatus.CONFLICT)
+            self.log_operation(
+                conn,
+                int(user['id']),
+                int(user['id']),
+                'user.nickname.update',
+                'user',
+                str(user['id']),
+                {'oldNickname': current['nickname'], 'newNickname': nickname},
+            )
+            conn.commit()
+            updated = conn.execute('SELECT id, name, nickname, role FROM users WHERE id = ?', (user['id'],)).fetchone()
+        return self.write_json({'ok': True, 'user': public_user(updated)})
+
+    def handle_auth_update_password(self):
+        user = self.require_user()
+        if not user:
+            return
+        payload = self.read_json_body()
+        if payload is None:
+            return
+        current_password = str(payload.get('currentPassword', ''))
+        new_password = str(payload.get('newPassword', ''))
+        if not current_password or not new_password:
+            return self.write_json({'error': 'passwords are required', 'message': '请填写原密码和新密码。'}, status=HTTPStatus.BAD_REQUEST)
+        if len(new_password) < 6:
+            return self.write_json({'error': 'password must be at least 6 characters', 'message': '新密码至少需要 6 位。'}, status=HTTPStatus.BAD_REQUEST)
+
+        with get_db() as conn:
+            current = conn.execute('SELECT * FROM users WHERE id = ?', (user['id'],)).fetchone()
+            if not current:
+                return self.write_json({'error': 'user not found'}, status=HTTPStatus.NOT_FOUND)
+            if not verify_password(current_password, current['password_hash']):
+                return self.write_json({'error': 'current password is incorrect', 'message': '原密码不正确。'}, status=HTTPStatus.UNAUTHORIZED)
+            conn.execute('UPDATE users SET password_hash = ? WHERE id = ?', (hash_password(new_password), user['id']))
+            self.log_operation(
+                conn,
+                int(user['id']),
+                int(user['id']),
+                'user.password.update',
+                'user',
+                str(user['id']),
+                {'nickname': current['nickname']},
+            )
+            conn.commit()
         return self.write_json({'ok': True})
 
     def issue_session_response(self, user):
