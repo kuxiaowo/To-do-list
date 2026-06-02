@@ -3,7 +3,7 @@ set -euo pipefail
 
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SERVICE_NAME="${TODO_SERVICE_NAME:-todo-list.service}"
-PORT="${TODO_PORT:-8092}"
+PORT="${TODO_PORT:-433}"
 INSTALL_SYSTEMD=1
 START_SERVICE=1
 
