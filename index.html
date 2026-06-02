@@ -423,9 +423,25 @@
           <div class="admin-panel-header">
             <div>
               <h2>用户反馈</h2>
-              <p>查看所有用户提交的反馈，并给出管理员回复。</p>
+              <p>查看所有用户提交的反馈，给出管理员回复，并控制每个用户可提交的反馈数量。</p>
             </div>
             <el-button plain @click="loadAdminFeedback(1)">刷新反馈</el-button>
+          </div>
+          <div class="feedback-limit-row">
+            <div>
+              <div class="daily-tools-title">每人反馈上限</div>
+              <div class="daily-tools-subtitle">当前每个用户最多可保留 {{ feedbackLimitPerUser }} 条反馈。</div>
+            </div>
+            <div class="feedback-limit-controls">
+              <el-input-number
+                v-model="adminFeedbackLimitDraft"
+                :min="1"
+                :max="1000"
+                :step="1"
+                step-strictly
+              ></el-input-number>
+              <el-button type="primary" plain @click="saveAdminFeedbackLimit">保存上限</el-button>
+            </div>
           </div>
           <el-table :data="adminFeedback" style="width: 100%;">
             <el-table-column label="时间" min-width="160">
@@ -451,11 +467,12 @@
                 <div class="feedback-table-text">{{ row.adminReply || '—' }}</div>
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="110" fixed="right">
+            <el-table-column label="操作" width="180" fixed="right">
               <template #default="{ row }">
                 <el-button size="small" type="primary" plain @click="openAdminFeedbackReply(row)">
                   {{ row.adminReply ? '编辑回复' : '回复' }}
                 </el-button>
+                <el-button size="small" type="danger" plain @click="deleteAdminFeedback(row)">删除</el-button>
               </template>
             </el-table-column>
           </el-table>
@@ -780,7 +797,7 @@
             ></el-input>
           </el-form-item>
           <el-form-item>
-            <el-button type="primary" @click="submitFeedback">提交反馈</el-button>
+            <el-button type="primary" :disabled="feedbackItems.length >= feedbackLimitPerUser" @click="submitFeedback">提交反馈</el-button>
             <el-button plain @click="loadFeedback">刷新历史</el-button>
           </el-form-item>
         </el-form>
@@ -788,13 +805,16 @@
         <div class="feedback-history">
           <div class="feedback-history-header">
             <h3>我的反馈</h3>
-            <span class="day-subtitle">{{ feedbackItems.length }} 条</span>
+            <span class="day-subtitle">{{ feedbackItems.length }} / {{ feedbackLimitPerUser }} 条</span>
           </div>
           <div v-if="feedbackItems.length" class="feedback-list">
             <article v-for="item in feedbackItems" :key="item.id" class="feedback-item">
               <div class="feedback-item-header">
                 <span>{{ formatDateTime(item.createdAt) }}</span>
-                <el-tag :type="feedbackStatusType(item.status)" effect="plain">{{ feedbackStatusLabel(item.status) }}</el-tag>
+                <div class="feedback-item-actions">
+                  <el-tag :type="feedbackStatusType(item.status)" effect="plain">{{ feedbackStatusLabel(item.status) }}</el-tag>
+                  <el-button size="small" type="danger" plain @click="deleteFeedback(item)">删除</el-button>
+                </div>
               </div>
               <div class="feedback-content">{{ item.content }}</div>
               <div v-if="item.adminReply" class="feedback-reply">

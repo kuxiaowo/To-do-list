@@ -123,6 +123,7 @@ createApp({
       feedbackDialogVisible: false,
       feedbackForm: { content: '' },
       feedbackItems: [],
+      feedbackLimitPerUser: 10,
       feedbackLoading: false,
       adminMode: false,
       adminSection: 'users',
@@ -138,6 +139,7 @@ createApp({
       adminFeedbackTotal: 0,
       adminFeedbackPage: 1,
       adminFeedbackPageSize: 50,
+      adminFeedbackLimitDraft: 10,
       adminFeedbackReplyVisible: false,
       adminFeedbackActive: null,
       adminFeedbackReply: '',
@@ -648,8 +650,32 @@ createApp({
         this.adminFeedback = Array.isArray(payload.feedback) ? payload.feedback : [];
         this.adminFeedbackTotal = Number(payload.total || 0);
         this.adminFeedbackPage = Number(payload.page || page);
+        this.feedbackLimitPerUser = Number(payload.feedbackLimitPerUser || this.feedbackLimitPerUser);
+        this.adminFeedbackLimitDraft = this.feedbackLimitPerUser;
       } catch (error) {
         ElementPlus.ElMessage.error(`反馈读取失败：${error.message}`);
+      } finally {
+        this.adminLoading = false;
+      }
+    },
+    async saveAdminFeedbackLimit() {
+      if (!this.isAdmin) return;
+      const feedbackLimitPerUser = Number(this.adminFeedbackLimitDraft);
+      if (!Number.isInteger(feedbackLimitPerUser) || feedbackLimitPerUser < 1 || feedbackLimitPerUser > 1000) {
+        ElementPlus.ElMessage.warning('反馈上限必须是 1 到 1000 之间的整数。');
+        return;
+      }
+      this.adminLoading = true;
+      try {
+        const payload = await this.apiJson(`${ADMIN_API}/feedback-settings`, {
+          method: 'PUT',
+          body: JSON.stringify({ feedbackLimitPerUser })
+        });
+        this.feedbackLimitPerUser = Number(payload.feedbackLimitPerUser || feedbackLimitPerUser);
+        this.adminFeedbackLimitDraft = this.feedbackLimitPerUser;
+        ElementPlus.ElMessage.success('反馈上限已更新。');
+      } catch (error) {
+        ElementPlus.ElMessage.error(`反馈上限保存失败：${error.message}`);
       } finally {
         this.adminLoading = false;
       }
@@ -683,6 +709,32 @@ createApp({
       } finally {
         this.adminLoading = false;
       }
+    },
+    deleteAdminFeedback(row) {
+      if (!this.isAdmin || !row) return;
+      ElementPlus.ElMessageBox.confirm(
+        `确定删除这条反馈？用户「${row.user ? `${row.user.name}（${row.user.nickname}）` : row.userId}」提交的内容会被删除。`,
+        '删除反馈',
+        {
+          confirmButtonText: '删除',
+          cancelButtonText: '取消',
+          type: 'warning'
+        }
+      ).then(async () => {
+        this.adminLoading = true;
+        try {
+          await this.apiJson(`${ADMIN_API}/feedback/${encodeURIComponent(row.id)}`, { method: 'DELETE' });
+          const nextPage = this.adminFeedback.length <= 1 && this.adminFeedbackPage > 1
+            ? this.adminFeedbackPage - 1
+            : this.adminFeedbackPage;
+          await this.loadAdminFeedback(nextPage);
+          ElementPlus.ElMessage.success('反馈已删除。');
+        } catch (error) {
+          ElementPlus.ElMessage.error(`删除反馈失败：${error.message}`);
+        } finally {
+          this.adminLoading = false;
+        }
+      }).catch(() => {});
     },
     async loadAdminTimeline() {
       if (!this.isAdmin || !this.adminSelectedUserId) {
@@ -734,7 +786,10 @@ createApp({
         'user.nickname.update': '修改昵称',
         'user.password.update': '修改密码',
         'feedback.create': '提交反馈',
-        'admin.feedback.reply': '回复反馈'
+        'admin.feedback.reply': '回复反馈',
+        'admin.feedback.delete': '删除反馈',
+        'admin.feedback.limit_update': '修改反馈上限',
+        'feedback.delete': '删除反馈'
       };
       return labels[action] || action;
     },
@@ -880,6 +935,7 @@ createApp({
       try {
         const payload = await this.apiJson(FEEDBACK_API, { cache: 'no-store' });
         this.feedbackItems = Array.isArray(payload.feedback) ? payload.feedback : [];
+        this.feedbackLimitPerUser = Number(payload.feedbackLimitPerUser || this.feedbackLimitPerUser);
       } catch (error) {
         ElementPlus.ElMessage.error(`反馈读取失败：${error.message}`);
       } finally {
@@ -896,6 +952,10 @@ createApp({
         ElementPlus.ElMessage.warning('反馈内容不能为空。');
         return;
       }
+      if (this.feedbackItems.length >= this.feedbackLimitPerUser) {
+        ElementPlus.ElMessage.warning(`每个用户最多提交 ${this.feedbackLimitPerUser} 条反馈。`);
+        return;
+      }
       this.feedbackLoading = true;
       try {
         await this.apiJson(FEEDBACK_API, {
@@ -910,6 +970,29 @@ createApp({
       } finally {
         this.feedbackLoading = false;
       }
+    },
+    deleteFeedback(item) {
+      if (!this.currentUser || !item) return;
+      ElementPlus.ElMessageBox.confirm(
+        '确定删除这条反馈？删除后管理员回复也会一起移除。',
+        '删除反馈',
+        {
+          confirmButtonText: '删除',
+          cancelButtonText: '取消',
+          type: 'warning'
+        }
+      ).then(async () => {
+        this.feedbackLoading = true;
+        try {
+          await this.apiJson(`${FEEDBACK_API}/${encodeURIComponent(item.id)}`, { method: 'DELETE' });
+          await this.loadFeedback();
+          ElementPlus.ElMessage.success('反馈已删除。');
+        } catch (error) {
+          ElementPlus.ElMessage.error(`反馈删除失败：${error.message}`);
+        } finally {
+          this.feedbackLoading = false;
+        }
+      }).catch(() => {});
     },
     feedbackStatusLabel(status) {
       return status === 'replied' ? '已回复' : '待回复';
@@ -933,6 +1016,7 @@ createApp({
       this.adminLogsTotal = 0;
       this.adminFeedback = [];
       this.adminFeedbackTotal = 0;
+      this.adminFeedbackLimitDraft = 10;
       this.adminFeedbackReplyVisible = false;
       this.adminFeedbackActive = null;
       this.adminFeedbackReply = '';
@@ -943,6 +1027,7 @@ createApp({
       this.feedbackDialogVisible = false;
       this.feedbackForm.content = '';
       this.feedbackItems = [];
+      this.feedbackLimitPerUser = 10;
       this.adminTimelineLoadedUserId = '';
       this.tasks = [];
       this.scheduleItems = [];

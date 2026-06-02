@@ -21,6 +21,8 @@ HOST = os.environ.get('TODO_HOST', '127.0.0.1')
 PORT = int(os.environ.get('TODO_PORT', '8092'))
 PASSWORD_ITERATIONS = 260_000
 SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
+DEFAULT_FEEDBACK_LIMIT_PER_USER = 10
+FEEDBACK_LIMIT_SETTING_KEY = 'feedback_limit_per_user'
 
 # Weekday keys follow JavaScript Date.getDay(): 0 is Sunday, 1 is Monday.
 # The frontend also keeps a fallback copy, but this server-side value is the
@@ -224,6 +226,22 @@ def init_db() -> None:
                 FOREIGN KEY(replied_by) REFERENCES users(id) ON DELETE SET NULL
             )
             '''
+        )
+        conn.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            '''
+        )
+        conn.execute(
+            '''
+            INSERT OR IGNORE INTO app_settings (key, value, updated_at)
+            VALUES (?, ?, ?)
+            ''',
+            (FEEDBACK_LIMIT_SETTING_KEY, str(DEFAULT_FEEDBACK_LIMIT_PER_USER), now_iso()),
         )
         task_columns = {row[1] for row in conn.execute('PRAGMA table_info(tasks)').fetchall()}
         if 'subject' not in task_columns:
@@ -536,6 +554,27 @@ def public_feedback(row: sqlite3.Row, include_user: bool = False) -> dict:
     return payload
 
 
+def get_feedback_limit(conn: sqlite3.Connection) -> int:
+    row = conn.execute('SELECT value FROM app_settings WHERE key = ?', (FEEDBACK_LIMIT_SETTING_KEY,)).fetchone()
+    if not row:
+        return DEFAULT_FEEDBACK_LIMIT_PER_USER
+    try:
+        return max(1, int(row['value']))
+    except (TypeError, ValueError):
+        return DEFAULT_FEEDBACK_LIMIT_PER_USER
+
+
+def set_feedback_limit(conn: sqlite3.Connection, limit: int) -> None:
+    conn.execute(
+        '''
+        INSERT INTO app_settings (key, value, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+        ''',
+        (FEEDBACK_LIMIT_SETTING_KEY, str(limit), now_iso()),
+    )
+
+
 class TodoHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(BASE_DIR), **kwargs)
@@ -580,6 +619,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return self.handle_auth_update_nickname()
         if path == '/api/auth/password':
             return self.handle_auth_update_password()
+        if path == '/api/admin/feedback-settings':
+            return self.handle_admin_update_feedback_settings()
         if path.startswith('/api/admin/feedback/') and path.endswith('/reply'):
             parts = path.strip('/').split('/')
             if len(parts) == 5:
@@ -598,6 +639,10 @@ class TodoHandler(SimpleHTTPRequestHandler):
 
     def do_DELETE(self):
         path = urlparse(self.path).path
+        if path.startswith('/api/admin/feedback/'):
+            return self.handle_admin_delete_feedback(path.rsplit('/', 1)[-1])
+        if path.startswith('/api/feedback/'):
+            return self.handle_delete_feedback(path.rsplit('/', 1)[-1])
         if path.startswith('/api/admin/users/'):
             return self.handle_admin_delete_user(path.rsplit('/', 1)[-1])
         if path.startswith('/api/tasks/'):
@@ -760,6 +805,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return self.handle_admin_users()
         if parts == ['api', 'admin', 'feedback']:
             return self.handle_admin_feedback()
+        if parts == ['api', 'admin', 'feedback-settings']:
+            return self.handle_admin_feedback_settings()
         if len(parts) == 5 and parts[:3] == ['api', 'admin', 'users']:
             try:
                 target_user_id = int(parts[3])
@@ -822,6 +869,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return self.write_json({'error': 'invalid pagination'}, status=HTTPStatus.BAD_REQUEST)
         offset = (page - 1) * page_size
         with get_db() as conn:
+            feedback_limit = get_feedback_limit(conn)
             total = conn.execute('SELECT COUNT(*) FROM feedback').fetchone()[0]
             rows = conn.execute(
                 '''
@@ -840,7 +888,43 @@ class TodoHandler(SimpleHTTPRequestHandler):
             'total': total,
             'page': page,
             'pageSize': page_size,
+            'feedbackLimitPerUser': feedback_limit,
         })
+
+    def handle_admin_feedback_settings(self):
+        with get_db() as conn:
+            feedback_limit = get_feedback_limit(conn)
+        return self.write_json({'feedbackLimitPerUser': feedback_limit})
+
+    def handle_admin_update_feedback_settings(self):
+        admin = self.require_admin()
+        if not admin:
+            return
+        payload = self.read_json_body()
+        if payload is None:
+            return
+        try:
+            feedback_limit = int(payload.get('feedbackLimitPerUser'))
+        except (TypeError, ValueError):
+            return self.write_json({'error': 'invalid feedback limit', 'message': '反馈上限必须是数字。'}, status=HTTPStatus.BAD_REQUEST)
+        if feedback_limit < 1 or feedback_limit > 1000:
+            return self.write_json({'error': 'feedback limit out of range', 'message': '反馈上限必须在 1 到 1000 之间。'}, status=HTTPStatus.BAD_REQUEST)
+
+        with get_db() as conn:
+            old_limit = get_feedback_limit(conn)
+            set_feedback_limit(conn, feedback_limit)
+            if old_limit != feedback_limit:
+                self.log_operation(
+                    conn,
+                    int(admin['id']),
+                    int(admin['id']),
+                    'admin.feedback.limit_update',
+                    'setting',
+                    FEEDBACK_LIMIT_SETTING_KEY,
+                    {'oldLimit': old_limit, 'newLimit': feedback_limit},
+                )
+            conn.commit()
+        return self.write_json({'ok': True, 'feedbackLimitPerUser': feedback_limit})
 
     def handle_admin_reply_feedback(self, feedback_id_text: str):
         admin = self.require_admin()
@@ -893,6 +977,45 @@ class TodoHandler(SimpleHTTPRequestHandler):
                 (feedback_id,),
             ).fetchone()
         return self.write_json({'ok': True, 'feedback': public_feedback(updated, include_user=True)})
+
+    def handle_admin_delete_feedback(self, feedback_id_text: str):
+        admin = self.require_admin()
+        if not admin:
+            return
+        try:
+            feedback_id = int(feedback_id_text)
+        except ValueError:
+            return self.write_json({'error': 'invalid feedback id'}, status=HTTPStatus.BAD_REQUEST)
+
+        with get_db() as conn:
+            row = conn.execute(
+                '''
+                SELECT feedback.id, feedback.user_id, feedback.content, feedback.admin_reply,
+                       users.name AS user_name, users.nickname AS user_nickname
+                FROM feedback
+                JOIN users ON users.id = feedback.user_id
+                WHERE feedback.id = ?
+                ''',
+                (feedback_id,),
+            ).fetchone()
+            if not row:
+                return self.write_json({'error': 'feedback not found'}, status=HTTPStatus.NOT_FOUND)
+            conn.execute('DELETE FROM feedback WHERE id = ?', (feedback_id,))
+            self.log_operation(
+                conn,
+                int(admin['id']),
+                int(row['user_id']),
+                'admin.feedback.delete',
+                'feedback',
+                str(feedback_id),
+                {
+                    'user': f"{row['user_name']}({row['user_nickname']})",
+                    'content': row['content'],
+                    'hadReply': bool(row['admin_reply']),
+                },
+            )
+            conn.commit()
+        return self.write_json({'ok': True, 'id': feedback_id})
 
     def handle_admin_update_user(self, user_id_text: str):
         admin = self.require_admin()
@@ -1050,6 +1173,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
         if not user:
             return
         with get_db() as conn:
+            feedback_limit = get_feedback_limit(conn)
             rows = conn.execute(
                 '''
                 SELECT id, user_id, content, admin_reply, replied_by, status, created_at, updated_at
@@ -1059,7 +1183,10 @@ class TodoHandler(SimpleHTTPRequestHandler):
                 ''',
                 (user['id'],),
             ).fetchall()
-        return self.write_json({'feedback': [public_feedback(row) for row in rows]})
+        return self.write_json({
+            'feedback': [public_feedback(row) for row in rows],
+            'feedbackLimitPerUser': feedback_limit,
+        })
 
     def handle_create_feedback(self):
         user = self.require_user()
@@ -1075,6 +1202,16 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return self.write_json({'error': 'content is too long', 'message': '反馈内容不能超过 1000 个字符。'}, status=HTTPStatus.BAD_REQUEST)
         now = now_iso()
         with get_db() as conn:
+            feedback_limit = get_feedback_limit(conn)
+            feedback_count = conn.execute('SELECT COUNT(*) FROM feedback WHERE user_id = ?', (user['id'],)).fetchone()[0]
+            if int(feedback_count) >= feedback_limit:
+                return self.write_json(
+                    {
+                        'error': 'feedback limit reached',
+                        'message': f'每个用户最多提交 {feedback_limit} 条反馈，请等待管理员处理或删除旧反馈。',
+                    },
+                    status=HTTPStatus.CONFLICT,
+                )
             cursor = conn.execute(
                 '''
                 INSERT INTO feedback (user_id, content, admin_reply, replied_by, status, created_at, updated_at)
@@ -1102,6 +1239,35 @@ class TodoHandler(SimpleHTTPRequestHandler):
                 (feedback_id,),
             ).fetchone()
         return self.write_json({'ok': True, 'feedback': public_feedback(row)}, status=HTTPStatus.CREATED)
+
+    def handle_delete_feedback(self, feedback_id_text: str):
+        user = self.require_user()
+        if not user:
+            return
+        try:
+            feedback_id = int(feedback_id_text)
+        except ValueError:
+            return self.write_json({'error': 'invalid feedback id'}, status=HTTPStatus.BAD_REQUEST)
+
+        with get_db() as conn:
+            row = conn.execute(
+                'SELECT id, user_id, content, admin_reply FROM feedback WHERE id = ? AND user_id = ?',
+                (feedback_id, user['id']),
+            ).fetchone()
+            if not row:
+                return self.write_json({'error': 'feedback not found'}, status=HTTPStatus.NOT_FOUND)
+            conn.execute('DELETE FROM feedback WHERE id = ? AND user_id = ?', (feedback_id, user['id']))
+            self.log_operation(
+                conn,
+                int(user['id']),
+                int(user['id']),
+                'feedback.delete',
+                'feedback',
+                str(feedback_id),
+                {'content': row['content'], 'hadReply': bool(row['admin_reply'])},
+            )
+            conn.commit()
+        return self.write_json({'ok': True, 'id': feedback_id})
 
     def handle_list_tasks(self):
         user = self.current_user()
