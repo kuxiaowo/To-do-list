@@ -429,8 +429,8 @@
           </div>
           <div class="feedback-limit-row">
             <div>
-              <div class="daily-tools-title">每人反馈上限</div>
-              <div class="daily-tools-subtitle">当前每个用户最多可保留 {{ feedbackLimitPerUser }} 条反馈。</div>
+              <div class="daily-tools-title">每人未回复反馈上限</div>
+              <div class="daily-tools-subtitle">当前每个用户未回复的反馈最多可保留 {{ feedbackLimitPerUser }} 条，已回复的不占额度。</div>
             </div>
             <div class="feedback-limit-controls">
               <el-input-number
@@ -440,7 +440,7 @@
                 :step="1"
                 step-strictly
               ></el-input-number>
-              <el-button type="primary" plain @click="saveAdminFeedbackLimit">保存上限</el-button>
+              <el-button type="primary" plain @click="saveAdminFeedbackLimit">保存未回复上限</el-button>
             </div>
           </div>
           <el-table :data="adminFeedback" style="width: 100%;">
@@ -797,7 +797,7 @@
             ></el-input>
           </el-form-item>
           <el-form-item>
-            <el-button type="primary" :disabled="feedbackItems.length >= feedbackLimitPerUser" @click="submitFeedback">提交反馈</el-button>
+            <el-button type="primary" :disabled="pendingFeedbackCount >= feedbackLimitPerUser" @click="submitFeedback">提交反馈</el-button>
             <el-button plain @click="loadFeedback">刷新历史</el-button>
           </el-form-item>
         </el-form>
@@ -805,8 +805,9 @@
         <div class="feedback-history">
           <div class="feedback-history-header">
             <h3>我的反馈</h3>
-            <span class="day-subtitle">{{ feedbackItems.length }} / {{ feedbackLimitPerUser }} 条</span>
+            <span class="day-subtitle">未回复 {{ pendingFeedbackCount }} / {{ feedbackLimitPerUser }} 条</span>
           </div>
+          <div class="feedback-limit-hint">未回复的反馈不能超过 {{ feedbackLimitPerUser }} 条，管理员回复后不再占用额度。</div>
           <div v-if="feedbackItems.length" class="feedback-list">
             <article v-for="item in feedbackItems" :key="item.id" class="feedback-item">
               <div class="feedback-item-header">

@@ -906,9 +906,9 @@ class TodoHandler(SimpleHTTPRequestHandler):
         try:
             feedback_limit = int(payload.get('feedbackLimitPerUser'))
         except (TypeError, ValueError):
-            return self.write_json({'error': 'invalid feedback limit', 'message': '反馈上限必须是数字。'}, status=HTTPStatus.BAD_REQUEST)
+            return self.write_json({'error': 'invalid feedback limit', 'message': '未回复反馈上限必须是数字。'}, status=HTTPStatus.BAD_REQUEST)
         if feedback_limit < 1 or feedback_limit > 1000:
-            return self.write_json({'error': 'feedback limit out of range', 'message': '反馈上限必须在 1 到 1000 之间。'}, status=HTTPStatus.BAD_REQUEST)
+            return self.write_json({'error': 'feedback limit out of range', 'message': '未回复反馈上限必须在 1 到 1000 之间。'}, status=HTTPStatus.BAD_REQUEST)
 
         with get_db() as conn:
             old_limit = get_feedback_limit(conn)
@@ -921,7 +921,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
                     'admin.feedback.limit_update',
                     'setting',
                     FEEDBACK_LIMIT_SETTING_KEY,
-                    {'oldLimit': old_limit, 'newLimit': feedback_limit},
+                    {'oldPendingLimit': old_limit, 'newPendingLimit': feedback_limit},
                 )
             conn.commit()
         return self.write_json({'ok': True, 'feedbackLimitPerUser': feedback_limit})
@@ -1203,12 +1203,15 @@ class TodoHandler(SimpleHTTPRequestHandler):
         now = now_iso()
         with get_db() as conn:
             feedback_limit = get_feedback_limit(conn)
-            feedback_count = conn.execute('SELECT COUNT(*) FROM feedback WHERE user_id = ?', (user['id'],)).fetchone()[0]
+            feedback_count = conn.execute(
+                "SELECT COUNT(*) FROM feedback WHERE user_id = ? AND status != 'replied'",
+                (user['id'],),
+            ).fetchone()[0]
             if int(feedback_count) >= feedback_limit:
                 return self.write_json(
                     {
                         'error': 'feedback limit reached',
-                        'message': f'每个用户最多提交 {feedback_limit} 条反馈，请等待管理员处理或删除旧反馈。',
+                        'message': f'每个用户未回复的反馈不能超过 {feedback_limit} 条，请等待管理员回复或删除旧反馈。',
                     },
                     status=HTTPStatus.CONFLICT,
                 )

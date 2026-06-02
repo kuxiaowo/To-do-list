@@ -274,6 +274,9 @@ createApp({
     unscheduledCount() {
       return this.activePoolTasks.length;
     },
+    pendingFeedbackCount() {
+      return this.feedbackItems.filter(item => item.status !== 'replied').length;
+    },
     dayColumns() {
       const base = this.startOfDay(new Date());
       const start = this.timelineStartDate();
@@ -662,7 +665,7 @@ createApp({
       if (!this.isAdmin) return;
       const feedbackLimitPerUser = Number(this.adminFeedbackLimitDraft);
       if (!Number.isInteger(feedbackLimitPerUser) || feedbackLimitPerUser < 1 || feedbackLimitPerUser > 1000) {
-        ElementPlus.ElMessage.warning('反馈上限必须是 1 到 1000 之间的整数。');
+        ElementPlus.ElMessage.warning('未回复反馈上限必须是 1 到 1000 之间的整数。');
         return;
       }
       this.adminLoading = true;
@@ -673,9 +676,9 @@ createApp({
         });
         this.feedbackLimitPerUser = Number(payload.feedbackLimitPerUser || feedbackLimitPerUser);
         this.adminFeedbackLimitDraft = this.feedbackLimitPerUser;
-        ElementPlus.ElMessage.success('反馈上限已更新。');
+        ElementPlus.ElMessage.success('未回复反馈上限已更新。');
       } catch (error) {
-        ElementPlus.ElMessage.error(`反馈上限保存失败：${error.message}`);
+        ElementPlus.ElMessage.error(`未回复反馈上限保存失败：${error.message}`);
       } finally {
         this.adminLoading = false;
       }
@@ -788,7 +791,7 @@ createApp({
         'feedback.create': '提交反馈',
         'admin.feedback.reply': '回复反馈',
         'admin.feedback.delete': '删除反馈',
-        'admin.feedback.limit_update': '修改反馈上限',
+        'admin.feedback.limit_update': '修改未回复反馈上限',
         'feedback.delete': '删除反馈'
       };
       return labels[action] || action;
@@ -952,8 +955,8 @@ createApp({
         ElementPlus.ElMessage.warning('反馈内容不能为空。');
         return;
       }
-      if (this.feedbackItems.length >= this.feedbackLimitPerUser) {
-        ElementPlus.ElMessage.warning(`每个用户最多提交 ${this.feedbackLimitPerUser} 条反馈。`);
+      if (this.pendingFeedbackCount >= this.feedbackLimitPerUser) {
+        ElementPlus.ElMessage.warning(`每个用户未回复的反馈不能超过 ${this.feedbackLimitPerUser} 条。`);
         return;
       }
       this.feedbackLoading = true;
