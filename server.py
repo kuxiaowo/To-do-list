@@ -18,7 +18,7 @@ BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / 'data'
 DB_PATH = DATA_DIR / 'todo-list.db'
 HOST = os.environ.get('TODO_HOST', '0.0.0.0')
-PORT = int(os.environ.get('TODO_PORT', '443'))
+PORT = int(os.environ.get('TODO_PORT', '8092'))
 PASSWORD_ITERATIONS = 260_000
 SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
 
