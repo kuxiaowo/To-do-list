@@ -51,6 +51,7 @@
                 v-for="task in activePoolTasks"
                 :key="task.id"
                 class="summary-task"
+                :class="{ 'is-dragging': draggedTaskId === task.id }"
                 :draggable="activePage === 'daily'"
                 @dragstart="startTaskDrag(task, $event)"
                 @dragend="clearScheduleDragState"
@@ -281,7 +282,7 @@
                 v-for="task in ddlTasks"
                 :key="task.id"
                 class="ddl-card"
-                :class="priorityClass(task.priority)"
+                :class="[priorityClass(task.priority), { 'is-dragging': draggedTaskId === task.id }]"
                 draggable="true"
                 @dragstart="startTaskDrag(task, $event)"
                 @dragend="clearScheduleDragState"
@@ -663,6 +664,21 @@
           </div>
         </div>
       </section>
+    </div>
+
+    <div
+      v-if="scheduleDragPreview"
+      class="schedule-drag-preview"
+      :class="scheduleDragPreviewClass()"
+      :style="scheduleDragPreviewStyle()"
+      aria-hidden="true"
+    >
+      <div class="task-title">{{ scheduleDragPreview.title }}</div>
+      <div class="task-meta">
+        <span v-for="meta in scheduleDragPreview.metaItems" :key="meta">{{ meta }}</span>
+      </div>
+      <div v-if="scheduleDragPreview.note" class="task-note-preview">{{ scheduleDragPreview.note }}</div>
+      <span v-if="scheduleDragPreview.completed" class="schedule-check">✓</span>
     </div>
 
     <el-dialog

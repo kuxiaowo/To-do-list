@@ -99,6 +99,7 @@ createApp({
       draggedScheduleItemId: null,
       scheduleDropPosition: null,
       schedulePointerDrag: null,
+      scheduleDragPreview: null,
       suppressNextScheduleClick: false,
       scheduleDialogVisible: false,
       scheduleDialogMode: 'create',
@@ -354,6 +355,8 @@ createApp({
     window.removeEventListener('resize', this.updateGuideTarget);
     window.removeEventListener('scroll', this.updateGuideTarget, true);
     this.removeSchedulePointerListeners();
+    document.body.classList.remove('is-schedule-touch-dragging');
+    this.scheduleDragPreview = null;
   },
   methods: {
     applyTheme() {
@@ -1011,6 +1014,77 @@ createApp({
     startSchedulePointerDragForItem(item, event) {
       this.startSchedulePointerDrag('schedule', item.id, event);
     },
+    buildScheduleDragPreview(type, id, sourceElement, event) {
+      const rect = sourceElement && sourceElement.getBoundingClientRect
+        ? sourceElement.getBoundingClientRect()
+        : null;
+      const width = rect ? Math.min(rect.width, 280) : 240;
+      const offsetX = rect ? event.clientX - rect.left : Math.min(28, width / 2);
+      const offsetY = rect ? event.clientY - rect.top : 24;
+      let task = null;
+      let durationText = '';
+      let completed = false;
+      if (type === 'schedule') {
+        const item = this.scheduleItems.find(entry => entry.id === id);
+        if (!item) return null;
+        task = item.task || this.tasks.find(taskItem => taskItem.id === item.taskId);
+        durationText = `${item.durationMinutes} 分钟`;
+        completed = !!item.completed;
+      } else {
+        task = this.tasks.find(item => item.id === id);
+        completed = !!(task && task.completed);
+      }
+      if (!task) return null;
+      const metaItems = [];
+      if (task.subject) metaItems.push(task.subject);
+      if (durationText) metaItems.push(durationText);
+      if (task.dueAt) metaItems.push(`${this.formatDateLabel(task.dueAt)} ${this.formatTime(task.dueAt)}`);
+      metaItems.push(this.priorityLabel(task.priority));
+      if (completed) metaItems.push('已完成');
+      return {
+        type,
+        title: task.title,
+        note: task.note || '',
+        priority: task.priority,
+        completed,
+        metaItems,
+        width,
+        offsetX,
+        offsetY,
+        x: event.clientX - offsetX,
+        y: event.clientY - offsetY
+      };
+    },
+    moveScheduleDragPreview(clientX, clientY) {
+      if (!this.scheduleDragPreview) return;
+      this.scheduleDragPreview.x = clientX - this.scheduleDragPreview.offsetX;
+      this.scheduleDragPreview.y = clientY - this.scheduleDragPreview.offsetY;
+    },
+    showScheduleDragPreview(drag) {
+      if (!drag || !drag.preview) return;
+      this.scheduleDragPreview = {
+        ...drag.preview,
+        x: drag.clientX - drag.preview.offsetX,
+        y: drag.clientY - drag.preview.offsetY
+      };
+    },
+    scheduleDragPreviewClass() {
+      if (!this.scheduleDragPreview) return '';
+      return [
+        this.priorityClass(this.scheduleDragPreview.priority),
+        {
+          completed: this.scheduleDragPreview.completed,
+          'is-schedule-preview': this.scheduleDragPreview.type === 'schedule'
+        }
+      ];
+    },
+    scheduleDragPreviewStyle() {
+      if (!this.scheduleDragPreview) return {};
+      return {
+        width: `${this.scheduleDragPreview.width}px`,
+        transform: `translate3d(${this.scheduleDragPreview.x}px, ${this.scheduleDragPreview.y}px, 0)`
+      };
+    },
     startSchedulePointerDrag(type, id, event) {
       if (this.adminMode || this.activePage !== 'daily') return;
       if (!event || event.pointerType === 'mouse' || event.button !== 0) return;
@@ -1022,7 +1096,8 @@ createApp({
         startY: event.clientY,
         clientX: event.clientX,
         clientY: event.clientY,
-        dragging: false
+        dragging: false,
+        preview: this.buildScheduleDragPreview(type, id, event.currentTarget, event)
       };
       window.addEventListener('pointermove', this.handleSchedulePointerMove, { passive: false });
       window.addEventListener('pointerup', this.finishSchedulePointerDrag, { passive: false });
@@ -1047,7 +1122,9 @@ createApp({
           this.draggedTaskId = null;
         }
         this.scheduleDropPosition = null;
+        this.showScheduleDragPreview(drag);
       }
+      this.moveScheduleDragPreview(event.clientX, event.clientY);
       const slotElement = this.scheduleSlotElementFromPoint(event.clientX, event.clientY);
       const context = this.scheduleSlotContextFromElement(slotElement);
       if (!context) {
@@ -1080,6 +1157,7 @@ createApp({
         }, 200);
       }
       this.schedulePointerDrag = null;
+      this.scheduleDragPreview = null;
       document.body.classList.remove('is-schedule-touch-dragging');
       this.removeSchedulePointerListeners();
     },
@@ -1087,6 +1165,7 @@ createApp({
       const drag = this.schedulePointerDrag;
       if (event && drag && event.pointerId !== drag.pointerId) return;
       this.schedulePointerDrag = null;
+      this.scheduleDragPreview = null;
       document.body.classList.remove('is-schedule-touch-dragging');
       this.removeSchedulePointerListeners();
       this.clearScheduleDragState();
@@ -1121,6 +1200,7 @@ createApp({
       this.draggedTaskId = null;
       this.draggedScheduleItemId = null;
       this.scheduleDropPosition = null;
+      this.scheduleDragPreview = null;
     },
     hasActiveScheduleDrag() {
       return !!(this.draggedTaskId || this.draggedScheduleItemId);

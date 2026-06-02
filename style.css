@@ -405,6 +405,7 @@ body {
 .task-card .task-title,
 .schedule-card .task-title,
 .ddl-card .task-title,
+.schedule-drag-preview .task-title,
 .summary-task .task-title {
   display: -webkit-box;
   -webkit-line-clamp: 1;
@@ -813,9 +814,55 @@ body {
   outline: 2px solid var(--insert-line);
 }
 
+.summary-task.is-dragging,
+.ddl-card.is-dragging {
+  opacity: 0.48;
+  outline: 2px solid var(--insert-line);
+}
+
 body.is-schedule-touch-dragging,
 body.is-schedule-touch-dragging * {
   user-select: none;
+}
+
+.schedule-drag-preview {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 2600;
+  padding: 10px 12px;
+  border-radius: 14px;
+  border: 1px solid var(--line);
+  border-left: 5px solid transparent;
+  background: var(--panel);
+  box-shadow: 0 18px 38px rgba(15, 23, 42, 0.22), 0 0 0 2px var(--insert-line);
+  opacity: 0.98;
+  pointer-events: none;
+  touch-action: none;
+  will-change: transform;
+}
+
+.schedule-drag-preview.priority-high {
+  border-left-color: var(--danger);
+  background: var(--task-high-bg);
+}
+
+.schedule-drag-preview.priority-medium {
+  border-left-color: var(--warning);
+  background: var(--task-medium-bg);
+}
+
+.schedule-drag-preview.priority-low {
+  border-left-color: var(--success);
+  background: var(--task-low-bg);
+}
+
+.schedule-drag-preview.completed {
+  filter: grayscale(0.4);
+}
+
+.schedule-drag-preview .task-note-preview {
+  -webkit-line-clamp: 2;
 }
 
 .schedule-card.priority-high { border-left-color: var(--danger); background: var(--task-high-bg); }
