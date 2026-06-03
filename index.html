@@ -30,8 +30,17 @@
           </div>
           <div class="toolbar-row">
             <el-button plain @click="scrollToToday">定位今天</el-button>
-            <el-button plain @click="jumpToOffset(-7)">前一周</el-button>
             <el-button plain @click="jumpToOffset(7)">后一周</el-button>
+          </div>
+          <div class="toolbar-row">
+            <el-date-picker
+              v-model="quickJumpDate"
+              type="date"
+              value-format="YYYY-MM-DD"
+              placeholder="快捷定位"
+              class="quick-jump-picker"
+              @change="handleQuickJumpDateChange"
+            ></el-date-picker>
           </div>
         </div>
 
@@ -89,12 +98,6 @@
             <p>{{ activePage === 'ddl' ? '任务自动按截至日期排序' : '把左侧弹性任务池或下方 DDL 拖到每天的时间栏里，创建可完成的学习安排。' }}</p>
           </div>
           <div class="timeline-header-actions">
-            <div class="toolbar-row priority-tags">
-              <el-tag type="danger">高优先级</el-tag>
-              <el-tag type="warning">中优先级</el-tag>
-              <el-tag type="success">低优先级</el-tag>
-            </div>
-
             <div class="toolbar-row theme-toggle-row">
               <el-switch v-model="isDarkMode" active-text="深色模式" inactive-text="浅色模式" @change="setTheme"></el-switch>
             </div>
@@ -518,8 +521,17 @@
                 </div>
                 <div class="toolbar-row">
                   <el-button plain @click="scrollToToday">定位今天</el-button>
-                  <el-button plain @click="jumpToOffset(-7)">前一周</el-button>
                   <el-button plain @click="jumpToOffset(7)">后一周</el-button>
+                </div>
+                <div class="toolbar-row">
+                  <el-date-picker
+                    v-model="quickJumpDate"
+                    type="date"
+                    value-format="YYYY-MM-DD"
+                    placeholder="快捷定位"
+                    class="quick-jump-picker"
+                    @change="handleQuickJumpDateChange"
+                  ></el-date-picker>
                 </div>
               </div>
               <section class="summary-section">
@@ -564,11 +576,6 @@
                     <button class="page-nav-button" :class="{ active: activePage === 'daily' }" type="button" @click="switchPage('daily')">每日安排</button>
                   </div>
                   <p>只读查看 {{ selectedAdminUser.name }} 的时间表。</p>
-                </div>
-                <div class="toolbar-row priority-tags">
-                  <el-tag type="danger">高优先级</el-tag>
-                  <el-tag type="warning">中优先级</el-tag>
-                  <el-tag type="success">低优先级</el-tag>
                 </div>
               </div>
 
@@ -896,7 +903,11 @@
         </el-form-item>
 
         <el-form-item label="截止时间" v-if="!isArrangementDialog && !form.unscheduled">
-          <el-input v-model="form.time" placeholder="例如：23:59" maxlength="5"></el-input>
+          <div class="fixed-time-input">
+            <el-input v-model="dueHour" placeholder="HH" maxlength="2" inputmode="numeric" @blur="normalizeDialogTimeInput"></el-input>
+            <span class="fixed-time-colon" aria-hidden="true">:</span>
+            <el-input v-model="dueMinute" placeholder="mm" maxlength="2" inputmode="numeric" @blur="normalizeDialogTimeInput"></el-input>
+          </div>
         </el-form-item>
 
         <el-form-item label="优先级">

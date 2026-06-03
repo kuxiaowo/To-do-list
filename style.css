@@ -374,6 +374,10 @@ body {
   align-items: center;
 }
 
+.quick-jump-picker {
+  width: 128px;
+}
+
 .summary-section {
   margin-top: 20px;
 }
@@ -553,10 +557,6 @@ body {
   flex-wrap: nowrap;
 }
 
-.priority-tags {
-  justify-content: flex-end;
-}
-
 .timeline-title h2 {
   margin: 0;
   font-size: 1.3rem;
@@ -691,6 +691,28 @@ body {
   display: flex;
   gap: 10px;
   flex-wrap: wrap;
+}
+
+.fixed-time-input {
+  display: inline-grid;
+  grid-template-columns: 72px 18px 72px;
+  align-items: center;
+  gap: 6px;
+}
+
+.fixed-time-input .el-input__wrapper {
+  text-align: center;
+}
+
+.fixed-time-input .el-input__inner {
+  text-align: center;
+}
+
+.fixed-time-colon {
+  color: var(--text-strong);
+  font-weight: 900;
+  text-align: center;
+  user-select: none;
 }
 
 
@@ -1308,10 +1330,6 @@ body.is-schedule-touch-dragging * {
 
   .auth-card {
     right: 0;
-  }
-
-  .priority-tags {
-    justify-content: flex-start;
   }
 
   .daily-tools {

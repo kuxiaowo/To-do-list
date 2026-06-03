@@ -89,6 +89,7 @@ createApp({
       activeTaskId: null,
       activeTaskPool: 'todo',
       currentViewDateKey: '',
+      quickJumpDate: '',
       form: this.emptyForm(),
       dayRange: { past: 90, future: 90 },
       authToken: localStorage.getItem(AUTH_TOKEN_KEY) || '',
@@ -182,7 +183,7 @@ createApp({
           key: 'ddl-timeline',
           target: 'ddl-timeline',
           title: 'DDL 会按日期展开',
-          text: '带截止时间的任务会自动落到对应日期列。可以用定位今天、前一周、后一周快速移动。',
+          text: '带截止时间的任务会自动落到对应日期列。可以用定位今天、快捷定位、后一周快速移动。',
           page: 'ddl'
         },
         {
@@ -308,6 +309,22 @@ createApp({
     },
     isArrangementDialog() {
       return this.isCreatingArrangement || (this.dialogMode === 'edit' && this.activeTaskPool === 'arrangement');
+    },
+    dueHour: {
+      get() {
+        return String(this.form.time || '').split(':')[0] || '';
+      },
+      set(value) {
+        this.setDialogTimePart('hour', value);
+      }
+    },
+    dueMinute: {
+      get() {
+        return String(this.form.time || '').split(':')[1] || '';
+      },
+      set(value) {
+        this.setDialogTimePart('minute', value);
+      }
     },
     scheduleItemsBySlot() {
       return this.scheduleItems.reduce((groups, item) => {
@@ -1642,6 +1659,23 @@ createApp({
       if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return '';
       return `${this.pad(hour)}:${this.pad(minute)}`;
     },
+    setDialogTimePart(part, value) {
+      const cleaned = String(value || '').replace(/\D/g, '').slice(0, 2);
+      const [hour = '', minute = ''] = String(this.form.time || '').split(':');
+      this.form.time = part === 'hour' ? `${cleaned}:${minute}` : `${hour}:${cleaned}`;
+    },
+    normalizeDialogTimeInput() {
+      const [rawHour = '', rawMinute = ''] = String(this.form.time || '').split(':');
+      const hour = rawHour.replace(/\D/g, '').slice(0, 2);
+      const minute = rawMinute.replace(/\D/g, '').slice(0, 2);
+      if (!hour && !minute) {
+        this.form.time = '';
+        return;
+      }
+      const normalizedHour = hour && Number(hour) <= 23 ? this.pad(Number(hour)) : hour;
+      const normalizedMinute = minute && Number(minute) <= 59 ? this.pad(Number(minute)) : minute;
+      this.form.time = `${normalizedHour}:${normalizedMinute}`;
+    },
     async saveSlotEditor() {
       if (!this.currentUser) return;
       const error = this.slotEditorMode === 'day'
@@ -1953,6 +1987,10 @@ createApp({
     },
     scrollToToday() {
       this.scrollToDate(this.startOfDay(new Date()));
+    },
+    handleQuickJumpDateChange(value) {
+      if (!value) return;
+      this.scrollToDate(value);
     },
     switchPage(page) {
       if (page === this.activePage) return;
