@@ -916,9 +916,11 @@ createApp({
     },
     async loadAdminTraffic(page = this.adminTrafficRecentPage) {
       if (!this.isAdmin) return;
+      const nextPage = Number(page);
+      const safePage = Number.isFinite(nextPage) && nextPage > 0 ? Math.floor(nextPage) : this.adminTrafficRecentPage;
       this.adminLoading = true;
       try {
-        const url = `${ADMIN_API}/traffic/summary?view=${encodeURIComponent(this.adminTrafficView)}&page=${page}&pageSize=${this.adminTrafficRecentPageSize}`;
+        const url = `${ADMIN_API}/traffic/summary?view=${encodeURIComponent(this.adminTrafficView)}&page=${safePage}&pageSize=${this.adminTrafficRecentPageSize}`;
         const payload = await this.apiJson(url, { cache: 'no-store' });
         this.adminTraffic = {
           seriesUnit: payload.seriesUnit || 'day',
@@ -932,7 +934,7 @@ createApp({
           recentVisits: Array.isArray(payload.recentVisits) ? payload.recentVisits : []
         };
         this.adminTrafficRecentTotal = Number(payload.recentTotal || 0);
-        this.adminTrafficRecentPage = Number(payload.page || page);
+        this.adminTrafficRecentPage = Number(payload.page || safePage);
       } catch (error) {
         ElementPlus.ElMessage.error(`流量统计读取失败：${error.message}`);
       } finally {
