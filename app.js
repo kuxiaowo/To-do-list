@@ -256,7 +256,7 @@ createApp({
           key: 'ddl-dock',
           target: 'ddl-dock',
           title: '把 DDL 拖进每天的计划',
-          text: '每日安排底部会显示按时间排序的 DDL。把任务拖到上方时间格子，就能生成一次可完成的安排。',
+          text: '每日安排底部会显示按时间排序的 DDL。可以拖到上方时间格子生成安排，也可以点击打开详情修改或标记完成。',
           page: 'daily'
         },
         {
@@ -2287,6 +2287,7 @@ createApp({
       try {
         const savedTask = await this.updateTaskOnServer(taskId, nextTask);
         this.tasks = this.tasks.map(item => item.id === taskId ? (savedTask || nextTask) : item);
+        await this.loadScheduleItems();
         this.form.completed = nextCompleted;
         this.dialogVisible = false;
         ElementPlus.ElMessage.success(nextCompleted ? '已标记完成。' : '已取消完成。');

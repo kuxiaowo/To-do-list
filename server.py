@@ -1705,6 +1705,18 @@ class TodoHandler(SimpleHTTPRequestHandler):
             action = 'task.update'
             if bool(existing['completed']) != bool(task['completed']):
                 action = 'task.complete' if task['completed'] else 'task.reopen'
+            if (
+                not bool(existing['completed'])
+                and bool(task['completed'])
+            ):
+                conn.execute(
+                    '''
+                    UPDATE schedule_items
+                    SET completed = 1, updated_at = ?
+                    WHERE task_id = ? AND user_id = ? AND completed = 0
+                    ''',
+                    (task['updatedAt'], task_id, user['id']),
+                )
             self.log_operation(
                 conn,
                 int(user['id']),

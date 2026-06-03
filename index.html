@@ -309,13 +309,13 @@
                 @dragstart="startTaskDrag(task, $event)"
                 @dragend="clearScheduleDragState"
                 @pointerdown="startTaskPointerDrag(task, $event)"
+                @click="openTaskFromPointerClick(task)"
               >
                 <div class="task-title">{{ task.title }}</div>
-                <div class="task-meta">
-                  <span v-if="task.subject" class="meta-chip subject-chip">{{ task.subject }}</span>
+                <div class="task-meta ddl-card-meta">
                   <span>{{ formatDateLabel(task.dueAt) }} {{ formatTime(task.dueAt) }}</span>
+                  <span v-if="task.subject" class="ddl-card-subject">{{ task.subject }}</span>
                 </div>
-                <div v-if="task.note" class="task-note-preview">{{ task.note }}</div>
               </article>
             </div>
             <div v-else class="empty-column">暂无带 DDL 时间的任务。</div>
@@ -776,11 +776,10 @@
                   <div class="ddl-list" v-if="ddlTasks.length">
                     <article v-for="task in ddlTasks" :key="task.id" class="ddl-card" :class="priorityClass(task.priority)">
                       <div class="task-title">{{ task.title }}</div>
-                      <div class="task-meta">
-                        <span v-if="task.subject" class="meta-chip subject-chip">{{ task.subject }}</span>
+                      <div class="task-meta ddl-card-meta">
                         <span>{{ formatDateLabel(task.dueAt) }} {{ formatTime(task.dueAt) }}</span>
+                        <span v-if="task.subject" class="ddl-card-subject">{{ task.subject }}</span>
                       </div>
-                      <div v-if="task.note" class="task-note-preview">{{ task.note }}</div>
                     </article>
                   </div>
                   <div v-else class="empty-column">暂无带 DDL 时间的任务。</div>
