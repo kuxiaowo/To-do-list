@@ -313,12 +313,13 @@
       <aside class="admin-sidebar">
         <div>
           <h1 class="summary-title">管理员后台</h1>
-          <p class="summary-subtitle">按用户查看列表、日志、DDL 时间线和每日安排。</p>
+          <p class="summary-subtitle">按用户查看列表、日志、反馈、时间表和访问流量。</p>
         </div>
         <nav class="admin-nav">
           <button class="admin-nav-button" :class="{ active: adminSection === 'users' }" type="button" @click="switchAdminSection('users')">用户列表</button>
           <button class="admin-nav-button" :class="{ active: adminSection === 'logs' }" type="button" @click="switchAdminSection('logs')">用户日志</button>
           <button class="admin-nav-button" :class="{ active: adminSection === 'feedback' }" type="button" @click="switchAdminSection('feedback')">用户反馈</button>
+          <button class="admin-nav-button" :class="{ active: adminSection === 'traffic' }" type="button" @click="switchAdminSection('traffic')">流量统计</button>
           <button class="admin-nav-button" :class="{ active: adminSection === 'timeline' }" type="button" @click="switchAdminSection('timeline')">用户时间表</button>
         </nav>
         <div class="admin-sidebar-footer">
@@ -491,7 +492,119 @@
           </div>
         </section>
 
-        <section v-else class="admin-timeline">
+        <section v-else-if="adminSection === 'traffic'" class="admin-panel">
+          <div class="admin-panel-header">
+            <div>
+              <h2>流量统计</h2>
+              <p>统计主页和管理员后台的页面访问，不包含静态资源和普通 API 请求。</p>
+            </div>
+            <el-button plain @click="loadAdminTraffic">刷新统计</el-button>
+          </div>
+
+          <div class="traffic-metrics">
+            <article v-for="metric in trafficMetricCards" :key="metric.label" class="traffic-metric">
+              <div class="traffic-metric-label">{{ metric.label }}</div>
+              <div class="traffic-metric-value">{{ metric.value }}</div>
+            </article>
+          </div>
+
+          <div class="traffic-grid">
+            <section class="traffic-chart-panel">
+              <div class="traffic-section-title">
+                <span>{{ trafficChartTitle }}</span>
+                <div class="traffic-chart-actions">
+                  <div class="traffic-view-switch" aria-label="切换流量统计时间范围">
+                    <button
+                      v-for="option in adminTrafficViewOptions"
+                      :key="option.value"
+                      type="button"
+                      :class="{ active: adminTrafficView === option.value }"
+                      @click="switchAdminTrafficView(option.value)"
+                    >
+                      {{ option.label }}
+                    </button>
+                  </div>
+                  <span>峰值 {{ trafficMaxVisits }}</span>
+                </div>
+              </div>
+              <div v-if="trafficChartPoints" class="traffic-chart" @mouseleave="hideTrafficPoint">
+                <svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-label="访问趋势折线图">
+                  <polyline class="traffic-chart-line" :points="trafficChartPoints"></polyline>
+                  <g v-for="point in trafficChartPointItems" :key="point.date">
+                    <circle
+                      class="traffic-chart-dot"
+                      :cx="point.x"
+                      :cy="point.y"
+                      r="1.15"
+                    ></circle>
+                    <circle
+                      class="traffic-chart-hit"
+                      :cx="point.x"
+                      :cy="point.y"
+                      r="5"
+                      @mouseenter="showTrafficPoint(point)"
+                      @mousemove="showTrafficPoint(point)"
+                    ></circle>
+                  </g>
+                </svg>
+                <div v-if="adminTrafficHoverPoint" class="traffic-chart-tooltip" :style="trafficHoverStyle">
+                  <div class="traffic-tooltip-time">{{ formatTrafficTooltipTime(adminTrafficHoverPoint.date) }}</div>
+                  <div>访问 {{ adminTrafficHoverPoint.visits }} 次</div>
+                  <div>独立 IP {{ adminTrafficHoverPoint.uniqueIps }} 个</div>
+                </div>
+                <div class="traffic-chart-labels">
+                  <span v-for="item in trafficChartLabels" :key="item.date">{{ formatTrafficDate(item.date) }}</span>
+                </div>
+              </div>
+              <div v-else class="empty-column">暂无访问趋势。</div>
+            </section>
+
+            <section class="traffic-top-panel">
+              <div class="traffic-section-title">
+                <span>Top IP</span>
+                <span>{{ adminTraffic.topIps.length }} 个</span>
+              </div>
+              <div v-if="adminTraffic.topIps.length" class="traffic-ip-list">
+                <div v-for="item in adminTraffic.topIps" :key="item.ip" class="traffic-ip-row">
+                  <div>
+                    <div class="traffic-ip">{{ item.ip }}</div>
+                    <div class="traffic-muted">最近 {{ formatDateTime(item.lastVisitAt) }}</div>
+                  </div>
+                  <strong>{{ item.visits }}</strong>
+                </div>
+              </div>
+              <div v-else class="empty-column">暂无 IP 记录。</div>
+            </section>
+          </div>
+
+          <el-table :data="adminTraffic.recentVisits" style="width: 100%;">
+            <el-table-column label="时间" min-width="160">
+              <template #default="{ row }">{{ formatDateTime(row.createdAt) }}</template>
+            </el-table-column>
+            <el-table-column prop="ip" label="IP" min-width="140"></el-table-column>
+            <el-table-column label="页面" width="120">
+              <template #default="{ row }">{{ visitPageLabel(row.page) }}</template>
+            </el-table-column>
+            <el-table-column label="用户" min-width="180">
+              <template #default="{ row }">{{ visitUserLabel(row) }}</template>
+            </el-table-column>
+            <el-table-column prop="path" label="路径" min-width="160"></el-table-column>
+            <el-table-column prop="userAgent" label="User-Agent" min-width="260"></el-table-column>
+            <el-table-column prop="referer" label="来源" min-width="220"></el-table-column>
+          </el-table>
+          <div class="admin-pagination">
+            <el-pagination
+              background
+              layout="prev, pager, next, total"
+              :total="adminTrafficRecentTotal"
+              :page-size="adminTrafficRecentPageSize"
+              :current-page="adminTrafficRecentPage"
+              @current-change="loadAdminTraffic"
+            ></el-pagination>
+          </div>
+        </section>
+
+        <section v-else-if="adminSection === 'timeline'" class="admin-timeline">
           <div class="admin-panel">
             <div class="admin-panel-header">
               <div>
@@ -881,7 +994,28 @@
         </el-form-item>
 
         <el-form-item label="科目">
-          <el-input v-model="form.subject" placeholder="例如：数学 / 物理 / 英语" maxlength="30" show-word-limit></el-input>
+          <el-select
+            v-model="form.subject"
+            filterable
+            allow-create
+            default-first-option
+            placeholder="选择或输入科目"
+            class="subject-select"
+            @focus="rememberSubjectBeforeTemplateEdit"
+            @change="handleSubjectSelectChange"
+          >
+            <el-option
+              v-for="subject in enabledSubjectOptions"
+              :key="subject"
+              :label="subject"
+              :value="subject"
+            ></el-option>
+            <el-option
+              class="subject-template-edit-option"
+              label="编辑科目模板"
+              :value="subjectTemplateEditValue"
+            ></el-option>
+          </el-select>
         </el-form-item>
 
         <el-form-item v-if="isArrangementDialog" label="时间安排">
@@ -939,6 +1073,47 @@
           <div class="right-actions">
             <el-button @click="dialogVisible = false">取消</el-button>
             <el-button type="primary" @click="saveTask">保存</el-button>
+          </div>
+        </div>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="subjectTemplateDialogVisible"
+      title="编辑科目模板"
+      width="min(92vw, 620px)"
+      destroy-on-close
+    >
+      <div class="subject-template-editor">
+        <div class="subject-template-hint">
+          启用的科目会出现在新增任务的下拉框中。预设科目只能启用或停用，自定义科目可以删除。
+        </div>
+        <div class="subject-template-list">
+          <div v-for="(subject, index) in subjectTemplateDraft" :key="`${subject.preset ? 'preset' : 'custom'}-${subject.name}`" class="subject-template-row">
+            <el-checkbox v-model="subject.enabled"></el-checkbox>
+            <span class="subject-template-name">{{ subject.name }}</span>
+            <el-tag :type="subject.preset ? 'info' : 'success'" effect="plain">{{ subject.preset ? '预设' : '自定义' }}</el-tag>
+            <el-button v-if="!subject.preset" type="danger" plain size="small" @click="removeSubjectTemplateItem(index)">删除</el-button>
+          </div>
+        </div>
+        <div class="subject-template-add">
+          <el-input
+            v-model="newSubjectName"
+            placeholder="添加自定义科目，例如：History"
+            maxlength="40"
+            show-word-limit
+            @keyup.enter="addSubjectTemplateItem"
+          ></el-input>
+          <el-button plain @click="addSubjectTemplateItem">添加科目</el-button>
+        </div>
+      </div>
+
+      <template #footer>
+        <div class="dialog-footer">
+          <div></div>
+          <div class="right-actions">
+            <el-button @click="subjectTemplateDialogVisible = false">取消</el-button>
+            <el-button type="primary" @click="saveSubjectTemplate">保存模板</el-button>
           </div>
         </div>
       </template>

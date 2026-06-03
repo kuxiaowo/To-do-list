@@ -583,3 +583,57 @@ GET /api/health
   "database": "D:\\Python\\programs\\GitHub\\To-do-list\\data\\todo-list.db"
 }
 ```
+
+## Subject Template API
+
+Subject templates are per-user presets for the task `subject` field. Tasks still store `subject` as plain text and do not require the value to come from the template.
+
+### Get subject template
+
+```http
+GET /api/subject-template
+```
+
+Response:
+```json
+{
+  "subjects": [
+    { "name": "Chinese", "preset": true, "enabled": true },
+    { "name": "Mathematics", "preset": true, "enabled": true },
+    { "name": "Computer Science", "preset": true, "enabled": true },
+    { "name": "History", "preset": false, "enabled": true }
+  ],
+  "defaultSubjects": ["Chinese", "Mathematics", "English B", "IELTS", "Physics", "Economics", "Chemistry", "Psychology", "Biology", "Computer Science"],
+  "readOnly": false
+}
+```
+
+Status:
+- `200 OK`: success.
+- `401 Unauthorized`: login required.
+
+### Update subject template
+
+```http
+PUT /api/subject-template
+```
+
+Request:
+```json
+{
+  "subjects": [
+    { "name": "Chinese", "preset": true, "enabled": false },
+    { "name": "History", "preset": false, "enabled": true }
+  ]
+}
+```
+
+Notes:
+- Preset subjects are always kept by the server; clients can only enable or disable them.
+- Custom subjects can be added or removed by including or omitting them from `subjects`.
+- Subject names are trimmed, case-insensitively deduplicated, and limited to 40 characters.
+
+Status:
+- `200 OK`: saved.
+- `400 Bad Request`: invalid payload.
+- `401 Unauthorized`: login required.

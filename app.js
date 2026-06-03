@@ -7,6 +7,7 @@ const SCHEDULE_TEMPLATE_API = '/api/schedule-template';
 const SCHEDULE_DAY_SLOTS_API = '/api/schedule-day-slots';
 const ADMIN_API = '/api/admin';
 const FEEDBACK_API = '/api/feedback';
+const VISITS_API = '/api/visits';
 const AUTH_TOKEN_KEY = 'todo-list-auth-token-v1';
 const THEME_STORAGE_KEY = 'todo-list-theme-v1';
 const GUIDE_STORAGE_KEY = 'todo-list-guide-v1';
@@ -16,6 +17,20 @@ const TIMELINE_START_DAY = 1;
 const PRIORITY_ORDER = { high: 0, medium: 1, low: 2 };
 const PRIORITY_LABELS = { high: '高优先级', medium: '中优先级', low: '低优先级' };
 const WEEKDAY_TEXT = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+const SUBJECT_TEMPLATE_API = '/api/subject-template';
+const SUBJECT_TEMPLATE_EDIT_VALUE = '__edit_subject_template__';
+const DEFAULT_SUBJECT_TEMPLATE = [
+  'Chinese',
+  'Mathematics',
+  'English B',
+  'IELTS',
+  'Physics',
+  'Economics',
+  'Chemistry',
+  'Psychology',
+  'Biology',
+  'Computer Science'
+].map(name => ({ name, preset: true, enabled: true }));
 const DEFAULT_WEEK_SLOTS = {
   0: [
     { keyBase: '0-09:00', label: '上午', start: '09:00', end: '10:00' },
@@ -121,6 +136,11 @@ createApp({
       nicknameForm: { nickname: '' },
       passwordDialogVisible: false,
       passwordForm: { currentPassword: '', newPassword: '', confirmPassword: '' },
+      subjectTemplate: JSON.parse(JSON.stringify(DEFAULT_SUBJECT_TEMPLATE)),
+      subjectTemplateDialogVisible: false,
+      subjectTemplateDraft: [],
+      newSubjectName: '',
+      lastSubjectBeforeTemplateEdit: '',
       feedbackDialogVisible: false,
       feedbackForm: { content: '' },
       feedbackItems: [],
@@ -144,6 +164,28 @@ createApp({
       adminFeedbackReplyVisible: false,
       adminFeedbackActive: null,
       adminFeedbackReply: '',
+      adminTrafficView: '7d',
+      adminTrafficHoverPoint: null,
+      adminTrafficRecentTotal: 0,
+      adminTrafficRecentPage: 1,
+      adminTrafficRecentPageSize: 50,
+      adminTrafficViewOptions: [
+        { value: '30d', label: '30天' },
+        { value: '7d', label: '7天' },
+        { value: '1d', label: '1天' },
+        { value: '6h', label: '6小时' }
+      ],
+      adminTraffic: {
+        seriesUnit: 'day',
+        totalVisits: 0,
+        todayVisits: 0,
+        uniqueIps: 0,
+        todayUniqueIps: 0,
+        trendSeries: [],
+        dailySeries: [],
+        topIps: [],
+        recentVisits: []
+      },
       adminLoading: false,
       adminTimelineLoadedUserId: '',
       guideVisible: false,
@@ -253,6 +295,71 @@ createApp({
         label: `${user.name}（${user.nickname}）`
       }));
     },
+    trafficMetricCards() {
+      return [
+        { label: '总访问', value: this.adminTraffic.totalVisits },
+        { label: '今日访问', value: this.adminTraffic.todayVisits },
+        { label: '独立 IP', value: this.adminTraffic.uniqueIps },
+        { label: '今日独立 IP', value: this.adminTraffic.todayUniqueIps }
+      ];
+    },
+    trafficSeries() {
+      const series = Array.isArray(this.adminTraffic.trendSeries)
+        ? this.adminTraffic.trendSeries
+        : this.adminTraffic.dailySeries;
+      return Array.isArray(series) ? series : [];
+    },
+    trafficChartTitle() {
+      const labels = {
+        '30d': '近 30 天访问趋势',
+        '7d': '近 7 天访问趋势',
+        '1d': '近 24 小时访问趋势',
+        '6h': '近 6 小时访问趋势'
+      };
+      return labels[this.adminTrafficView] || '访问趋势';
+    },
+    trafficChartPoints() {
+      const series = this.trafficSeries;
+      if (!series.length) return '';
+      return this.trafficChartPointItems.map(point => `${point.x.toFixed(2)},${point.y.toFixed(2)}`).join(' ');
+    },
+    trafficChartPointItems() {
+      const series = this.trafficSeries;
+      if (!series.length) return [];
+      const maxVisits = Math.max(1, ...series.map(item => Number(item.visits || 0)));
+      return series.map((item, index) => {
+        const x = series.length === 1 ? 50 : (index / (series.length - 1)) * 100;
+        const y = 92 - (Number(item.visits || 0) / maxVisits) * 76;
+        return {
+          ...item,
+          x,
+          y,
+          visits: Number(item.visits || 0),
+          uniqueIps: Number(item.uniqueIps || 0)
+        };
+      });
+    },
+    trafficChartLabels() {
+      const series = this.trafficSeries;
+      if (!series.length) return [];
+      if (this.adminTrafficView === '6h' || this.adminTrafficView === '7d') return series;
+      const step = this.adminTrafficView === '1d' ? 3 : 5;
+      const labels = series.filter((item, index) => index % step === 0);
+      const last = series[series.length - 1];
+      if (labels[labels.length - 1] !== last) labels.push(last);
+      return labels;
+    },
+    trafficMaxVisits() {
+      const series = this.trafficSeries;
+      return Math.max(0, ...series.map(item => Number(item.visits || 0)));
+    },
+    trafficHoverStyle() {
+      if (!this.adminTrafficHoverPoint) return {};
+      return {
+        left: `${this.adminTrafficHoverPoint.x}%`,
+        top: `${this.adminTrafficHoverPoint.y}%`
+      };
+    },
     sortedTasks() {
       return [...this.tasks].sort((a, b) => this.compareTasks(a, b));
     },
@@ -274,6 +381,14 @@ createApp({
     },
     unscheduledCount() {
       return this.activePoolTasks.length;
+    },
+    enabledSubjectOptions() {
+      return this.subjectTemplate
+        .filter(item => item.enabled)
+        .map(item => item.name);
+    },
+    subjectTemplateEditValue() {
+      return SUBJECT_TEMPLATE_EDIT_VALUE;
     },
     pendingFeedbackCount() {
       return this.feedbackItems.filter(item => item.status !== 'replied').length;
@@ -366,6 +481,7 @@ createApp({
     this.pageViewDateKeys.daily = this.currentViewDateKey;
     document.addEventListener('click', this.closeAccountMenu);
     await this.loadCurrentUser();
+    await this.loadSubjectTemplate();
     await this.loadScheduleConfig();
     await this.loadTasks();
     await this.loadScheduleItems();
@@ -514,6 +630,110 @@ createApp({
       if (!response.ok) throw new Error(payload.message || payload.error || '请求失败');
       return payload;
     },
+    defaultSubjectTemplate() {
+      return JSON.parse(JSON.stringify(DEFAULT_SUBJECT_TEMPLATE));
+    },
+    normalizeSubjectTemplate(subjects) {
+      const source = Array.isArray(subjects) ? subjects : this.defaultSubjectTemplate();
+      const byName = new Map();
+      source.forEach(item => {
+        if (!item || typeof item !== 'object') return;
+        const name = String(item.name || '').trim();
+        if (!name || name.length > 40) return;
+        byName.set(name.toLocaleLowerCase(), { ...item, name });
+      });
+      const normalized = this.defaultSubjectTemplate().map(item => {
+        const raw = byName.get(item.name.toLocaleLowerCase());
+        return { name: item.name, preset: true, enabled: raw ? !!raw.enabled : true };
+      });
+      const seen = new Set(normalized.map(item => item.name.toLocaleLowerCase()));
+      source.forEach(item => {
+        if (!item || typeof item !== 'object') return;
+        const name = String(item.name || '').trim();
+        const key = name.toLocaleLowerCase();
+        if (!name || name.length > 40 || seen.has(key)) return;
+        normalized.push({ name, preset: false, enabled: item.enabled !== false });
+        seen.add(key);
+      });
+      return normalized;
+    },
+    resetSubjectTemplateState() {
+      this.subjectTemplate = this.defaultSubjectTemplate();
+      this.subjectTemplateDraft = [];
+      this.subjectTemplateDialogVisible = false;
+      this.newSubjectName = '';
+      this.lastSubjectBeforeTemplateEdit = '';
+    },
+    async loadSubjectTemplate() {
+      if (!this.currentUser) {
+        this.resetSubjectTemplateState();
+        return;
+      }
+      try {
+        const payload = await this.apiJson(SUBJECT_TEMPLATE_API, { cache: 'no-store' });
+        this.subjectTemplate = this.normalizeSubjectTemplate(payload.subjects);
+      } catch (error) {
+        this.subjectTemplate = this.defaultSubjectTemplate();
+        ElementPlus.ElMessage.error(`科目模板读取失败：${error.message}`);
+      }
+    },
+    rememberSubjectBeforeTemplateEdit() {
+      this.lastSubjectBeforeTemplateEdit = this.form.subject;
+    },
+    handleSubjectSelectChange(value) {
+      if (value !== SUBJECT_TEMPLATE_EDIT_VALUE) {
+        this.lastSubjectBeforeTemplateEdit = value;
+        return;
+      }
+      this.form.subject = this.lastSubjectBeforeTemplateEdit || '';
+      this.openSubjectTemplateDialog();
+    },
+    openSubjectTemplateDialog() {
+      this.subjectTemplateDraft = this.normalizeSubjectTemplate(this.subjectTemplate);
+      this.newSubjectName = '';
+      this.subjectTemplateDialogVisible = true;
+    },
+    addSubjectTemplateItem() {
+      const name = this.newSubjectName.trim();
+      if (!name) {
+        ElementPlus.ElMessage.warning('科目名称不能为空。');
+        return;
+      }
+      if (name.length > 40) {
+        ElementPlus.ElMessage.warning('科目名称不能超过 40 个字符。');
+        return;
+      }
+      const exists = this.subjectTemplateDraft.some(item => item.name.toLocaleLowerCase() === name.toLocaleLowerCase());
+      if (exists) {
+        ElementPlus.ElMessage.warning('这个科目已经存在。');
+        return;
+      }
+      this.subjectTemplateDraft.push({ name, preset: false, enabled: true });
+      this.newSubjectName = '';
+    },
+    removeSubjectTemplateItem(index) {
+      const item = this.subjectTemplateDraft[index];
+      if (!item || item.preset) return;
+      this.subjectTemplateDraft.splice(index, 1);
+    },
+    async saveSubjectTemplate() {
+      if (!this.currentUser) {
+        ElementPlus.ElMessage.warning('请先登录后再保存科目模板。');
+        return;
+      }
+      const normalized = this.normalizeSubjectTemplate(this.subjectTemplateDraft);
+      try {
+        const payload = await this.apiJson(SUBJECT_TEMPLATE_API, {
+          method: 'PUT',
+          body: JSON.stringify({ subjects: normalized })
+        });
+        this.subjectTemplate = this.normalizeSubjectTemplate(payload.subjects);
+        this.subjectTemplateDialogVisible = false;
+        ElementPlus.ElMessage.success('科目模板已保存。');
+      } catch (error) {
+        ElementPlus.ElMessage.error(`科目模板保存失败：${error.message}`);
+      }
+    },
     async openAdminMode(section = 'users') {
       if (!this.isAdmin) {
         ElementPlus.ElMessage.warning('只有管理员可以进入后台。');
@@ -529,6 +749,8 @@ createApp({
       if (this.adminSection === 'logs') await this.loadAdminLogs(1);
       if (this.adminSection === 'timeline') await this.loadAdminTimeline();
       if (this.adminSection === 'feedback') await this.loadAdminFeedback(1);
+      if (this.adminSection === 'traffic') await this.loadAdminTraffic();
+      await this.recordVisit('admin');
     },
     async exitAdminMode() {
       this.adminMode = false;
@@ -544,6 +766,20 @@ createApp({
       if (section === 'logs') await this.loadAdminLogs(1);
       if (section === 'timeline') await this.loadAdminTimeline();
       if (section === 'feedback') await this.loadAdminFeedback(1);
+      if (section === 'traffic') await this.loadAdminTraffic();
+    },
+    async recordVisit(page) {
+      try {
+        await this.apiJson(VISITS_API, {
+          method: 'POST',
+          body: JSON.stringify({
+            page,
+            path: `${window.location.pathname}${window.location.search}#${page}`
+          })
+        });
+      } catch (error) {
+        console.warn('访问记录上报失败：', error);
+      }
     },
     async loadAdminUsers() {
       if (!this.isAdmin) return;
@@ -678,6 +914,43 @@ createApp({
         this.adminLoading = false;
       }
     },
+    async loadAdminTraffic(page = this.adminTrafficRecentPage) {
+      if (!this.isAdmin) return;
+      this.adminLoading = true;
+      try {
+        const url = `${ADMIN_API}/traffic/summary?view=${encodeURIComponent(this.adminTrafficView)}&page=${page}&pageSize=${this.adminTrafficRecentPageSize}`;
+        const payload = await this.apiJson(url, { cache: 'no-store' });
+        this.adminTraffic = {
+          seriesUnit: payload.seriesUnit || 'day',
+          totalVisits: Number(payload.totalVisits || 0),
+          todayVisits: Number(payload.todayVisits || 0),
+          uniqueIps: Number(payload.uniqueIps || 0),
+          todayUniqueIps: Number(payload.todayUniqueIps || 0),
+          trendSeries: Array.isArray(payload.trendSeries) ? payload.trendSeries : [],
+          dailySeries: Array.isArray(payload.dailySeries) ? payload.dailySeries : [],
+          topIps: Array.isArray(payload.topIps) ? payload.topIps : [],
+          recentVisits: Array.isArray(payload.recentVisits) ? payload.recentVisits : []
+        };
+        this.adminTrafficRecentTotal = Number(payload.recentTotal || 0);
+        this.adminTrafficRecentPage = Number(payload.page || page);
+      } catch (error) {
+        ElementPlus.ElMessage.error(`流量统计读取失败：${error.message}`);
+      } finally {
+        this.adminLoading = false;
+      }
+    },
+    async switchAdminTrafficView(view) {
+      if (view === this.adminTrafficView) return;
+      this.adminTrafficView = view;
+      this.adminTrafficHoverPoint = null;
+      await this.loadAdminTraffic(this.adminTrafficRecentPage);
+    },
+    showTrafficPoint(point) {
+      this.adminTrafficHoverPoint = point;
+    },
+    hideTrafficPoint() {
+      this.adminTrafficHoverPoint = null;
+    },
     async saveAdminFeedbackLimit() {
       if (!this.isAdmin) return;
       const feedbackLimitPerUser = Number(this.adminFeedbackLimitDraft);
@@ -809,9 +1082,40 @@ createApp({
         'admin.feedback.reply': '回复反馈',
         'admin.feedback.delete': '删除反馈',
         'admin.feedback.limit_update': '修改未回复反馈上限',
-        'feedback.delete': '删除反馈'
+        'feedback.delete': '删除反馈',
+        'subject_template.update': '更新科目模板'
       };
       return labels[action] || action;
+    },
+    visitPageLabel(page) {
+      const labels = {
+        home: '主页',
+        admin: '管理员后台'
+      };
+      return labels[page] || page || '未知';
+    },
+    visitUserLabel(visit) {
+      if (!visit || !visit.user) return '—';
+      return `${visit.user.name}（${visit.user.nickname}）`;
+    },
+    formatTrafficDate(dateKey) {
+      if (!dateKey) return '';
+      if (String(dateKey).includes('T')) {
+        const date = new Date(dateKey);
+        if (!Number.isNaN(date.getTime())) return `${this.pad(date.getHours())}:00`;
+      }
+      const [, month, day] = String(dateKey).split('-');
+      return month && day ? `${Number(month)}/${Number(day)}` : String(dateKey);
+    },
+    formatTrafficTooltipTime(dateKey) {
+      if (!dateKey) return '未知时间';
+      if (String(dateKey).includes('T')) {
+        const date = new Date(dateKey);
+        if (!Number.isNaN(date.getTime())) {
+          return `${date.getFullYear()}-${this.pad(date.getMonth() + 1)}-${this.pad(date.getDate())} ${this.pad(date.getHours())}:00`;
+        }
+      }
+      return String(dateKey);
     },
     adminLogDetail(log) {
       const detail = log && log.detail ? log.detail : {};
@@ -841,6 +1145,7 @@ createApp({
         this.currentUser = payload.user;
         this.accountMenuOpen = false;
         localStorage.setItem(AUTH_TOKEN_KEY, payload.token);
+        await this.loadSubjectTemplate();
         await this.loadScheduleConfig();
         await this.loadTasks();
         await this.loadScheduleItems();
@@ -859,6 +1164,7 @@ createApp({
         this.currentUser = payload.user;
         this.accountMenuOpen = false;
         localStorage.setItem(AUTH_TOKEN_KEY, payload.token);
+        await this.loadSubjectTemplate();
         await this.loadScheduleConfig();
         await this.loadTasks();
         await this.loadScheduleItems();
@@ -1040,10 +1346,26 @@ createApp({
       this.adminFeedbackReplyVisible = false;
       this.adminFeedbackActive = null;
       this.adminFeedbackReply = '';
+      this.adminTrafficView = '7d';
+      this.adminTrafficHoverPoint = null;
+      this.adminTrafficRecentTotal = 0;
+      this.adminTrafficRecentPage = 1;
+      this.adminTraffic = {
+        seriesUnit: 'day',
+        totalVisits: 0,
+        todayVisits: 0,
+        uniqueIps: 0,
+        todayUniqueIps: 0,
+        trendSeries: [],
+        dailySeries: [],
+        topIps: [],
+        recentVisits: []
+      };
       this.nicknameDialogVisible = false;
       this.nicknameForm.nickname = '';
       this.passwordDialogVisible = false;
       this.passwordForm = { currentPassword: '', newPassword: '', confirmPassword: '' };
+      this.resetSubjectTemplateState();
       this.feedbackDialogVisible = false;
       this.feedbackForm.content = '';
       this.feedbackItems = [];
@@ -1907,6 +2229,10 @@ createApp({
       const dueAt = this.buildDueAt();
       if (!title || !subject || dueAt === null) {
         ElementPlus.ElMessage.warning('请先填写标题、科目；如果要设置截止时间，也要填日期和 H:mm 或 HH:mm 格式的时间。');
+        return;
+      }
+      if (subject.length > 40) {
+        ElementPlus.ElMessage.warning('科目不能超过 40 个字符。');
         return;
       }
 

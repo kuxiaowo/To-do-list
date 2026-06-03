@@ -9,6 +9,7 @@ import os
 import secrets
 import sqlite3
 import time
+from datetime import datetime, timedelta
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -23,6 +24,18 @@ PASSWORD_ITERATIONS = 260_000
 SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
 DEFAULT_FEEDBACK_LIMIT_PER_USER = 10
 FEEDBACK_LIMIT_SETTING_KEY = 'feedback_limit_per_user'
+DEFAULT_SUBJECTS = [
+    'Chinese',
+    'Mathematics',
+    'English B',
+    'IELTS',
+    'Physics',
+    'Economics',
+    'Chemistry',
+    'Psychology',
+    'Biology',
+    'Computer Science',
+]
 
 # Weekday keys follow JavaScript Date.getDay(): 0 is Sunday, 1 is Monday.
 # The frontend also keeps a fallback copy, but this server-side value is the
@@ -238,6 +251,34 @@ def init_db() -> None:
         )
         conn.execute(
             '''
+            CREATE TABLE IF NOT EXISTS subject_templates (
+                user_id INTEGER PRIMARY KEY,
+                subjects_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            '''
+        )
+        conn.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS visit_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ip TEXT NOT NULL DEFAULT '',
+                page TEXT NOT NULL,
+                path TEXT NOT NULL DEFAULT '',
+                user_id INTEGER,
+                user_agent TEXT NOT NULL DEFAULT '',
+                referer TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE SET NULL
+            )
+            '''
+        )
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_visit_logs_created_at ON visit_logs(created_at)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_visit_logs_ip ON visit_logs(ip)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_visit_logs_page ON visit_logs(page)')
+        conn.execute(
+            '''
             INSERT OR IGNORE INTO app_settings (key, value, updated_at)
             VALUES (?, ?, ?)
             ''',
@@ -329,6 +370,63 @@ def public_user(row: sqlite3.Row | dict) -> dict:
         'nickname': row['nickname'],
         'role': row['role'],
     }
+
+
+def default_subject_template() -> list[dict]:
+    return [{'name': name, 'preset': True, 'enabled': True} for name in DEFAULT_SUBJECTS]
+
+
+def normalize_subject_template(raw_subjects) -> tuple[list[dict] | None, str | None]:
+    if raw_subjects is None:
+        return default_subject_template(), None
+    if not isinstance(raw_subjects, list):
+        return None, 'subjects must be a list'
+
+    raw_by_name = {}
+    for item in raw_subjects:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get('name', '')).strip()
+        if not name:
+            continue
+        if len(name) > 40:
+            return None, 'subject name is too long'
+        raw_by_name[name.casefold()] = item
+
+    subjects = []
+    seen = set()
+    for name in DEFAULT_SUBJECTS:
+        key = name.casefold()
+        raw = raw_by_name.get(key, {})
+        subjects.append({'name': name, 'preset': True, 'enabled': bool(raw.get('enabled', True))})
+        seen.add(key)
+
+    for item in raw_subjects:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get('name', '')).strip()
+        if not name:
+            continue
+        if len(name) > 40:
+            return None, 'subject name is too long'
+        key = name.casefold()
+        if key in seen:
+            continue
+        subjects.append({'name': name, 'preset': False, 'enabled': bool(item.get('enabled', True))})
+        seen.add(key)
+
+    return subjects, None
+
+
+def parse_subject_template(raw_json: str | None) -> list[dict]:
+    if not raw_json:
+        return default_subject_template()
+    try:
+        payload = json.loads(raw_json)
+    except (TypeError, json.JSONDecodeError):
+        return default_subject_template()
+    subjects, error = normalize_subject_template(payload)
+    return default_subject_template() if error else subjects
 
 
 def minutes_between(start: str, end: str) -> int:
@@ -589,16 +687,22 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return self.handle_list_schedule_items()
         if path == '/api/schedule-config':
             return self.handle_get_schedule_config()
+        if path == '/api/subject-template':
+            return self.handle_get_subject_template()
         if path == '/api/feedback':
             return self.handle_list_feedback()
         if path == '/api/auth/me':
             return self.handle_auth_me()
         if path == '/api/health':
             return self.write_json({'ok': True, 'database': str(DB_PATH)})
+        if path in {'/', '/index.html'}:
+            self.record_visit('home', path)
         return super().do_GET()
 
     def do_POST(self):
         path = urlparse(self.path).path
+        if path == '/api/visits':
+            return self.handle_create_visit()
         if path == '/api/auth/register':
             return self.handle_auth_register()
         if path == '/api/auth/login':
@@ -633,6 +737,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return self.handle_update_schedule_item(path.rsplit('/', 1)[-1])
         if path == '/api/schedule-template':
             return self.handle_update_schedule_template()
+        if path == '/api/subject-template':
+            return self.handle_update_subject_template()
         if path.startswith('/api/schedule-day-slots/'):
             return self.handle_update_schedule_day_slots(path.rsplit('/', 1)[-1])
         self.send_error(HTTPStatus.NOT_FOUND, 'Not found')
@@ -807,6 +913,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return self.handle_admin_feedback()
         if parts == ['api', 'admin', 'feedback-settings']:
             return self.handle_admin_feedback_settings()
+        if parts == ['api', 'admin', 'traffic', 'summary']:
+            return self.handle_admin_traffic_summary()
         if len(parts) == 5 and parts[:3] == ['api', 'admin', 'users']:
             try:
                 target_user_id = int(parts[3])
@@ -825,6 +933,181 @@ class TodoHandler(SimpleHTTPRequestHandler):
     def ensure_user_exists(self, conn: sqlite3.Connection, user_id: int):
         row = conn.execute('SELECT id, name, nickname, role, created_at FROM users WHERE id = ?', (user_id,)).fetchone()
         return row
+
+    def request_ip(self) -> str:
+        return self.client_address[0] if self.client_address else ''
+
+    def record_visit(self, page: str, path: str, user_id: int | None = None) -> None:
+        with get_db() as conn:
+            conn.execute(
+                '''
+                INSERT INTO visit_logs (ip, page, path, user_id, user_agent, referer, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ''',
+                (
+                    self.request_ip(),
+                    page[:40],
+                    path[:500],
+                    user_id,
+                    str(self.headers.get('User-Agent', ''))[:1000],
+                    str(self.headers.get('Referer', ''))[:1000],
+                    now_iso(),
+                ),
+            )
+            conn.commit()
+
+    def handle_create_visit(self):
+        payload = self.read_json_body()
+        if payload is None:
+            return
+        page = str(payload.get('page', '')).strip()
+        if page not in {'admin'}:
+            return self.write_json({'error': 'invalid page'}, status=HTTPStatus.BAD_REQUEST)
+        user = self.current_user()
+        visit_path = str(payload.get('path', '')).strip() or urlparse(self.path).path
+        self.record_visit(page, visit_path, int(user['id']) if user else None)
+        return self.write_json({'ok': True})
+
+    def handle_admin_traffic_summary(self):
+        query = parse_qs(urlparse(self.path).query)
+        traffic_view = str(query.get('view', ['7d'])[0]).strip()
+        if traffic_view not in {'30d', '7d', '1d', '6h'}:
+            return self.write_json({'error': 'invalid traffic view'}, status=HTTPStatus.BAD_REQUEST)
+        try:
+            page = max(1, int(query.get('page', ['1'])[0]))
+            page_size = min(100, max(1, int(query.get('pageSize', ['50'])[0])))
+        except ValueError:
+            return self.write_json({'error': 'invalid pagination'}, status=HTTPStatus.BAD_REQUEST)
+        offset = (page - 1) * page_size
+
+        now = datetime.utcnow().replace(minute=0, second=0, microsecond=0)
+        today = now.date()
+        today_key = today.isoformat()
+        if traffic_view == '30d':
+            series_unit = 'day'
+            bucket_count = 30
+            start_dt = datetime.combine(today - timedelta(days=bucket_count - 1), datetime.min.time())
+        elif traffic_view == '7d':
+            series_unit = 'day'
+            bucket_count = 7
+            start_dt = datetime.combine(today - timedelta(days=bucket_count - 1), datetime.min.time())
+        elif traffic_view == '1d':
+            series_unit = 'hour'
+            bucket_count = 24
+            start_dt = now - timedelta(hours=bucket_count - 1)
+        else:
+            series_unit = 'hour'
+            bucket_count = 6
+            start_dt = now - timedelta(hours=bucket_count - 1)
+        start_key = start_dt.strftime('%Y-%m-%dT%H:%M:%SZ')
+
+        with get_db() as conn:
+            total_visits = conn.execute('SELECT COUNT(*) FROM visit_logs').fetchone()[0]
+            today_visits = conn.execute(
+                "SELECT COUNT(*) FROM visit_logs WHERE substr(created_at, 1, 10) = ?",
+                (today_key,),
+            ).fetchone()[0]
+            unique_ips = conn.execute("SELECT COUNT(DISTINCT NULLIF(ip, '')) FROM visit_logs").fetchone()[0]
+            today_unique_ips = conn.execute(
+                "SELECT COUNT(DISTINCT NULLIF(ip, '')) FROM visit_logs WHERE substr(created_at, 1, 10) = ?",
+                (today_key,),
+            ).fetchone()[0]
+            trend_rows = conn.execute(
+                '''
+                SELECT ip, created_at
+                FROM visit_logs
+                WHERE created_at >= ?
+                ORDER BY created_at ASC
+                ''',
+                (start_key,),
+            ).fetchall()
+            top_rows = conn.execute(
+                '''
+                SELECT ip, COUNT(*) AS visits, MAX(created_at) AS last_visit_at
+                FROM visit_logs
+                WHERE ip != ''
+                GROUP BY ip
+                ORDER BY visits DESC, last_visit_at DESC
+                LIMIT 10
+                '''
+            ).fetchall()
+            recent_total = conn.execute('SELECT COUNT(*) FROM visit_logs').fetchone()[0]
+            recent_rows = conn.execute(
+                '''
+                SELECT visit_logs.id, visit_logs.ip, visit_logs.page, visit_logs.path,
+                       visit_logs.user_id, visit_logs.user_agent, visit_logs.referer,
+                       visit_logs.created_at, users.name AS user_name, users.nickname AS user_nickname
+                FROM visit_logs
+                LEFT JOIN users ON users.id = visit_logs.user_id
+                ORDER BY visit_logs.created_at DESC, visit_logs.id DESC
+                LIMIT ? OFFSET ?
+                ''',
+                (page_size, offset),
+            ).fetchall()
+
+        trend_by_bucket = {}
+        for row in trend_rows:
+            try:
+                created_at = datetime.strptime(row['created_at'], '%Y-%m-%dT%H:%M:%SZ')
+            except (TypeError, ValueError):
+                continue
+            if series_unit == 'day':
+                bucket_key = created_at.date().isoformat()
+            else:
+                bucket_key = created_at.replace(minute=0, second=0, microsecond=0).strftime('%Y-%m-%dT%H:00:00Z')
+            bucket = trend_by_bucket.setdefault(bucket_key, {'visits': 0, 'ips': set()})
+            bucket['visits'] += 1
+            if row['ip']:
+                bucket['ips'].add(row['ip'])
+
+        trend_series = []
+        for offset in range(bucket_count):
+            bucket_dt = start_dt + (timedelta(days=offset) if series_unit == 'day' else timedelta(hours=offset))
+            if series_unit == 'day':
+                bucket_key = bucket_dt.date().isoformat()
+            else:
+                bucket_key = bucket_dt.strftime('%Y-%m-%dT%H:00:00Z')
+            item = trend_by_bucket.get(bucket_key, {'visits': 0, 'ips': set()})
+            trend_series.append({
+                'date': bucket_key,
+                'visits': item['visits'],
+                'uniqueIps': len(item['ips']),
+            })
+
+        return self.write_json({
+            'trafficView': traffic_view,
+            'seriesUnit': series_unit,
+            'totalVisits': total_visits,
+            'todayVisits': today_visits,
+            'uniqueIps': unique_ips,
+            'todayUniqueIps': today_unique_ips,
+            'dailySeries': trend_series,
+            'trendSeries': trend_series,
+            'recentTotal': recent_total,
+            'page': page,
+            'pageSize': page_size,
+            'topIps': [
+                {'ip': row['ip'], 'visits': row['visits'], 'lastVisitAt': row['last_visit_at']}
+                for row in top_rows
+            ],
+            'recentVisits': [
+                {
+                    'id': row['id'],
+                    'ip': row['ip'],
+                    'page': row['page'],
+                    'path': row['path'],
+                    'userId': row['user_id'],
+                    'user': (
+                        {'id': row['user_id'], 'name': row['user_name'], 'nickname': row['user_nickname']}
+                        if row['user_id'] else None
+                    ),
+                    'userAgent': row['user_agent'],
+                    'referer': row['referer'],
+                    'createdAt': row['created_at'],
+                }
+                for row in recent_rows
+            ],
+        })
 
     def handle_admin_users(self):
         with get_db() as conn:
@@ -1280,6 +1563,55 @@ class TodoHandler(SimpleHTTPRequestHandler):
         with get_db() as conn:
             tasks = self.fetch_tasks_for_user(conn, int(user['id']))
         return self.write_json({'tasks': tasks, 'readOnly': False, 'user': public_user(user)})
+
+    def handle_get_subject_template(self):
+        user = self.require_user()
+        if not user:
+            return
+        with get_db() as conn:
+            row = conn.execute(
+                'SELECT subjects_json FROM subject_templates WHERE user_id = ?',
+                (user['id'],),
+            ).fetchone()
+        subjects = parse_subject_template(row['subjects_json'] if row else None)
+        return self.write_json({
+            'subjects': subjects,
+            'defaultSubjects': DEFAULT_SUBJECTS,
+            'readOnly': False,
+        })
+
+    def handle_update_subject_template(self):
+        user = self.require_user()
+        if not user:
+            return
+        payload = self.read_json_body()
+        if payload is None:
+            return
+        subjects, error = normalize_subject_template(payload.get('subjects'))
+        if error:
+            return self.write_json({'error': error}, status=HTTPStatus.BAD_REQUEST)
+        with get_db() as conn:
+            conn.execute(
+                '''
+                INSERT INTO subject_templates (user_id, subjects_json, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    subjects_json = excluded.subjects_json,
+                    updated_at = excluded.updated_at
+                ''',
+                (user['id'], json.dumps(subjects, ensure_ascii=False), now_iso()),
+            )
+            self.log_operation(
+                conn,
+                int(user['id']),
+                int(user['id']),
+                'subject_template.update',
+                'subject_template',
+                str(user['id']),
+                {'count': len(subjects), 'enabledCount': sum(1 for item in subjects if item.get('enabled'))},
+            )
+            conn.commit()
+        return self.write_json({'ok': True, 'subjects': subjects, 'defaultSubjects': DEFAULT_SUBJECTS})
 
     def validate_task_payload(self, payload: dict, user_id: int, task_id: str | None = None):
         if not isinstance(payload, dict):
