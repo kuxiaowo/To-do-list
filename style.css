@@ -105,6 +105,11 @@ body {
   min-height: 100vh;
   gap: 20px;
   padding: 20px;
+  transition: grid-template-columns 0.2s ease;
+}
+
+.app-shell.sidebar-collapsed {
+  grid-template-columns: 56px minmax(0, 1fr);
 }
 
 .summary-panel {
@@ -119,6 +124,107 @@ body {
   padding: 20px;
   max-height: calc(100vh - 40px);
   overflow: auto;
+}
+
+.summary-panel-content {
+  min-width: 0;
+}
+
+.summary-panel.is-collapsed {
+  padding: 8px;
+  overflow: hidden;
+}
+
+.summary-panel.is-collapsed .summary-panel-content {
+  display: none;
+}
+
+.summary-panel:not(.is-collapsed) .summary-header {
+  padding-right: 36px;
+}
+
+.sidebar-quick-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.sidebar-action-button,
+.sidebar-peek-button {
+  width: 100%;
+  min-height: 44px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  color: var(--text-strong);
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  cursor: pointer;
+  font-weight: 900;
+  box-shadow: var(--schedule-shadow);
+}
+
+.sidebar-peek-button.is-expanded-control {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 30px;
+  min-height: 30px;
+  height: 30px;
+  border-radius: 9px;
+  padding: 0;
+  box-shadow: none;
+  background: var(--panel-muted);
+}
+
+.sidebar-action-button {
+  color: var(--brand);
+}
+
+.sidebar-action-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.sidebar-action-button span {
+  writing-mode: vertical-rl;
+  letter-spacing: 0;
+  font-size: 0.8rem;
+  line-height: 1.1;
+}
+
+.sidebar-action-button:not(:disabled):hover,
+.sidebar-peek-button:hover {
+  border-color: var(--brand-line);
+  color: var(--brand);
+}
+
+.sidebar-peek-icon {
+  font-size: 1.35rem;
+  line-height: 1;
+}
+
+.sidebar-peek-text {
+  writing-mode: vertical-rl;
+  letter-spacing: 0;
+  font-size: 0.8rem;
+  line-height: 1.1;
+}
+
+.sidebar-peek-count {
+  min-width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  background: var(--brand-soft);
+  color: var(--brand);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.75rem;
 }
 
 .summary-header {
@@ -530,7 +636,11 @@ body {
 }
 
 .timeline-header {
+  position: sticky;
+  top: 20px;
+  z-index: 20;
   background: rgba(var(--panel-rgb), 0.92);
+  backdrop-filter: blur(12px);
   border: 1px solid var(--panel-border);
   border-radius: 24px;
   box-shadow: var(--shadow);
@@ -581,6 +691,10 @@ body {
   gap: var(--column-gap);
   align-items: start;
   min-height: calc(100vh - 150px);
+}
+
+.app-shell:not(.admin-readonly-board) .daily-board .timeline-columns {
+  min-height: max(360px, calc(100vh - 240px));
 }
 
 .day-column {
@@ -1552,7 +1666,11 @@ body.is-schedule-touch-dragging * {
 
 @media (max-width: 1100px) {
   .app-shell {
-    grid-template-columns: 1fr;
+    grid-template-columns: 340px minmax(0, 1fr);
+  }
+
+  .app-shell.sidebar-collapsed {
+    grid-template-columns: 56px minmax(0, 1fr);
   }
 
   .admin-shell,
@@ -1560,9 +1678,107 @@ body.is-schedule-touch-dragging * {
     grid-template-columns: 1fr;
   }
 
-  .summary-panel {
-    position: static;
-    max-height: none;
+  .app-shell:not(.admin-readonly-board) > .summary-panel {
+    position: sticky;
+    top: 20px;
+    max-height: calc(100vh - 40px);
+  }
+
+  .summary-panel.is-collapsed {
+    padding: 8px;
+    overflow: hidden;
+  }
+
+  .summary-panel.is-collapsed .summary-panel-content {
+    display: none;
+  }
+
+  .summary-panel:not(.is-collapsed) .summary-header {
+    padding-right: 36px;
+  }
+
+  .sidebar-quick-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+
+  .sidebar-action-button,
+  .sidebar-peek-button {
+    width: 100%;
+    min-height: 44px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: var(--panel);
+    color: var(--text-strong);
+    display: inline-flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    cursor: pointer;
+    font-weight: 900;
+    box-shadow: var(--schedule-shadow);
+  }
+
+  .sidebar-peek-button.is-expanded-control {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    width: 30px;
+    min-height: 30px;
+    height: 30px;
+    border-radius: 9px;
+    padding: 0;
+    box-shadow: none;
+    background: var(--panel-muted);
+  }
+
+  .sidebar-action-button {
+    color: var(--brand);
+  }
+
+  .sidebar-action-button:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
+  }
+
+  .sidebar-action-button span {
+    writing-mode: vertical-rl;
+    letter-spacing: 0;
+    font-size: 0.8rem;
+    line-height: 1.1;
+  }
+
+  .sidebar-action-button:not(:disabled):hover,
+  .sidebar-peek-button:hover {
+    border-color: var(--brand-line);
+    color: var(--brand);
+  }
+
+  .sidebar-peek-icon {
+    font-size: 1.35rem;
+    line-height: 1;
+  }
+
+  .sidebar-peek-text {
+    writing-mode: vertical-rl;
+    letter-spacing: 0;
+    font-size: 0.8rem;
+    line-height: 1.1;
+  }
+
+  .sidebar-peek-count {
+    min-width: 20px;
+    height: 20px;
+    border-radius: 999px;
+    background: var(--brand-soft);
+    color: var(--brand);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.75rem;
   }
 
   .admin-sidebar {
@@ -1575,7 +1791,7 @@ body.is-schedule-touch-dragging * {
     grid-template-columns: 1fr 1fr;
   }
 
-  .timeline-columns {
+  .admin-readonly-board .timeline-columns {
     min-height: auto;
   }
 }
@@ -1589,6 +1805,42 @@ body.is-schedule-touch-dragging * {
   .app-shell {
     padding: 12px;
     gap: 12px;
+  }
+
+  .app-shell:not(.admin-readonly-board) {
+    grid-template-columns: 320px minmax(0, 1fr);
+  }
+
+  .app-shell.sidebar-collapsed:not(.admin-readonly-board) {
+    grid-template-columns: 48px minmax(0, 1fr);
+  }
+
+  .app-shell:not(.admin-readonly-board) > .summary-panel {
+    top: 12px;
+    max-height: calc(100vh - 24px);
+  }
+
+  .summary-panel.is-collapsed {
+    padding: 6px;
+  }
+
+  .sidebar-action-button,
+  .sidebar-peek-button {
+    min-height: 40px;
+    border-radius: 10px;
+  }
+
+  .sidebar-peek-button.is-expanded-control {
+    top: 8px;
+    right: 8px;
+    width: 28px;
+    min-height: 28px;
+    height: 28px;
+    border-radius: 8px;
+  }
+
+  .app-shell:not(.admin-readonly-board) .daily-board .timeline-columns {
+    min-height: max(320px, calc(100vh - 260px));
   }
 
   .admin-shell {
@@ -1626,6 +1878,10 @@ body.is-schedule-touch-dragging * {
   .timeline-header,
   .day-column {
     border-radius: 18px;
+  }
+
+  .timeline-header {
+    top: 12px;
   }
 
   .timeline-header-actions {

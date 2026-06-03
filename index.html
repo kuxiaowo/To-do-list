@@ -15,8 +15,22 @@
 </head>
 <body>
   <div id="app" v-cloak>
-    <div v-if="!adminMode" class="app-shell">
-      <aside class="summary-panel">
+    <div v-if="!adminMode" class="app-shell" :class="{ 'sidebar-collapsed': sidebarCollapsed }">
+      <aside class="summary-panel" :class="{ 'is-collapsed': sidebarCollapsed }">
+        <div v-if="sidebarCollapsed" class="sidebar-quick-actions">
+          <button class="sidebar-action-button" type="button" :title="activePage === 'daily' ? '新增安排' : '新增任务'" :disabled="!currentUser" @click="openCreateDialog">
+            <span>新增</span>
+          </button>
+          <button class="sidebar-action-button" type="button" title="定位今天" @click="scrollToToday">
+            <span>今天</span>
+          </button>
+        </div>
+        <button class="sidebar-peek-button" :class="{ 'is-expanded-control': !sidebarCollapsed }" type="button" :title="sidebarCollapsed ? '展开侧栏' : '收起侧栏'" @click="sidebarCollapsed = !sidebarCollapsed">
+          <span class="sidebar-peek-icon">{{ sidebarCollapsed ? '›' : '‹' }}</span>
+          <span v-if="sidebarCollapsed" class="sidebar-peek-text">{{ activePage === 'daily' ? '任务池' : '待安排' }}</span>
+          <span v-if="sidebarCollapsed" class="sidebar-peek-count">{{ unscheduledCount }}</span>
+        </button>
+        <div class="summary-panel-content">
         <div class="summary-header">
           <div>
             <h1 class="summary-title">To-Do List</h1>
@@ -86,6 +100,7 @@
             </div>
           </div>
         </section>
+        </div>
       </aside>
 
       <main class="timeline-area">

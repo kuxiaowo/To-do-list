@@ -94,6 +94,7 @@ createApp({
       defaultWeekSlots: JSON.parse(JSON.stringify(DEFAULT_WEEK_SLOTS)),
       scheduleTemplateVersions: [],
       scheduleDayOverrides: {},
+      sidebarCollapsed: typeof window !== 'undefined' && window.innerWidth <= 1100,
       showCompleted: false,
       isDarkMode: (localStorage.getItem(THEME_STORAGE_KEY) || 'light') === 'dark',
       activePage: 'ddl',
@@ -535,6 +536,9 @@ createApp({
       }
       if (step.page && step.page !== this.activePage) {
         this.switchPage(step.page);
+      }
+      if (['add-task', 'task-pool'].includes(step.target)) {
+        this.sidebarCollapsed = false;
       }
       this.$nextTick(() => {
         window.setTimeout(() => this.updateGuideTarget(), 80);
