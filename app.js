@@ -11,6 +11,7 @@ const VISITS_API = '/api/visits';
 const AUTH_TOKEN_KEY = 'todo-list-auth-token-v1';
 const THEME_STORAGE_KEY = 'todo-list-theme-v1';
 const GUIDE_STORAGE_KEY = 'todo-list-guide-v1';
+const SIDEBAR_AUTO_COLLAPSE_WIDTH = 1100;
 // JavaScript Date months are zero-based, so 4 means May.
 const TIMELINE_START_MONTH = 4;
 const TIMELINE_START_DAY = 1;
@@ -94,7 +95,7 @@ createApp({
       defaultWeekSlots: JSON.parse(JSON.stringify(DEFAULT_WEEK_SLOTS)),
       scheduleTemplateVersions: [],
       scheduleDayOverrides: {},
-      sidebarCollapsed: typeof window !== 'undefined' && window.innerWidth <= 1100,
+      sidebarCollapsed: typeof window !== 'undefined' && window.innerWidth <= SIDEBAR_AUTO_COLLAPSE_WIDTH,
       showCompleted: false,
       isDarkMode: (localStorage.getItem(THEME_STORAGE_KEY) || 'light') === 'dark',
       activePage: 'ddl',
@@ -486,7 +487,7 @@ createApp({
     await this.loadScheduleConfig();
     await this.loadTasks();
     await this.loadScheduleItems();
-    window.addEventListener('resize', this.updateGuideTarget);
+    window.addEventListener('resize', this.handleViewportResize);
     window.addEventListener('scroll', this.updateGuideTarget, true);
     this.$nextTick(() => {
       this.scrollToDate(this.currentViewDateKey, 'ddl', 'instant');
@@ -495,7 +496,7 @@ createApp({
   },
   beforeUnmount() {
     document.removeEventListener('click', this.closeAccountMenu);
-    window.removeEventListener('resize', this.updateGuideTarget);
+    window.removeEventListener('resize', this.handleViewportResize);
     window.removeEventListener('scroll', this.updateGuideTarget, true);
     this.removeSchedulePointerListeners();
     document.body.classList.remove('is-schedule-touch-dragging');
@@ -513,6 +514,12 @@ createApp({
     },
     closeAccountMenu() {
       this.accountMenuOpen = false;
+    },
+    handleViewportResize() {
+      if (window.innerWidth <= SIDEBAR_AUTO_COLLAPSE_WIDTH) {
+        this.sidebarCollapsed = true;
+      }
+      this.updateGuideTarget();
     },
     maybeStartGuide() {
       if (this.adminMode || localStorage.getItem(GUIDE_STORAGE_KEY) === 'done') return;
