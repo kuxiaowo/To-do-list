@@ -21,7 +21,7 @@
           <button class="sidebar-action-button" type="button" :title="activePage === 'daily' ? '新增安排' : '新增任务'" :disabled="!currentUser" @click="openCreateDialog">
             <span>新增</span>
           </button>
-          <button class="sidebar-action-button" type="button" title="定位今天" @click="scrollToToday">
+          <button class="sidebar-action-button" type="button" title="定位今天" @click="scrollSidebarToToday">
             <span>今天</span>
           </button>
         </div>

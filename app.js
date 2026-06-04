@@ -2321,6 +2321,9 @@ createApp({
     scrollToToday() {
       this.scrollToDate(this.startOfDay(new Date()));
     },
+    scrollSidebarToToday() {
+      this.scrollToDate(this.startOfDay(new Date()), this.activePage, 'smooth', 'peek-start');
+    },
     handleQuickJumpDateChange(value) {
       if (!value) return;
       this.scrollToDate(value);
@@ -2337,7 +2340,7 @@ createApp({
         }
       });
     },
-    scrollToDate(dateLike, page = this.activePage, behavior = 'smooth') {
+    scrollToDate(dateLike, page = this.activePage, behavior = 'smooth', align = 'center') {
       const key = this.formatDateKey(dateLike);
       const container = page === 'daily' ? this.$refs.dailyScroll : this.$refs.timelineScroll;
       if (!container) return;
@@ -2346,7 +2349,11 @@ createApp({
       const maxScrollLeft = Math.max(0, container.scrollWidth - container.clientWidth);
       const targetCenter = target.offsetLeft + target.offsetWidth / 2;
       const viewportCenter = container.clientWidth / 2;
-      const nextLeft = Math.min(maxScrollLeft, Math.max(0, targetCenter - viewportCenter));
+      const peekOffset = align === 'peek-start' ? 24 : 0;
+      const rawLeft = align === 'start' || align === 'peek-start'
+        ? target.offsetLeft - peekOffset
+        : targetCenter - viewportCenter;
+      const nextLeft = Math.min(maxScrollLeft, Math.max(0, rawLeft));
       this.currentViewDateKey = key;
       this.pageViewDateKeys[page] = key;
       if (behavior === 'instant') {

@@ -128,6 +128,8 @@ TODO_ADMIN_PASSWORD='change-this-password' \
 
 完整接口说明见 [API.md](./API.md)。
 
+面向普通用户和管理员的功能说明见 [用户功能手册](./docs/USER_GUIDE.md)。
+
 需要登录的接口通过请求头传入 token：
 
 ```http

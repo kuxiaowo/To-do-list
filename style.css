@@ -109,7 +109,7 @@ body {
 }
 
 .app-shell.sidebar-collapsed {
-  grid-template-columns: 56px minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .summary-panel {
@@ -131,6 +131,12 @@ body {
 }
 
 .summary-panel.is-collapsed {
+  position: fixed;
+  top: 20px;
+  left: 20px;
+  z-index: 30;
+  width: 56px;
+  max-height: calc(100vh - 40px);
   padding: 8px;
   overflow: hidden;
 }
@@ -1692,7 +1698,7 @@ body.is-schedule-touch-dragging * {
   }
 
   .app-shell.sidebar-collapsed {
-    grid-template-columns: 56px minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .admin-shell,
@@ -1707,6 +1713,11 @@ body.is-schedule-touch-dragging * {
   }
 
   .summary-panel.is-collapsed {
+    position: fixed;
+    top: 20px;
+    left: 20px;
+    width: 56px;
+    max-height: calc(100vh - 40px);
     padding: 8px;
     overflow: hidden;
   }
@@ -1834,7 +1845,7 @@ body.is-schedule-touch-dragging * {
   }
 
   .app-shell.sidebar-collapsed:not(.admin-readonly-board) {
-    grid-template-columns: 48px minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .app-shell:not(.admin-readonly-board) > .summary-panel {
@@ -1843,6 +1854,10 @@ body.is-schedule-touch-dragging * {
   }
 
   .summary-panel.is-collapsed {
+    top: 12px;
+    left: 12px;
+    width: 48px;
+    max-height: calc(100vh - 24px);
     padding: 6px;
   }
 
