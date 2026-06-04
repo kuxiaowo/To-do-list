@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import secrets
@@ -24,6 +25,7 @@ PASSWORD_ITERATIONS = 260_000
 SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
 DEFAULT_FEEDBACK_LIMIT_PER_USER = 10
 FEEDBACK_LIMIT_SETTING_KEY = 'feedback_limit_per_user'
+TRUSTED_PROXY_IPS = {'127.0.0.1', '::1'}
 DEFAULT_SUBJECTS = [
     'Chinese',
     'Mathematics',
@@ -673,6 +675,22 @@ def set_feedback_limit(conn: sqlite3.Connection, limit: int) -> None:
     )
 
 
+def normalize_ip(value: str) -> str:
+    value = str(value).strip()
+    if not value:
+        return ''
+    if value.startswith('[') and ']' in value:
+        value = value[1:value.index(']')]
+    elif value.count(':') == 1:
+        host, port = value.rsplit(':', 1)
+        if port.isdigit():
+            value = host
+    try:
+        return str(ipaddress.ip_address(value))
+    except ValueError:
+        return ''
+
+
 class TodoHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(BASE_DIR), **kwargs)
@@ -935,7 +953,19 @@ class TodoHandler(SimpleHTTPRequestHandler):
         return row
 
     def request_ip(self) -> str:
-        return self.client_address[0] if self.client_address else ''
+        peer_ip = normalize_ip(self.client_address[0] if self.client_address else '')
+        if peer_ip in TRUSTED_PROXY_IPS:
+            forwarded_for = str(self.headers.get('X-Forwarded-For', '')).strip()
+            for forwarded_ip in forwarded_for.split(','):
+                normalized_ip = normalize_ip(forwarded_ip)
+                if normalized_ip:
+                    return normalized_ip
+
+            real_ip = normalize_ip(self.headers.get('X-Real-IP', ''))
+            if real_ip:
+                return real_ip
+
+        return peer_ip
 
     def record_visit(self, page: str, path: str, user_id: int | None = None) -> None:
         with get_db() as conn:
