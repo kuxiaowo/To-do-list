@@ -320,6 +320,15 @@ createApp({
       };
       return labels[this.adminTrafficView] || '访问趋势';
     },
+    trafficTopIpTitle() {
+      const labels = {
+        '30d': '近 30 天 Top IP',
+        '7d': '近 7 天 Top IP',
+        '1d': '近 24 小时 Top IP',
+        '6h': '近 6 小时 Top IP'
+      };
+      return labels[this.adminTrafficView] || 'Top IP';
+    },
     trafficChartPoints() {
       const series = this.trafficSeries;
       if (!series.length) return '';

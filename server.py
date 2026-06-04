@@ -1055,11 +1055,12 @@ class TodoHandler(SimpleHTTPRequestHandler):
                 '''
                 SELECT ip, COUNT(*) AS visits, MAX(created_at) AS last_visit_at
                 FROM visit_logs
-                WHERE ip != ''
+                WHERE ip != '' AND created_at >= ?
                 GROUP BY ip
                 ORDER BY visits DESC, last_visit_at DESC
                 LIMIT 10
-                '''
+                ''',
+                (start_key,),
             ).fetchall()
             recent_total = conn.execute('SELECT COUNT(*) FROM visit_logs').fetchone()[0]
             recent_rows = conn.execute(
