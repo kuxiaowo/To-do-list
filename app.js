@@ -482,7 +482,7 @@ createApp({
       const keys = new Set();
       if (this.activePage === 'daily') {
         this.scheduleItems
-          .filter(item => item.date && (this.showCompleted || !item.completed))
+          .filter(item => item.date && !item.habitId && (this.showCompleted || !item.completed))
           .forEach(item => keys.add(String(item.date).slice(0, 10)));
         return keys;
       }
