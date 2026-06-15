@@ -53,6 +53,8 @@
               value-format="YYYY-MM-DD"
               placeholder="快捷定位"
               class="quick-jump-picker"
+              popper-class="quick-jump-calendar-popper"
+              :cell-class-name="quickJumpDateCellClassName"
               @change="handleQuickJumpDateChange"
             ></el-date-picker>
           </div>
@@ -658,6 +660,8 @@
                     value-format="YYYY-MM-DD"
                     placeholder="快捷定位"
                     class="quick-jump-picker"
+                    popper-class="quick-jump-calendar-popper"
+                    :cell-class-name="quickJumpDateCellClassName"
                     @change="handleQuickJumpDateChange"
                   ></el-date-picker>
                 </div>

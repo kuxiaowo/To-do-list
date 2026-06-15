@@ -495,6 +495,24 @@ body {
   width: 128px;
 }
 
+.quick-jump-calendar-popper .el-date-table td.has-quick-jump-task .el-date-table-cell__text::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  bottom: -3px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--el-color-danger);
+  transform: translateX(-50%);
+}
+
+.quick-jump-calendar-popper .el-date-table td.current.has-quick-jump-task:not(.disabled) .el-date-table-cell__text::after,
+.quick-jump-calendar-popper .el-date-table td.start-date.has-quick-jump-task .el-date-table-cell__text::after,
+.quick-jump-calendar-popper .el-date-table td.end-date.has-quick-jump-task .el-date-table-cell__text::after {
+  background: #fff;
+}
+
 .summary-section {
   margin-top: 20px;
 }

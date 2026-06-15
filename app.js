@@ -404,6 +404,19 @@ createApp({
     pendingFeedbackCount() {
       return this.feedbackItems.filter(item => item.status !== 'replied').length;
     },
+    quickJumpMarkedDateKeys() {
+      const keys = new Set();
+      if (this.activePage === 'daily') {
+        this.scheduleItems
+          .filter(item => item.date && (this.showCompleted || !item.completed))
+          .forEach(item => keys.add(String(item.date).slice(0, 10)));
+        return keys;
+      }
+      this.filteredTasks
+        .filter(task => task.dueAt && this.taskPool(task) === 'todo')
+        .forEach(task => keys.add(String(task.dueAt).slice(0, 10)));
+      return keys;
+    },
     dayColumns() {
       const base = this.startOfDay(new Date());
       const start = this.timelineStartDate();
@@ -2343,6 +2356,14 @@ createApp({
     handleQuickJumpDateChange(value) {
       if (!value) return;
       this.scrollToDate(value);
+    },
+    quickJumpDateCellClassName(date) {
+      if (!date) return '';
+      const parsedDate = new Date(date);
+      if (Number.isNaN(parsedDate.getTime())) return '';
+      return this.quickJumpMarkedDateKeys.has(this.formatDateKey(parsedDate))
+        ? 'has-quick-jump-task'
+        : '';
     },
     switchPage(page) {
       if (page === this.activePage) return;
