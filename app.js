@@ -99,6 +99,8 @@ createApp({
       showCompleted: false,
       isDarkMode: (localStorage.getItem(THEME_STORAGE_KEY) || 'light') === 'dark',
       activePage: 'ddl',
+      ddlViewMode: 'timeline',
+      ddlCalendarMonthKey: '',
       pageViewDateKeys: { ddl: '', daily: '' },
       dialogVisible: false,
       dialogMode: 'create',
@@ -435,6 +437,35 @@ createApp({
       }
       return days;
     },
+    ddlCalendarTitle() {
+      const monthDate = this.parseDateKey(this.ddlCalendarMonthKey || this.currentViewDateKey || this.formatDateKey(new Date()));
+      return `${monthDate.getFullYear()} 年 ${monthDate.getMonth() + 1} 月`;
+    },
+    ddlCalendarWeekdays() {
+      return ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+    },
+    ddlCalendarDays() {
+      const monthDate = this.parseDateKey(this.ddlCalendarMonthKey || this.currentViewDateKey || this.formatDateKey(new Date()));
+      const monthStart = new Date(monthDate.getFullYear(), monthDate.getMonth(), 1);
+      const monthEnd = new Date(monthDate.getFullYear(), monthDate.getMonth() + 1, 0);
+      const gridStart = this.ddlCalendarWeekStartDate(monthStart);
+      const gridEnd = this.addDays(this.ddlCalendarWeekStartDate(monthEnd), 6);
+      const todayKey = this.formatDateKey(new Date());
+      const selectedKey = this.pageViewDateKeys.ddl || this.currentViewDateKey || todayKey;
+      const days = [];
+      for (let date = new Date(gridStart); date <= gridEnd; date = this.addDays(date, 1)) {
+        const key = this.formatDateKey(date);
+        days.push({
+          key,
+          dayNumber: date.getDate(),
+          isCurrentMonth: date.getMonth() === monthStart.getMonth(),
+          isToday: key === todayKey,
+          isSelected: key === selectedKey,
+          tasks: this.ddlTasksForDate(key)
+        });
+      }
+      return days;
+    },
     avatarText() {
       if (!this.currentUser) return '登';
       const source = this.currentUser.nickname || this.currentUser.name || '?';
@@ -503,6 +534,7 @@ createApp({
     this.currentViewDateKey = this.formatDateKey(new Date());
     this.pageViewDateKeys.ddl = this.currentViewDateKey;
     this.pageViewDateKeys.daily = this.currentViewDateKey;
+    this.setDdlCalendarMonth(this.currentViewDateKey);
     document.addEventListener('click', this.closeAccountMenu);
     await this.loadCurrentUser();
     await this.loadSubjectTemplate();
@@ -2142,6 +2174,13 @@ createApp({
     startOfDay(date) {
       return new Date(date.getFullYear(), date.getMonth(), date.getDate());
     },
+    parseDateKey(dateLike) {
+      if (dateLike instanceof Date) return this.startOfDay(dateLike);
+      const raw = String(dateLike || '').slice(0, 10);
+      const match = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+      if (!match) return this.startOfDay(new Date());
+      return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+    },
     timelineStartDate() {
       const today = new Date();
       return new Date(today.getFullYear(), TIMELINE_START_MONTH, TIMELINE_START_DAY);
@@ -2155,6 +2194,11 @@ createApp({
       const next = this.startOfDay(date);
       const offset = (next.getDay() + 6) % 7;
       next.setDate(next.getDate() - offset);
+      return next;
+    },
+    ddlCalendarWeekStartDate(date) {
+      const next = this.startOfDay(date);
+      next.setDate(next.getDate() - next.getDay());
       return next;
     },
     daysBetween(baseDate, targetDate) {
@@ -2197,6 +2241,38 @@ createApp({
     },
     weekdayLabel(key) {
       return WEEKDAY_TEXT[Number(key)] || key;
+    },
+    ddlTasksForDate(key) {
+      return this.filteredTasks.filter(task => task.dueAt && this.taskPool(task) === 'todo' && task.dueAt.startsWith(key));
+    },
+    setDdlViewMode(mode) {
+      if (mode === this.ddlViewMode) return;
+      if (this.activePage === 'ddl') this.rememberCurrentViewDate('ddl');
+      this.ddlViewMode = mode;
+      const key = this.pageViewDateKeys.ddl || this.currentViewDateKey || this.formatDateKey(new Date());
+      this.setDdlCalendarMonth(key);
+      if (mode === 'timeline') {
+        this.$nextTick(() => this.scrollToDate(key, 'ddl', 'instant'));
+      }
+    },
+    setDdlCalendarMonth(dateLike) {
+      const date = this.parseDateKey(dateLike);
+      this.ddlCalendarMonthKey = this.formatDateKey(new Date(date.getFullYear(), date.getMonth(), 1));
+    },
+    shiftDdlCalendarMonth(offset) {
+      const base = this.parseDateKey(this.ddlCalendarMonthKey || this.currentViewDateKey || this.formatDateKey(new Date()));
+      const target = new Date(base.getFullYear(), base.getMonth() + offset, 1);
+      this.setDdlCalendarMonth(target);
+      const selected = this.formatDateKey(target);
+      this.currentViewDateKey = selected;
+      this.pageViewDateKeys.ddl = selected;
+    },
+    goToDdlCalendarToday() {
+      this.scrollToDate(new Date(), 'ddl');
+    },
+    openDdlCalendarTask(task) {
+      if (this.adminMode) return;
+      this.openEditDialog(task);
     },
     openCreateDialog() {
       if (this.adminMode) return;
@@ -2371,6 +2447,7 @@ createApp({
       this.activePage = page;
       const key = this.pageViewDateKeys[page] || this.currentViewDateKey || this.formatDateKey(new Date());
       this.$nextTick(() => {
+        if (page === 'ddl') this.setDdlCalendarMonth(key);
         this.scrollToDate(key, page, 'instant');
         if (this.guideVisible && this.currentGuideStep && this.currentGuideStep.waitForPage === page) {
           window.setTimeout(() => this.nextGuideStep(), 120);
@@ -2379,6 +2456,12 @@ createApp({
     },
     scrollToDate(dateLike, page = this.activePage, behavior = 'smooth', align = 'center') {
       const key = this.formatDateKey(dateLike);
+      if (page === 'ddl' && this.ddlViewMode === 'calendar') {
+        this.currentViewDateKey = key;
+        this.pageViewDateKeys.ddl = key;
+        this.setDdlCalendarMonth(key);
+        return;
+      }
       const container = page === 'daily' ? this.$refs.dailyScroll : this.$refs.timelineScroll;
       if (!container) return;
       const target = container.querySelector(`[data-day="${key}"]`);
@@ -2403,6 +2486,13 @@ createApp({
       container.scrollTo({ left: nextLeft, behavior });
     },
     rememberCurrentViewDate(page) {
+      if (page === 'ddl' && this.ddlViewMode === 'calendar') {
+        const key = this.pageViewDateKeys.ddl || this.currentViewDateKey || this.formatDateKey(new Date());
+        this.pageViewDateKeys.ddl = key;
+        this.currentViewDateKey = key;
+        this.setDdlCalendarMonth(key);
+        return;
+      }
       const container = page === 'daily' ? this.$refs.dailyScroll : this.$refs.timelineScroll;
       if (!container) return;
       const columns = [...container.querySelectorAll('[data-day]')];
@@ -2419,7 +2509,7 @@ createApp({
       if (page === this.activePage) this.currentViewDateKey = key;
     },
     jumpToOffset(days) {
-      const base = new Date(`${this.currentViewDateKey}T00:00:00`);
+      const base = this.parseDateKey(this.currentViewDateKey);
       const target = this.addDays(base, days);
       this.scrollToDate(target);
     },

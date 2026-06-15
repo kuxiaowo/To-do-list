@@ -178,38 +178,81 @@
           </div>
         </div>
 
-        <div v-if="activePage === 'ddl'" class="timeline-scroll" ref="timelineScroll" data-guide="ddl-timeline">
-          <div class="timeline-columns">
-            <section v-for="day in dayColumns" :key="day.key" class="day-column" :data-day="day.key">
-              <div class="day-header">
-                <div class="day-label">{{ day.label }}</div>
-                <div class="day-subtitle">{{ day.subtitle }}</div>
-              </div>
+        <div v-if="activePage === 'ddl'" class="ddl-view" data-guide="ddl-timeline">
+          <div class="ddl-view-toolbar">
+            <div class="ddl-view-switch" role="group" aria-label="DDL视图切换">
+              <button class="ddl-view-button" :class="{ active: ddlViewMode === 'timeline' }" type="button" @click="setDdlViewMode('timeline')">时间线</button>
+              <button class="ddl-view-button" :class="{ active: ddlViewMode === 'calendar' }" type="button" @click="setDdlViewMode('calendar')">日历</button>
+            </div>
+            <div v-if="ddlViewMode === 'calendar'" class="ddl-calendar-nav">
+              <el-button plain @click="shiftDdlCalendarMonth(-1)">上月</el-button>
+              <div class="ddl-calendar-title">{{ ddlCalendarTitle }}</div>
+              <el-button plain @click="goToDdlCalendarToday">今天</el-button>
+              <el-button plain @click="shiftDdlCalendarMonth(1)">下月</el-button>
+            </div>
+          </div>
 
-              <div class="column-task-list" v-if="day.tasks.length">
-                <article
-                  v-for="task in day.tasks"
-                  :key="task.id"
-                  class="task-card"
-                  :class="[priorityClass(task.priority), { completed: task.completed }]"
-                  @click="openEditDialog(task)"
-                >
-                  <div class="task-main">
-                    <div style="min-width: 0; flex: 1;">
-                      <div class="task-title">{{ task.title }}</div>
-                      <div class="task-meta">
-                        <span class="task-time">{{ formatTime(task.dueAt) }}</span>
-                        <span v-if="task.subject" class="meta-chip subject-chip">{{ task.subject }}</span>
-                        <span v-if="task.completed" class="meta-chip completed-badge">已完成</span>
+          <div v-if="ddlViewMode === 'timeline'" class="timeline-scroll" ref="timelineScroll">
+            <div class="timeline-columns">
+              <section v-for="day in dayColumns" :key="day.key" class="day-column" :data-day="day.key">
+                <div class="day-header">
+                  <div class="day-label">{{ day.label }}</div>
+                  <div class="day-subtitle">{{ day.subtitle }}</div>
+                </div>
+
+                <div class="column-task-list" v-if="day.tasks.length">
+                  <article
+                    v-for="task in day.tasks"
+                    :key="task.id"
+                    class="task-card"
+                    :class="[priorityClass(task.priority), { completed: task.completed }]"
+                    @click="openEditDialog(task)"
+                  >
+                    <div class="task-main">
+                      <div style="min-width: 0; flex: 1;">
+                        <div class="task-title">{{ task.title }}</div>
+                        <div class="task-meta">
+                          <span class="task-time">{{ formatTime(task.dueAt) }}</span>
+                          <span v-if="task.subject" class="meta-chip subject-chip">{{ task.subject }}</span>
+                          <span v-if="task.completed" class="meta-chip completed-badge">已完成</span>
+                        </div>
+                        <div v-if="task.note" class="task-note-preview">{{ task.note }}</div>
                       </div>
-                      <div v-if="task.note" class="task-note-preview">{{ task.note }}</div>
                     </div>
-                  </div>
-                </article>
-              </div>
+                  </article>
+                </div>
 
-              <div v-else class="empty-column">这一天暂无任务。</div>
-            </section>
+                <div v-else class="empty-column">这一天暂无任务。</div>
+              </section>
+            </div>
+          </div>
+
+          <div v-else class="ddl-calendar-panel">
+            <div class="ddl-calendar-grid">
+              <div v-for="weekday in ddlCalendarWeekdays" :key="weekday" class="ddl-calendar-weekday">{{ weekday }}</div>
+              <section
+                v-for="day in ddlCalendarDays"
+                :key="day.key"
+                class="ddl-calendar-day"
+                :class="{ 'is-outside-month': !day.isCurrentMonth, 'is-today': day.isToday, 'is-selected': day.isSelected }"
+                :data-day="day.key"
+              >
+                <div class="ddl-calendar-day-number">{{ day.dayNumber }}</div>
+                <div class="ddl-calendar-task-list" v-if="day.tasks.length">
+                  <article
+                    v-for="task in day.tasks"
+                    :key="task.id"
+                    class="ddl-calendar-task"
+                    :class="[priorityClass(task.priority), { completed: task.completed }]"
+                    :title="`${formatTime(task.dueAt)} ${task.title}`"
+                    @click="openDdlCalendarTask(task)"
+                  >
+                    <span class="ddl-calendar-task-time">{{ formatTime(task.dueAt) }}</span>
+                    <span class="ddl-calendar-task-title">{{ task.title }}</span>
+                  </article>
+                </div>
+              </section>
+            </div>
           </div>
         </div>
 
@@ -711,26 +754,68 @@
                 </div>
               </div>
 
-              <div v-if="activePage === 'ddl'" class="timeline-scroll" ref="timelineScroll">
-                <div class="timeline-columns">
-                  <section v-for="day in dayColumns" :key="day.key" class="day-column" :data-day="day.key">
-                    <div class="day-header">
-                      <div class="day-label">{{ day.label }}</div>
-                      <div class="day-subtitle">{{ day.subtitle }}</div>
-                    </div>
-                    <div class="column-task-list" v-if="day.tasks.length">
-                      <article v-for="task in day.tasks" :key="task.id" class="task-card" :class="[priorityClass(task.priority), { completed: task.completed }]">
-                        <div class="task-title">{{ task.title }}</div>
-                        <div class="task-meta">
-                          <span class="task-time">{{ formatTime(task.dueAt) }}</span>
-                          <span v-if="task.subject" class="meta-chip subject-chip">{{ task.subject }}</span>
-                          <span v-if="task.completed" class="meta-chip completed-badge">已完成</span>
-                        </div>
-                        <div v-if="task.note" class="task-note-preview">{{ task.note }}</div>
-                      </article>
-                    </div>
-                    <div v-else class="empty-column">这一天暂无任务。</div>
-                  </section>
+              <div v-if="activePage === 'ddl'" class="ddl-view">
+                <div class="ddl-view-toolbar">
+                  <div class="ddl-view-switch" role="group" aria-label="DDL视图切换">
+                    <button class="ddl-view-button" :class="{ active: ddlViewMode === 'timeline' }" type="button" @click="setDdlViewMode('timeline')">时间线</button>
+                    <button class="ddl-view-button" :class="{ active: ddlViewMode === 'calendar' }" type="button" @click="setDdlViewMode('calendar')">日历</button>
+                  </div>
+                  <div v-if="ddlViewMode === 'calendar'" class="ddl-calendar-nav">
+                    <el-button plain @click="shiftDdlCalendarMonth(-1)">上月</el-button>
+                    <div class="ddl-calendar-title">{{ ddlCalendarTitle }}</div>
+                    <el-button plain @click="goToDdlCalendarToday">今天</el-button>
+                    <el-button plain @click="shiftDdlCalendarMonth(1)">下月</el-button>
+                  </div>
+                </div>
+
+                <div v-if="ddlViewMode === 'timeline'" class="timeline-scroll" ref="timelineScroll">
+                  <div class="timeline-columns">
+                    <section v-for="day in dayColumns" :key="day.key" class="day-column" :data-day="day.key">
+                      <div class="day-header">
+                        <div class="day-label">{{ day.label }}</div>
+                        <div class="day-subtitle">{{ day.subtitle }}</div>
+                      </div>
+                      <div class="column-task-list" v-if="day.tasks.length">
+                        <article v-for="task in day.tasks" :key="task.id" class="task-card" :class="[priorityClass(task.priority), { completed: task.completed }]">
+                          <div class="task-title">{{ task.title }}</div>
+                          <div class="task-meta">
+                            <span class="task-time">{{ formatTime(task.dueAt) }}</span>
+                            <span v-if="task.subject" class="meta-chip subject-chip">{{ task.subject }}</span>
+                            <span v-if="task.completed" class="meta-chip completed-badge">已完成</span>
+                          </div>
+                          <div v-if="task.note" class="task-note-preview">{{ task.note }}</div>
+                        </article>
+                      </div>
+                      <div v-else class="empty-column">这一天暂无任务。</div>
+                    </section>
+                  </div>
+                </div>
+
+                <div v-else class="ddl-calendar-panel">
+                  <div class="ddl-calendar-grid">
+                    <div v-for="weekday in ddlCalendarWeekdays" :key="weekday" class="ddl-calendar-weekday">{{ weekday }}</div>
+                    <section
+                      v-for="day in ddlCalendarDays"
+                      :key="day.key"
+                      class="ddl-calendar-day"
+                      :class="{ 'is-outside-month': !day.isCurrentMonth, 'is-today': day.isToday, 'is-selected': day.isSelected }"
+                      :data-day="day.key"
+                    >
+                      <div class="ddl-calendar-day-number">{{ day.dayNumber }}</div>
+                      <div class="ddl-calendar-task-list" v-if="day.tasks.length">
+                        <article
+                          v-for="task in day.tasks"
+                          :key="task.id"
+                          class="ddl-calendar-task"
+                          :class="[priorityClass(task.priority), { completed: task.completed }]"
+                          :title="`${formatTime(task.dueAt)} ${task.title}`"
+                        >
+                          <span class="ddl-calendar-task-time">{{ formatTime(task.dueAt) }}</span>
+                          <span class="ddl-calendar-task-title">{{ task.title }}</span>
+                        </article>
+                      </div>
+                    </section>
+                  </div>
                 </div>
               </div>
 
