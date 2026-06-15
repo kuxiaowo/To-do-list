@@ -1159,6 +1159,48 @@ body {
   min-height: 0;
 }
 
+.schedule-title-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+}
+
+.schedule-title-row .task-title {
+  flex: 1;
+  min-width: 0;
+}
+
+.schedule-habit-label {
+  color: var(--brand);
+  font-size: 0.78rem;
+  font-weight: 800;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.habit-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.form-field-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+}
+
+.habit-conflict-banner {
+  border: 1px solid rgba(245, 108, 108, 0.35);
+  border-radius: 8px;
+  background: rgba(245, 108, 108, 0.08);
+  color: var(--danger);
+  padding: 10px 12px;
+  font-size: 0.9rem;
+}
+
 .daily-tools {
   display: flex;
   justify-content: space-between;
@@ -2207,6 +2249,10 @@ body.is-schedule-touch-dragging * {
 
   .daily-tools-actions {
     justify-content: flex-start;
+  }
+
+  .habit-form-grid {
+    grid-template-columns: 1fr;
   }
 
   .subject-template-row,

@@ -5,6 +5,7 @@ const SCHEDULE_API = '/api/schedule-items';
 const SCHEDULE_CONFIG_API = '/api/schedule-config';
 const SCHEDULE_TEMPLATE_API = '/api/schedule-template';
 const SCHEDULE_DAY_SLOTS_API = '/api/schedule-day-slots';
+const HABITS_API = '/api/habits';
 const ADMIN_API = '/api/admin';
 const FEEDBACK_API = '/api/feedback';
 const VISITS_API = '/api/visits';
@@ -12,6 +13,8 @@ const AUTH_TOKEN_KEY = 'todo-list-auth-token-v1';
 const THEME_STORAGE_KEY = 'todo-list-theme-v1';
 const GUIDE_STORAGE_KEY = 'todo-list-guide-v1';
 const SIDEBAR_AUTO_COLLAPSE_WIDTH = 1100;
+const DATE_RANGE_EXPAND_MARGIN = 21;
+const HABIT_SYNC_FUTURE_DAYS = 90;
 // JavaScript Date months are zero-based, so 4 means May.
 const TIMELINE_START_MONTH = 4;
 const TIMELINE_START_DAY = 1;
@@ -92,6 +95,7 @@ createApp({
     return {
       tasks: [],
       scheduleItems: [],
+      habits: [],
       defaultWeekSlots: JSON.parse(JSON.stringify(DEFAULT_WEEK_SLOTS)),
       scheduleTemplateVersions: [],
       scheduleDayOverrides: {},
@@ -111,6 +115,11 @@ createApp({
       quickJumpDate: '',
       form: this.emptyForm(),
       dayRange: { past: 90, future: 90 },
+      habitDialogVisible: false,
+      habitDialogMode: 'create',
+      activeHabitId: '',
+      habitForm: this.emptyHabitForm(),
+      habitSyncConflicts: [],
       authToken: localStorage.getItem(AUTH_TOKEN_KEY) || '',
       currentUser: null,
       authMode: 'login',
@@ -127,7 +136,7 @@ createApp({
       activeScheduleTask: null,
       activeScheduleSlot: null,
       activeScheduleSortOrder: null,
-      scheduleForm: { durationMinutes: 30, note: '', completed: false },
+      scheduleForm: this.emptyScheduleForm(),
       slotEditorVisible: false,
       slotEditorMode: 'day',
       slotEditorDate: '',
@@ -251,7 +260,7 @@ createApp({
         {
           key: 'flex-pool',
           target: 'task-pool',
-          title: '弹性任务池',
+          title: '临时任务池',
           text: '这里放临时、长期，没有 DDL的任务。把任务从这里拖到右侧某个时间格子，就会生成当天的一次学习安排。',
           page: 'daily'
         },
@@ -395,6 +404,69 @@ createApp({
     unscheduledCount() {
       return this.activePoolTasks.length;
     },
+    activeHabits() {
+      return this.habits.filter(habit => !habit.archived);
+    },
+    activeHabit() {
+      return this.activeHabits.find(habit => habit.id === this.activeHabitId) || null;
+    },
+    habitCount() {
+      return this.activeHabits.length;
+    },
+    weekdayOptions() {
+      return WEEKDAY_TEXT.map((label, value) => ({ label, value }));
+    },
+    habitSlotOptions() {
+      const dateKey = this.habitForm.startDate || this.currentViewDateKey || this.formatDateKey(new Date());
+      const weekdays = Array.isArray(this.habitForm.weekdays) ? this.habitForm.weekdays : [];
+      if (weekdays.length) {
+        const weekSlots = this.weekTemplateForDate(dateKey);
+        let sharedSlots = null;
+        weekdays.forEach((weekday) => {
+          const slots = this.sortSlots(this.cloneSlots(weekSlots[String(weekday)] || []));
+          if (sharedSlots === null) {
+            sharedSlots = slots;
+            return;
+          }
+          sharedSlots = sharedSlots.filter(slot => slots.some(item =>
+            item.keyBase === slot.keyBase && item.start === slot.start && item.end === slot.end
+          ));
+        });
+        return (sharedSlots || []).map(slot => ({
+          ...slot,
+          key: slot.keyBase,
+          duration: this.minutesBetween(slot.start, slot.end),
+          labelText: `${slot.label} ${slot.start}-${slot.end}`
+        }));
+      }
+      return this.slotsForDate(dateKey).map(slot => ({
+        ...slot,
+        key: slot.keyBase,
+        duration: this.minutesBetween(slot.start, slot.end),
+        labelText: `${slot.label} ${slot.start}-${slot.end}`
+      }));
+    },
+    habitSelectedSlotDuration() {
+      const slot = this.habitSlotOptions.find(item => item.keyBase === this.habitForm.slotKeyBase);
+      return slot ? slot.duration : 999;
+    },
+    activeScheduleIsHabit() {
+      if (!this.activeScheduleItemId) return false;
+      const item = this.scheduleItems.find(entry => entry.id === this.activeScheduleItemId);
+      return !!(item && item.habitId);
+    },
+    isDirectScheduleCreate() {
+      return this.scheduleDialogMode === 'create' && !this.activeScheduleTask;
+    },
+    directScheduleSlotOptions() {
+      const dateKey = this.scheduleForm.date || this.currentViewDateKey || this.formatDateKey(new Date());
+      return this.slotsForDate(dateKey).map(slot => ({
+        ...slot,
+        key: this.scheduleSlotKeyFromBase(dateKey, slot.keyBase),
+        duration: this.minutesBetween(slot.start, slot.end),
+        labelText: `${slot.label} ${slot.start}-${slot.end}`
+      }));
+    },
     enabledSubjectOptions() {
       return this.subjectTemplate
         .filter(item => item.enabled)
@@ -508,7 +580,7 @@ createApp({
     scheduleDayColumns() {
       const base = this.startOfDay(new Date());
       const start = this.timelineStartDate();
-      const end = this.addDays(base, 21);
+      const end = this.addDays(base, this.dayRange.future);
       const days = [];
       for (let date = new Date(start); date <= end; date = this.addDays(date, 1)) {
         const offset = this.daysBetween(base, date);
@@ -540,6 +612,7 @@ createApp({
     await this.loadSubjectTemplate();
     await this.loadScheduleConfig();
     await this.loadTasks();
+    await this.loadHabits();
     await this.loadScheduleItems();
     window.addEventListener('resize', this.handleViewportResize);
     window.addEventListener('scroll', this.updateGuideTarget, true);
@@ -673,6 +746,37 @@ createApp({
         date: this.formatDateKey(now),
         time: this.pad(now.getHours()) + ':' + this.pad(now.getMinutes()),
         unscheduled: false,
+        priority: 'medium',
+        note: '',
+        completed: false
+      };
+    },
+    emptyHabitForm() {
+      const today = this.formatDateKey(new Date());
+      return {
+        title: '',
+        subject: '',
+        weekdays: [],
+        slotKeyBase: '',
+        slotLabel: '',
+        slotStart: '',
+        slotEnd: '',
+        durationMinutes: 30,
+        startDate: today,
+        endDate: '',
+        priority: 'medium',
+        note: '',
+        active: true
+      };
+    },
+    emptyScheduleForm() {
+      const today = this.formatDateKey(new Date());
+      return {
+        title: '',
+        subject: '',
+        date: today,
+        slotKeyBase: '',
+        durationMinutes: 30,
         priority: 'medium',
         note: '',
         completed: false
@@ -822,6 +926,7 @@ createApp({
       this.adminTimelineLoadedUserId = '';
       await this.loadScheduleConfig();
       await this.loadTasks();
+      await this.loadHabits();
       await this.loadScheduleItems();
       this.$nextTick(() => this.scrollToDate(this.currentViewDateKey || new Date(), this.activePage, 'instant'));
     },
@@ -1105,9 +1210,10 @@ createApp({
       this.adminLoading = true;
       try {
         const userId = this.adminSelectedUserId;
+        const range = this.scheduleSyncRange();
         const [taskPayload, itemPayload, configPayload] = await Promise.all([
           this.apiJson(`${ADMIN_API}/users/${userId}/tasks`, { cache: 'no-store' }),
-          this.apiJson(`${ADMIN_API}/users/${userId}/schedule-items`, { cache: 'no-store' }),
+          this.apiJson(`${ADMIN_API}/users/${userId}/schedule-items?from=${encodeURIComponent(range.from)}&to=${encodeURIComponent(range.to)}`, { cache: 'no-store' }),
           this.apiJson(`${ADMIN_API}/users/${userId}/schedule-config`, { cache: 'no-store' })
         ]);
         this.tasks = Array.isArray(taskPayload.tasks) ? taskPayload.tasks.map(task => this.normalizeTaskPool(task)) : [];
@@ -1215,6 +1321,7 @@ createApp({
         await this.loadSubjectTemplate();
         await this.loadScheduleConfig();
         await this.loadTasks();
+        await this.loadHabits();
         await this.loadScheduleItems();
         ElementPlus.ElMessage.success('登录成功。');
       } catch (error) {
@@ -1234,6 +1341,7 @@ createApp({
         await this.loadSubjectTemplate();
         await this.loadScheduleConfig();
         await this.loadTasks();
+        await this.loadHabits();
         await this.loadScheduleItems();
         ElementPlus.ElMessage.success('注册成功，已自动登录。');
       } catch (error) {
@@ -1440,6 +1548,8 @@ createApp({
       this.adminTimelineLoadedUserId = '';
       this.tasks = [];
       this.scheduleItems = [];
+      this.habits = [];
+      this.habitSyncConflicts = [];
       this.scheduleTemplateVersions = [];
       this.scheduleDayOverrides = {};
       this.accountMenuOpen = true;
@@ -1469,11 +1579,26 @@ createApp({
         return;
       }
       try {
-        const payload = await this.apiJson(SCHEDULE_API, { cache: 'no-store' });
+        const range = this.scheduleSyncRange();
+        const payload = await this.apiJson(`${SCHEDULE_API}?from=${encodeURIComponent(range.from)}&to=${encodeURIComponent(range.to)}`, { cache: 'no-store' });
         this.scheduleItems = Array.isArray(payload.items) ? payload.items : [];
+        this.habitSyncConflicts = Array.isArray(payload.habitSyncConflicts) ? payload.habitSyncConflicts : [];
       } catch (error) {
         console.error('读取每日安排失败：', error);
         ElementPlus.ElMessage.error('每日安排读取失败。');
+      }
+    },
+    async loadHabits() {
+      if (!this.currentUser) {
+        this.habits = [];
+        return;
+      }
+      try {
+        const payload = await this.apiJson(HABITS_API, { cache: 'no-store' });
+        this.habits = Array.isArray(payload.habits) ? payload.habits : [];
+      } catch (error) {
+        console.error('读取习惯失败：', error);
+        ElementPlus.ElMessage.error('习惯数据读取失败。');
       }
     },
     async loadScheduleConfig() {
@@ -1493,10 +1618,14 @@ createApp({
       return JSON.parse(JSON.stringify(value || {}));
     },
     taskPool(task) {
-      return task && task.pool === 'arrangement' ? 'arrangement' : 'todo';
+      if (task && task.pool === 'arrangement') return 'arrangement';
+      if (task && task.pool === 'habit') return 'habit';
+      if (task && task.pool === 'schedule') return 'schedule';
+      return 'todo';
     },
     normalizeTaskPool(task) {
-      return { ...task, pool: task && task.pool === 'arrangement' ? 'arrangement' : 'todo' };
+      const pool = task && ['arrangement', 'habit', 'schedule'].includes(task.pool) ? task.pool : 'todo';
+      return { ...task, pool };
     },
     normalizeWeekSlots(value) {
       const source = value || {};
@@ -1577,6 +1706,7 @@ createApp({
     startScheduleDrag(item, event = null) {
       if (this.adminMode) return;
       if (this.activePage !== 'daily') return;
+      if (item && item.habitId) return;
       this.prepareScheduleDragEvent(event, item.id);
       this.draggedScheduleItemId = item.id;
       this.draggedTaskId = null;
@@ -1586,6 +1716,7 @@ createApp({
       this.startSchedulePointerDrag('task', task.id, event);
     },
     startSchedulePointerDragForItem(item, event) {
+      if (item && item.habitId) return;
       this.startSchedulePointerDrag('schedule', item.id, event);
     },
     buildScheduleDragPreview(type, id, sourceElement, event) {
@@ -1834,6 +1965,59 @@ createApp({
         this.openScheduleCreateDialog(day, slot, dropIndex);
       }
     },
+    openDirectScheduleCreateDialog() {
+      if (this.adminMode) return;
+      if (!this.currentUser) {
+        ElementPlus.ElMessage.warning('请先登录或注册，再新增安排。');
+        return;
+      }
+      const dateKey = this.pageViewDateKeys.daily || this.currentViewDateKey || this.formatDateKey(new Date());
+      this.ensureDateRangeForKey(dateKey);
+      this.scheduleDialogMode = 'create';
+      this.activeScheduleItemId = null;
+      this.activeScheduleTask = null;
+      this.activeScheduleSlot = null;
+      this.activeScheduleSortOrder = null;
+      this.scheduleForm = { ...this.emptyScheduleForm(), date: dateKey };
+      this.scheduleDialogVisible = true;
+    },
+    applyDirectScheduleSlot(slot) {
+      const dateKey = this.scheduleForm.date || this.formatDateKey(new Date());
+      this.activeScheduleSlot = {
+        ...slot,
+        key: this.scheduleSlotKeyFromBase(dateKey, slot.keyBase),
+        date: dateKey,
+        dateLabel: this.formatDateLabel(this.parseDateKey(dateKey))
+      };
+      this.scheduleForm.durationMinutes = Math.min(Number(this.scheduleForm.durationMinutes || 30), slot.duration);
+    },
+    handleDirectScheduleDateChange() {
+      if (!this.scheduleForm.date) {
+        this.activeScheduleSlot = null;
+        return;
+      }
+      const expanded = this.ensureDateRangeForKey(this.scheduleForm.date);
+      if (expanded && this.currentUser) this.loadScheduleItems();
+      if (!this.scheduleForm.slotKeyBase) {
+        this.activeScheduleSlot = null;
+        return;
+      }
+      const slot = this.directScheduleSlotOptions.find(item => item.keyBase === this.scheduleForm.slotKeyBase);
+      if (slot) {
+        this.applyDirectScheduleSlot(slot);
+        return;
+      }
+      this.scheduleForm.slotKeyBase = '';
+      this.activeScheduleSlot = null;
+    },
+    handleDirectScheduleSlotChange(keyBase) {
+      const slot = this.directScheduleSlotOptions.find(item => item.keyBase === keyBase);
+      if (!slot) {
+        this.activeScheduleSlot = null;
+        return;
+      }
+      this.applyDirectScheduleSlot(slot);
+    },
     openScheduleCreateDialog(day, slot, dropIndex = null) {
       const task = this.tasks.find(item => item.id === this.draggedTaskId);
       if (!task) return;
@@ -1850,7 +2034,7 @@ createApp({
       this.activeScheduleSortOrder = Number.isInteger(dropIndex)
         ? this.sortOrderForIndex(day.key, slot.key, null, dropIndex)
         : null;
-      this.scheduleForm = { durationMinutes: Math.min(30, remaining), note: '', completed: false };
+      this.scheduleForm = { ...this.emptyScheduleForm(), date: day.key, durationMinutes: Math.min(30, remaining) };
       this.scheduleDialogVisible = true;
       this.clearScheduleDragState();
     },
@@ -1915,26 +2099,48 @@ createApp({
         dateLabel: item.date
       };
       this.scheduleForm = {
+        ...this.emptyScheduleForm(),
         durationMinutes: Number(item.durationMinutes || 1),
+        date: item.date,
         note: item.note || '',
         completed: !!item.completed
       };
       this.scheduleDialogVisible = true;
     },
     async saveScheduleItem() {
-      if (!this.currentUser || !this.activeScheduleTask || !this.activeScheduleSlot) return;
+      if (!this.currentUser) return;
+      let scheduleTask = this.activeScheduleTask;
+      if (this.isDirectScheduleCreate) {
+        const title = this.scheduleForm.title.trim();
+        const subject = this.scheduleForm.subject.trim();
+        if (!title || !subject || !this.scheduleForm.date || !this.scheduleForm.slotKeyBase || !this.activeScheduleSlot) {
+          ElementPlus.ElMessage.warning('请填写标题、科目、日期和时间段。');
+          return;
+        }
+        if (subject.length > 40) {
+          ElementPlus.ElMessage.warning('科目不能超过 40 个字符。');
+          return;
+        }
+      } else if (!scheduleTask || !this.activeScheduleSlot) {
+        return;
+      }
       const used = this.slotUsedMinutes(
         this.activeScheduleSlot.date,
         this.activeScheduleSlot.key,
         this.scheduleDialogMode === 'edit' ? this.activeScheduleItemId : null
       );
       const duration = Number(this.scheduleForm.durationMinutes || 0);
+      if (!Number.isFinite(duration) || duration <= 0) {
+        ElementPlus.ElMessage.warning('预计持续时间必须大于 0。');
+        return;
+      }
       if (used + duration > this.activeScheduleSlot.duration) {
         ElementPlus.ElMessage.error(`时间段容量不足：已用 ${used} 分钟，总共 ${this.activeScheduleSlot.duration} 分钟。`);
         return;
       }
+      let createdDirectTask = null;
       const payload = {
-        taskId: this.activeScheduleTask.id,
+        taskId: scheduleTask ? scheduleTask.id : '',
         date: this.activeScheduleSlot.date,
         slotKey: this.activeScheduleSlot.key,
         slotLabel: this.activeScheduleSlot.label,
@@ -1948,8 +2154,25 @@ createApp({
         payload.sortOrder = this.activeScheduleSortOrder;
       }
       try {
+        if (this.isDirectScheduleCreate) {
+          const taskPayload = {
+            id: this.createTaskId(),
+            title: this.scheduleForm.title.trim(),
+            subject: this.scheduleForm.subject.trim(),
+            dueAt: '',
+            pool: 'schedule',
+            priority: this.scheduleForm.priority,
+            note: '',
+            completed: false,
+            createdAt: new Date().toISOString()
+          };
+          createdDirectTask = await this.createTaskOnServer(taskPayload);
+          scheduleTask = this.normalizeTaskPool(createdDirectTask || taskPayload);
+          payload.taskId = scheduleTask.id;
+        }
         if (this.scheduleDialogMode === 'create') {
           await this.apiJson(SCHEDULE_API, { method: 'POST', body: JSON.stringify(payload) });
+          if (createdDirectTask) this.tasks = [...this.tasks, this.normalizeTaskPool(createdDirectTask)];
           ElementPlus.ElMessage.success('安排已创建。');
         } else {
           await this.apiJson(`${SCHEDULE_API}/${this.activeScheduleItemId}`, { method: 'PUT', body: JSON.stringify(payload) });
@@ -1959,6 +2182,9 @@ createApp({
         this.activeScheduleSortOrder = null;
         await this.loadScheduleItems();
       } catch (error) {
+        if (createdDirectTask && createdDirectTask.id) {
+          this.deleteTaskOnServer(createdDirectTask.id).catch(() => {});
+        }
         ElementPlus.ElMessage.error(`保存失败：${error.message}`);
       }
     },
@@ -2183,7 +2409,35 @@ createApp({
     },
     timelineStartDate() {
       const today = new Date();
-      return new Date(today.getFullYear(), TIMELINE_START_MONTH, TIMELINE_START_DAY);
+      return this.addDays(this.startOfDay(today), -this.dayRange.past);
+    },
+    timelineEndDate() {
+      return this.addDays(this.startOfDay(new Date()), this.dayRange.future);
+    },
+    scheduleSyncRange() {
+      const today = this.startOfDay(new Date());
+      const from = this.formatDateKey(today);
+      const timelineEnd = this.timelineEndDate();
+      const defaultEnd = this.addDays(today, HABIT_SYNC_FUTURE_DAYS);
+      return {
+        from,
+        to: this.formatDateKey(timelineEnd > defaultEnd ? timelineEnd : defaultEnd)
+      };
+    },
+    ensureDateRangeForKey(dateKey) {
+      const target = this.parseDateKey(dateKey);
+      const base = this.startOfDay(new Date());
+      const offset = this.daysBetween(base, target);
+      let changed = false;
+      if (offset > this.dayRange.future - DATE_RANGE_EXPAND_MARGIN) {
+        this.dayRange.future = offset + DATE_RANGE_EXPAND_MARGIN;
+        changed = true;
+      }
+      if (offset < -this.dayRange.past + DATE_RANGE_EXPAND_MARGIN) {
+        this.dayRange.past = Math.abs(offset) + DATE_RANGE_EXPAND_MARGIN;
+        changed = true;
+      }
+      return changed;
     },
     addDays(date, days) {
       const next = new Date(date);
@@ -2242,6 +2496,136 @@ createApp({
     weekdayLabel(key) {
       return WEEKDAY_TEXT[Number(key)] || key;
     },
+    habitWeekdaysLabel(habit) {
+      const weekdays = Array.isArray(habit.weekdays) ? habit.weekdays : [];
+      return weekdays.map(key => this.weekdayLabel(key)).join('、') || '未设置';
+    },
+    handleHabitSlotChange(keyBase) {
+      const slot = this.habitSlotOptions.find(item => item.keyBase === keyBase);
+      if (!slot) {
+        this.habitForm.slotLabel = '';
+        this.habitForm.slotStart = '';
+        this.habitForm.slotEnd = '';
+        return;
+      }
+      this.habitForm.slotKeyBase = slot.keyBase;
+      this.habitForm.slotLabel = slot.label;
+      this.habitForm.slotStart = slot.start;
+      this.habitForm.slotEnd = slot.end;
+      this.habitForm.durationMinutes = Math.min(Number(this.habitForm.durationMinutes || 30), slot.duration);
+    },
+    handleHabitStartDateChange() {
+      if (!this.habitForm.slotKeyBase) return;
+      const slot = this.habitSlotOptions.find(item => item.keyBase === this.habitForm.slotKeyBase);
+      if (slot) {
+        this.handleHabitSlotChange(slot.keyBase);
+        return;
+      }
+      this.habitForm.slotKeyBase = '';
+      this.habitForm.slotLabel = '';
+      this.habitForm.slotStart = '';
+      this.habitForm.slotEnd = '';
+    },
+    handleHabitWeekdaysChange() {
+      this.handleHabitStartDateChange();
+    },
+    openHabitDialog(habit = null) {
+      if (this.adminMode) return;
+      if (!this.currentUser) {
+        ElementPlus.ElMessage.warning('请先登录或注册，再新增习惯。');
+        return;
+      }
+      this.habitDialogMode = habit ? 'edit' : 'create';
+      this.activeHabitId = habit ? habit.id : '';
+      this.habitForm = habit
+        ? {
+            title: habit.title || '',
+            subject: habit.subject || '',
+            weekdays: Array.isArray(habit.weekdays) ? [...habit.weekdays] : [],
+            slotKeyBase: habit.slotKeyBase || '',
+            slotLabel: habit.slotLabel || '',
+            slotStart: habit.slotStart || '',
+            slotEnd: habit.slotEnd || '',
+            durationMinutes: Number(habit.durationMinutes || 30),
+            startDate: habit.startDate || this.formatDateKey(new Date()),
+            endDate: habit.endDate || '',
+            priority: habit.priority || 'medium',
+            note: habit.note || '',
+            active: habit.active !== false
+          }
+        : this.emptyHabitForm();
+      this.habitDialogVisible = true;
+    },
+    async saveHabit() {
+      if (!this.currentUser) return;
+      const title = this.habitForm.title.trim();
+      const subject = this.habitForm.subject.trim();
+      if (!title || !subject || !this.habitForm.weekdays.length || !this.habitForm.slotKeyBase || !this.habitForm.startDate) {
+        ElementPlus.ElMessage.warning('请填写标题、科目、星期、时间格子和开始日期。');
+        return;
+      }
+      const payload = {
+        title,
+        subject,
+        weekdays: this.habitForm.weekdays,
+        slotKeyBase: this.habitForm.slotKeyBase,
+        slotLabel: this.habitForm.slotLabel,
+        slotStart: this.habitForm.slotStart,
+        slotEnd: this.habitForm.slotEnd,
+        durationMinutes: Number(this.habitForm.durationMinutes || 0),
+        startDate: this.habitForm.startDate,
+        endDate: this.habitForm.endDate || '',
+        priority: this.habitForm.priority,
+        note: this.habitForm.note.trim(),
+        active: !!this.habitForm.active
+      };
+      try {
+        if (this.habitDialogMode === 'edit') {
+          await this.apiJson(`${HABITS_API}/${encodeURIComponent(this.activeHabitId)}`, {
+            method: 'PUT',
+            body: JSON.stringify(payload)
+          });
+          ElementPlus.ElMessage.success('习惯已更新。');
+        } else {
+          await this.apiJson(HABITS_API, {
+            method: 'POST',
+            body: JSON.stringify(payload)
+          });
+          ElementPlus.ElMessage.success('习惯已创建。');
+        }
+        this.habitDialogVisible = false;
+        await this.loadHabits();
+        await this.loadTasks();
+        await this.loadScheduleItems();
+      } catch (error) {
+        ElementPlus.ElMessage.error(`保存习惯失败：${error.message}`);
+      }
+    },
+    deleteHabit(habit) {
+      if (!habit || !this.currentUser) return;
+      ElementPlus.ElMessageBox.confirm(
+        `删除习惯「${habit.title}」？今天及未来的相关安排会一起删除，过去记录保留。`,
+        '删除习惯',
+        {
+          confirmButtonText: '删除',
+          cancelButtonText: '取消',
+          type: 'warning'
+        }
+      ).then(async () => {
+        try {
+          await this.apiJson(`${HABITS_API}/${encodeURIComponent(habit.id)}`, { method: 'DELETE' });
+          ElementPlus.ElMessage.success('习惯已删除。');
+          if (this.activeHabitId === habit.id) {
+            this.habitDialogVisible = false;
+            this.activeHabitId = '';
+          }
+          await this.loadHabits();
+          await this.loadScheduleItems();
+        } catch (error) {
+          ElementPlus.ElMessage.error(`删除习惯失败：${error.message}`);
+        }
+      }).catch(() => {});
+    },
     ddlTasksForDate(key) {
       return this.filteredTasks.filter(task => task.dueAt && this.taskPool(task) === 'todo' && task.dueAt.startsWith(key));
     },
@@ -2277,19 +2661,34 @@ createApp({
     openCreateDialog() {
       if (this.adminMode) return;
       if (!this.currentUser) {
-        ElementPlus.ElMessage.warning('请先登录或注册，再新增任务。');
+        ElementPlus.ElMessage.warning('请先登录或注册，再新增。');
+        return;
+      }
+      if (this.activePage === 'daily') {
+        this.openDirectScheduleCreateDialog();
         return;
       }
       this.dialogMode = 'create';
-      this.createDialogType = this.activePage === 'daily' ? 'arrangement' : 'task';
+      this.createDialogType = 'task';
       this.activeTaskId = null;
-      this.activeTaskPool = this.createDialogType === 'arrangement' ? 'arrangement' : 'todo';
+      this.activeTaskPool = 'todo';
       this.form = this.emptyForm();
-      if (this.createDialogType === 'arrangement') {
-        this.form.unscheduled = true;
-        this.form.date = '';
-        this.form.time = '';
+      this.dialogVisible = true;
+    },
+    openPoolTaskCreateDialog() {
+      if (this.adminMode) return;
+      if (!this.currentUser) {
+        ElementPlus.ElMessage.warning('请先登录或注册，再新增临时任务池任务。');
+        return;
       }
+      this.dialogMode = 'create';
+      this.createDialogType = 'arrangement';
+      this.activeTaskId = null;
+      this.activeTaskPool = 'arrangement';
+      this.form = this.emptyForm();
+      this.form.unscheduled = true;
+      this.form.date = '';
+      this.form.time = '';
       this.dialogVisible = true;
     },
     openEditDialog(task) {
@@ -2456,6 +2855,14 @@ createApp({
     },
     scrollToDate(dateLike, page = this.activePage, behavior = 'smooth', align = 'center') {
       const key = this.formatDateKey(dateLike);
+      const expanded = this.ensureDateRangeForKey(key);
+      if (expanded) {
+        if (this.currentUser && (page === 'daily' || this.activePage === 'daily')) {
+          this.loadScheduleItems();
+        }
+        this.$nextTick(() => this.scrollToDate(key, page, behavior, align));
+        return;
+      }
       if (page === 'ddl' && this.ddlViewMode === 'calendar') {
         this.currentViewDateKey = key;
         this.pageViewDateKeys.ddl = key;
@@ -2507,6 +2914,22 @@ createApp({
       if (!key) return;
       this.pageViewDateKeys[page] = key;
       if (page === this.activePage) this.currentViewDateKey = key;
+    },
+    handleTimelineScroll(page) {
+      const container = page === 'daily' ? this.$refs.dailyScroll : this.$refs.timelineScroll;
+      if (!container) return;
+      let expanded = false;
+      if (container.scrollLeft + container.clientWidth > container.scrollWidth - 320) {
+        this.dayRange.future += 30;
+        expanded = true;
+      }
+      if (container.scrollLeft < 240) {
+        this.dayRange.past += 30;
+        expanded = true;
+      }
+      if (expanded && this.currentUser && page === 'daily') {
+        this.loadScheduleItems();
+      }
     },
     jumpToOffset(days) {
       const base = this.parseDateKey(this.currentViewDateKey);

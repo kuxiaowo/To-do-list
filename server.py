@@ -26,6 +26,7 @@ SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
 DEFAULT_FEEDBACK_LIMIT_PER_USER = 10
 FEEDBACK_LIMIT_SETTING_KEY = 'feedback_limit_per_user'
 TRUSTED_PROXY_IPS = {'127.0.0.1', '::1'}
+HABIT_SYNC_FUTURE_DAYS = 90
 DEFAULT_SUBJECTS = [
     'Chinese',
     'Mathematics',
@@ -156,6 +157,7 @@ def init_db() -> None:
                 slot_end TEXT NOT NULL,
                 duration_minutes INTEGER NOT NULL,
                 sort_order REAL NOT NULL DEFAULT 0,
+                habit_id TEXT NOT NULL DEFAULT '',
                 note TEXT NOT NULL DEFAULT '',
                 completed INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT,
@@ -183,6 +185,31 @@ def init_db() -> None:
                     'UPDATE schedule_items SET sort_order = ? WHERE id = ?',
                     (slot_counts[key] * 1024, row[0]),
                 )
+        if 'habit_id' not in columns:
+            conn.execute("ALTER TABLE schedule_items ADD COLUMN habit_id TEXT NOT NULL DEFAULT ''")
+        conn.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS habits (
+                id TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                task_id TEXT NOT NULL,
+                weekdays_json TEXT NOT NULL,
+                slot_key_base TEXT NOT NULL,
+                slot_label TEXT NOT NULL,
+                slot_start TEXT NOT NULL,
+                slot_end TEXT NOT NULL,
+                duration_minutes INTEGER NOT NULL,
+                start_date TEXT NOT NULL,
+                end_date TEXT NOT NULL DEFAULT '',
+                active INTEGER NOT NULL DEFAULT 1,
+                archived INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+                FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
+            )
+            '''
+        )
         conn.execute(
             '''
             CREATE TABLE IF NOT EXISTS schedule_template_versions (
@@ -456,6 +483,23 @@ def normalize_time_text(value: str) -> str:
     return f'{hour:02d}:{minute:02d}'
 
 
+def is_valid_date_key(value: str) -> bool:
+    try:
+        datetime.strptime(value, '%Y-%m-%d')
+        return True
+    except Exception:
+        return False
+
+
+def add_days_key(date_key: str, days: int) -> str:
+    base = datetime.strptime(date_key, '%Y-%m-%d')
+    return (base + timedelta(days=days)).strftime('%Y-%m-%d')
+
+
+def today_key() -> str:
+    return datetime.utcnow().strftime('%Y-%m-%d')
+
+
 def weekday_for_date(date_key: str) -> str:
     """Convert an ISO date to the weekday key used by DEFAULT_WEEK_SLOTS."""
     try:
@@ -594,6 +638,7 @@ def public_schedule_item(row: sqlite3.Row) -> dict:
         'id': row['id'],
         'userId': row['user_id'],
         'taskId': row['task_id'],
+        'habitId': row['habit_id'],
         'date': row['schedule_date'],
         'slotKey': row['slot_key'],
         'slotLabel': row['slot_label'],
@@ -613,6 +658,34 @@ def public_schedule_item(row: sqlite3.Row) -> dict:
             'pool': row['task_pool'],
             'priority': row['task_priority'],
         },
+    }
+
+
+def public_habit(row: sqlite3.Row) -> dict:
+    try:
+        weekdays = json.loads(row['weekdays_json'] or '[]')
+    except json.JSONDecodeError:
+        weekdays = []
+    return {
+        'id': row['id'],
+        'userId': row['user_id'],
+        'taskId': row['task_id'],
+        'title': row['task_title'],
+        'subject': row['task_subject'],
+        'priority': row['task_priority'],
+        'note': row['task_note'],
+        'weekdays': weekdays if isinstance(weekdays, list) else [],
+        'slotKeyBase': row['slot_key_base'],
+        'slotLabel': row['slot_label'],
+        'slotStart': row['slot_start'],
+        'slotEnd': row['slot_end'],
+        'durationMinutes': row['duration_minutes'],
+        'startDate': row['start_date'],
+        'endDate': row['end_date'],
+        'active': bool(row['active']),
+        'archived': bool(row['archived']),
+        'createdAt': row['created_at'],
+        'updatedAt': row['updated_at'],
     }
 
 
@@ -703,6 +776,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return self.handle_list_tasks()
         if path == '/api/schedule-items':
             return self.handle_list_schedule_items()
+        if path == '/api/habits':
+            return self.handle_list_habits()
         if path == '/api/schedule-config':
             return self.handle_get_schedule_config()
         if path == '/api/subject-template':
@@ -731,6 +806,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return self.handle_create_task()
         if path == '/api/schedule-items':
             return self.handle_create_schedule_item()
+        if path == '/api/habits':
+            return self.handle_create_habit()
         if path == '/api/feedback':
             return self.handle_create_feedback()
         self.send_error(HTTPStatus.NOT_FOUND, 'Not found')
@@ -753,6 +830,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return self.handle_update_task(path.rsplit('/', 1)[-1])
         if path.startswith('/api/schedule-items/'):
             return self.handle_update_schedule_item(path.rsplit('/', 1)[-1])
+        if path.startswith('/api/habits/'):
+            return self.handle_update_habit(path.rsplit('/', 1)[-1])
         if path == '/api/schedule-template':
             return self.handle_update_schedule_template()
         if path == '/api/subject-template':
@@ -773,6 +852,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return self.handle_delete_task(path.rsplit('/', 1)[-1])
         if path.startswith('/api/schedule-items/'):
             return self.handle_delete_schedule_item(path.rsplit('/', 1)[-1])
+        if path.startswith('/api/habits/'):
+            return self.handle_delete_habit(path.rsplit('/', 1)[-1])
         if path == '/api/schedule-config':
             return self.handle_reset_schedule_config()
         if path.startswith('/api/schedule-day-slots/'):
@@ -881,6 +962,21 @@ class TodoHandler(SimpleHTTPRequestHandler):
             (user_id,),
         ).fetchall()
         return [public_schedule_item(row) for row in rows]
+
+    def fetch_habits_for_user(self, conn: sqlite3.Connection, user_id: int, include_archived: bool = False) -> list[dict]:
+        archived_filter = '' if include_archived else 'AND habits.archived = 0'
+        rows = conn.execute(
+            f"""
+            SELECT habits.*, tasks.title AS task_title, tasks.subject AS task_subject,
+                   tasks.priority AS task_priority, tasks.note AS task_note
+            FROM habits
+            JOIN tasks ON tasks.id = habits.task_id AND tasks.user_id = habits.user_id
+            WHERE habits.user_id = ? {archived_filter}
+            ORDER BY habits.archived ASC, habits.active DESC, habits.created_at DESC
+            """,
+            (user_id,),
+        ).fetchall()
+        return [public_habit(row) for row in rows]
 
     def fetch_schedule_config_for_user(self, conn: sqlite3.Connection, user_id: int) -> dict:
         versions = conn.execute(
@@ -1391,6 +1487,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
 
             conn.execute('DELETE FROM sessions WHERE user_id = ?', (user_id,))
             conn.execute('DELETE FROM schedule_items WHERE user_id = ?', (user_id,))
+            conn.execute('DELETE FROM habits WHERE user_id = ?', (user_id,))
             conn.execute('DELETE FROM tasks WHERE user_id = ?', (user_id,))
             conn.execute('DELETE FROM schedule_template_versions WHERE user_id = ?', (user_id,))
             conn.execute('DELETE FROM schedule_day_overrides WHERE user_id = ?', (user_id,))
@@ -1437,8 +1534,11 @@ class TodoHandler(SimpleHTTPRequestHandler):
             user = self.ensure_user_exists(conn, user_id)
             if not user:
                 return self.write_json({'error': 'user not found'}, status=HTTPStatus.NOT_FOUND)
+            sync_start, sync_end = self.habit_sync_window_from_request()
+            sync_conflicts = self.sync_habit_instances(conn, user_id, window_start=sync_start, window_end=sync_end)
+            conn.commit()
             items = self.fetch_schedule_items_for_user(conn, user_id)
-        return self.write_json({'items': items, 'readOnly': True, 'user': public_user(user)})
+        return self.write_json({'items': items, 'readOnly': True, 'user': public_user(user), 'habitSyncConflicts': sync_conflicts})
 
     def handle_admin_user_schedule_config(self, user_id: int):
         with get_db() as conn:
@@ -1654,7 +1754,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return None, {'error': 'task title is required'}
         if task['priority'] not in {'high', 'medium', 'low'}:
             return None, {'error': 'invalid priority'}
-        if task['pool'] not in {'todo', 'arrangement'}:
+        if task['pool'] not in {'todo', 'arrangement', 'habit', 'schedule'}:
             return None, {'error': 'invalid task pool'}
         now = now_iso()
         if not task['createdAt']:
@@ -1786,14 +1886,383 @@ class TodoHandler(SimpleHTTPRequestHandler):
             conn.commit()
         return self.write_json({'ok': True})
 
+    def normalize_habit_payload(self, payload: dict, user_id: int, habit_id: str | None = None):
+        if not isinstance(payload, dict):
+            return None, {'error': 'habit must be an object'}
+        title = str(payload.get('title', '')).strip()
+        subject = str(payload.get('subject', '')).strip()
+        priority = str(payload.get('priority', 'medium')).strip() or 'medium'
+        note = str(payload.get('note', '') or '').strip()
+        raw_weekdays = payload.get('weekdays', [])
+        slot_key_base = str(payload.get('slotKeyBase', '')).strip()
+        slot_label = str(payload.get('slotLabel', '')).strip()
+        slot_start = normalize_time_text(str(payload.get('slotStart', '')).strip())
+        slot_end = normalize_time_text(str(payload.get('slotEnd', '')).strip())
+        start_date = str(payload.get('startDate', '')).strip()
+        end_date = str(payload.get('endDate', '') or '').strip()
+        active = bool(payload.get('active', True))
+        try:
+            duration_minutes = int(payload.get('durationMinutes'))
+        except Exception:
+            return None, {'error': 'durationMinutes must be an integer'}
+
+        if not title:
+            return None, {'error': 'habit title is required'}
+        if len(title) > 120:
+            return None, {'error': 'habit title is too long'}
+        if len(subject) > 40:
+            return None, {'error': 'subject is too long'}
+        if priority not in {'high', 'medium', 'low'}:
+            return None, {'error': 'invalid priority'}
+        if len(note) > 500:
+            return None, {'error': 'note is too long'}
+        if not isinstance(raw_weekdays, list):
+            return None, {'error': 'weekdays must be a list'}
+        weekdays = []
+        for raw in raw_weekdays:
+            try:
+                weekday = int(raw)
+            except Exception:
+                return None, {'error': 'invalid weekday'}
+            if weekday < 0 or weekday > 6:
+                return None, {'error': 'invalid weekday'}
+            if weekday not in weekdays:
+                weekdays.append(weekday)
+        weekdays.sort()
+        if not weekdays:
+            return None, {'error': 'at least one weekday is required'}
+        if not slot_key_base or not slot_label or not slot_start or not slot_end:
+            return None, {'error': 'slotKeyBase, slotLabel, slotStart and slotEnd are required'}
+        slot_capacity = minutes_between(slot_start, slot_end)
+        if slot_capacity <= 0:
+            return None, {'error': 'invalid slot time range'}
+        if duration_minutes <= 0:
+            return None, {'error': 'durationMinutes must be positive'}
+        if duration_minutes > slot_capacity:
+            return None, {'error': 'duration exceeds slot capacity'}
+        if not is_valid_date_key(start_date):
+            return None, {'error': 'startDate is required'}
+        if end_date and (not is_valid_date_key(end_date) or end_date < start_date):
+            return None, {'error': 'endDate must be empty or later than startDate'}
+
+        return {
+            'id': habit_id or str(payload.get('id', '')).strip() or f"habit-{int(time.time() * 1000)}-{secrets.token_hex(4)}",
+            'userId': user_id,
+            'title': title,
+            'subject': subject,
+            'priority': priority,
+            'note': note,
+            'weekdays': weekdays,
+            'slotKeyBase': slot_key_base,
+            'slotLabel': slot_label[:40],
+            'slotStart': slot_start,
+            'slotEnd': slot_end,
+            'durationMinutes': duration_minutes,
+            'startDate': start_date,
+            'endDate': end_date,
+            'active': active,
+        }, None
+
+    def create_habit_task(self, conn: sqlite3.Connection, habit: dict) -> str:
+        task_id = f"habit-task-{int(time.time() * 1000)}-{secrets.token_hex(4)}"
+        now = now_iso()
+        conn.execute(
+            '''
+            INSERT INTO tasks (id, user_id, title, subject, due_at, pool, priority, note, completed, created_at, updated_at)
+            VALUES (?, ?, ?, ?, '', 'habit', ?, ?, 0, ?, ?)
+            ''',
+            (
+                task_id,
+                habit['userId'],
+                habit['title'],
+                habit['subject'],
+                habit['priority'],
+                habit['note'],
+                now,
+                now,
+            ),
+        )
+        return task_id
+
+    def habit_date_keys(self, habit: sqlite3.Row, window_start: str, window_end: str) -> list[str]:
+        start = max(str(habit['start_date']), window_start)
+        end = str(habit['end_date'] or '') or window_end
+        end = min(end, window_end)
+        if end < start:
+            return []
+        try:
+            weekdays = {str(int(value)) for value in json.loads(habit['weekdays_json'] or '[]')}
+        except Exception:
+            weekdays = set()
+        dates = []
+        current = start
+        while current <= end:
+            if weekday_for_date(current) in weekdays:
+                dates.append(current)
+            current = add_days_key(current, 1)
+        return dates
+
+    def sync_habit_instances(
+        self,
+        conn: sqlite3.Connection,
+        user_id: int,
+        habit_ids: list[str] | None = None,
+        window_start: str | None = None,
+        window_end: str | None = None,
+        reset_future_uncompleted: bool = False,
+        strict: bool = False,
+    ) -> list[dict]:
+        today = today_key()
+        window_start = max(window_start or today, today)
+        window_end = window_end or add_days_key(today, HABIT_SYNC_FUTURE_DAYS)
+        if window_end < window_start:
+            window_end = window_start
+        params: list = [user_id]
+        id_filter = ''
+        if habit_ids:
+            placeholders = ','.join('?' for _ in habit_ids)
+            id_filter = f'AND habits.id IN ({placeholders})'
+            params.extend(habit_ids)
+        habits = conn.execute(
+            f'''
+            SELECT habits.*
+            FROM habits
+            WHERE user_id = ? AND active = 1 AND archived = 0 {id_filter}
+            ORDER BY created_at ASC
+            ''',
+            params,
+        ).fetchall()
+
+        conflicts = []
+        inserts = []
+        for habit in habits:
+            for date_key in self.habit_date_keys(habit, window_start, window_end):
+                existing = conn.execute(
+                    '''
+                    SELECT id, completed FROM schedule_items
+                    WHERE user_id = ? AND habit_id = ? AND schedule_date = ?
+                    LIMIT 1
+                    ''',
+                    (user_id, habit['id'], date_key),
+                ).fetchone()
+                if existing and not (reset_future_uncompleted and not bool(existing['completed']) and date_key >= today):
+                    continue
+                target_slot_key = f"{date_key}-{habit['slot_key_base']}"
+                slots = effective_slots_for_date(conn, user_id, date_key)
+                slot = next((item for item in slots if slot_key(date_key, item) == target_slot_key), None)
+                if not slot or slot['start'] != habit['slot_start'] or slot['end'] != habit['slot_end']:
+                    conflicts.append({'habitId': habit['id'], 'date': date_key, 'reason': 'slot missing'})
+                    continue
+                used = conn.execute(
+                    '''
+                    SELECT COALESCE(SUM(duration_minutes), 0)
+                    FROM schedule_items
+                    WHERE user_id = ? AND schedule_date = ? AND slot_key = ?
+                      AND NOT (habit_id = ? AND completed = 0 AND schedule_date >= ?)
+                    ''',
+                    (user_id, date_key, target_slot_key, habit['id'], today),
+                ).fetchone()[0]
+                if int(used or 0) + int(habit['duration_minutes']) > minutes_between(habit['slot_start'], habit['slot_end']):
+                    conflicts.append({'habitId': habit['id'], 'date': date_key, 'reason': 'capacity exceeded'})
+                    continue
+                inserts.append((habit, date_key, target_slot_key))
+
+        if conflicts and strict:
+            return conflicts
+
+        if reset_future_uncompleted and habit_ids:
+            placeholders = ','.join('?' for _ in habit_ids)
+            conn.execute(
+                f'''
+                DELETE FROM schedule_items
+                WHERE user_id = ? AND habit_id IN ({placeholders}) AND schedule_date >= ? AND completed = 0
+                ''',
+                [user_id, *habit_ids, today],
+            )
+
+        now = now_iso()
+        for habit, date_key, target_slot_key in inserts:
+            existing = conn.execute(
+                '''
+                SELECT id FROM schedule_items
+                WHERE user_id = ? AND habit_id = ? AND schedule_date = ?
+                LIMIT 1
+                ''',
+                (user_id, habit['id'], date_key),
+            ).fetchone()
+            if existing:
+                continue
+            sort_order = float(conn.execute(
+                '''
+                SELECT COALESCE(MAX(sort_order), 0) + 1024 FROM schedule_items
+                WHERE user_id = ? AND schedule_date = ? AND slot_key = ?
+                ''',
+                (user_id, date_key, target_slot_key),
+            ).fetchone()[0])
+            item_id = f"schedule-{int(time.time() * 1000)}-{secrets.token_hex(4)}"
+            conn.execute(
+                '''
+                INSERT INTO schedule_items
+                (id, user_id, task_id, habit_id, schedule_date, slot_key, slot_label, slot_start, slot_end,
+                 duration_minutes, sort_order, note, completed, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', 0, ?, ?)
+                ''',
+                (
+                    item_id,
+                    user_id,
+                    habit['task_id'],
+                    habit['id'],
+                    date_key,
+                    target_slot_key,
+                    habit['slot_label'],
+                    habit['slot_start'],
+                    habit['slot_end'],
+                    habit['duration_minutes'],
+                    sort_order,
+                    now,
+                    now,
+                ),
+            )
+        return conflicts
+
+    def habit_sync_window_from_request(self) -> tuple[str, str]:
+        today = today_key()
+        query = parse_qs(urlparse(self.path).query)
+        start = str((query.get('from') or [''])[0]).strip()
+        end = str((query.get('to') or [''])[0]).strip()
+        if not is_valid_date_key(start):
+            start = today
+        if not is_valid_date_key(end):
+            end = add_days_key(today, HABIT_SYNC_FUTURE_DAYS)
+        end = max(end, add_days_key(today, HABIT_SYNC_FUTURE_DAYS))
+        return start, end
+
+    def handle_list_habits(self):
+        user = self.current_user()
+        if not user:
+            return self.write_json({'habits': [], 'readOnly': True})
+        with get_db() as conn:
+            habits = self.fetch_habits_for_user(conn, int(user['id']))
+        return self.write_json({'habits': habits, 'readOnly': False})
+
+    def handle_create_habit(self):
+        user = self.require_user()
+        if not user:
+            return
+        payload = self.read_json_body()
+        if payload is None:
+            return
+        habit, error = self.normalize_habit_payload(payload, int(user['id']))
+        if error:
+            return self.write_json(error, status=HTTPStatus.BAD_REQUEST)
+        with get_db() as conn:
+            task_id = self.create_habit_task(conn, habit)
+            now = now_iso()
+            conn.execute(
+                '''
+                INSERT INTO habits
+                (id, user_id, task_id, weekdays_json, slot_key_base, slot_label, slot_start, slot_end,
+                 duration_minutes, start_date, end_date, active, archived, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+                ''',
+                (
+                    habit['id'], user['id'], task_id, json.dumps(habit['weekdays']),
+                    habit['slotKeyBase'], habit['slotLabel'], habit['slotStart'], habit['slotEnd'],
+                    habit['durationMinutes'], habit['startDate'], habit['endDate'], 1 if habit['active'] else 0,
+                    now, now,
+                ),
+            )
+            sync_to = habit['endDate'] or add_days_key(today_key(), HABIT_SYNC_FUTURE_DAYS)
+            conflicts = self.sync_habit_instances(
+                conn,
+                int(user['id']),
+                [habit['id']],
+                today_key(),
+                sync_to,
+                strict=True,
+            )
+            if conflicts:
+                conn.rollback()
+                return self.write_json({'error': 'habit schedule conflict', 'conflicts': conflicts}, status=HTTPStatus.CONFLICT)
+            self.log_operation(conn, int(user['id']), int(user['id']), 'habit.create', 'habit', habit['id'], {'title': habit['title']})
+            conn.commit()
+            rows = self.fetch_habits_for_user(conn, int(user['id']))
+        return self.write_json({'ok': True, 'habit': next(item for item in rows if item['id'] == habit['id'])}, status=HTTPStatus.CREATED)
+
+    def handle_update_habit(self, habit_id: str):
+        user = self.require_user()
+        if not user:
+            return
+        payload = self.read_json_body()
+        if payload is None:
+            return
+        habit, error = self.normalize_habit_payload(payload, int(user['id']), habit_id=habit_id)
+        if error:
+            return self.write_json(error, status=HTTPStatus.BAD_REQUEST)
+        with get_db() as conn:
+            existing = conn.execute('SELECT * FROM habits WHERE id = ? AND user_id = ? AND archived = 0', (habit_id, user['id'])).fetchone()
+            if not existing:
+                return self.write_json({'error': 'habit not found'}, status=HTTPStatus.NOT_FOUND)
+            task_id = self.create_habit_task(conn, habit)
+            now = now_iso()
+            conn.execute(
+                '''
+                UPDATE habits
+                SET task_id = ?, weekdays_json = ?, slot_key_base = ?, slot_label = ?, slot_start = ?, slot_end = ?,
+                    duration_minutes = ?, start_date = ?, end_date = ?, active = ?, updated_at = ?
+                WHERE id = ? AND user_id = ?
+                ''',
+                (
+                    task_id, json.dumps(habit['weekdays']), habit['slotKeyBase'], habit['slotLabel'],
+                    habit['slotStart'], habit['slotEnd'], habit['durationMinutes'], habit['startDate'],
+                    habit['endDate'], 1 if habit['active'] else 0, now, habit_id, user['id'],
+                ),
+            )
+            sync_to = habit['endDate'] or add_days_key(today_key(), HABIT_SYNC_FUTURE_DAYS)
+            conflicts = self.sync_habit_instances(
+                conn,
+                int(user['id']),
+                [habit_id],
+                today_key(),
+                sync_to,
+                reset_future_uncompleted=True,
+                strict=True,
+            )
+            if conflicts:
+                conn.rollback()
+                return self.write_json({'error': 'habit schedule conflict', 'conflicts': conflicts}, status=HTTPStatus.CONFLICT)
+            self.log_operation(conn, int(user['id']), int(user['id']), 'habit.update', 'habit', habit_id, {'title': habit['title']})
+            conn.commit()
+            rows = self.fetch_habits_for_user(conn, int(user['id']))
+        return self.write_json({'ok': True, 'habit': next(item for item in rows if item['id'] == habit_id)})
+
+    def handle_delete_habit(self, habit_id: str):
+        user = self.require_user()
+        if not user:
+            return
+        with get_db() as conn:
+            existing = conn.execute('SELECT id FROM habits WHERE id = ? AND user_id = ? AND archived = 0', (habit_id, user['id'])).fetchone()
+            if not existing:
+                return self.write_json({'error': 'habit not found'}, status=HTTPStatus.NOT_FOUND)
+            now = now_iso()
+            conn.execute('UPDATE habits SET archived = 1, active = 0, updated_at = ? WHERE id = ? AND user_id = ?', (now, habit_id, user['id']))
+            conn.execute('DELETE FROM schedule_items WHERE user_id = ? AND habit_id = ? AND schedule_date >= ?', (user['id'], habit_id, today_key()))
+            self.log_operation(conn, int(user['id']), int(user['id']), 'habit.delete', 'habit', habit_id, {})
+            conn.commit()
+        return self.write_json({'ok': True})
+
     def handle_list_schedule_items(self):
         user = self.current_user()
         if not user:
             return self.write_json({'items': [], 'readOnly': True})
 
         with get_db() as conn:
+            sync_start, sync_end = self.habit_sync_window_from_request()
+            sync_conflicts = self.sync_habit_instances(conn, int(user['id']), window_start=sync_start, window_end=sync_end)
+            conn.commit()
             items = self.fetch_schedule_items_for_user(conn, int(user['id']))
-        return self.write_json({'items': items, 'readOnly': False})
+        return self.write_json({'items': items, 'readOnly': False, 'habitSyncConflicts': sync_conflicts})
+
 
     def handle_get_schedule_config(self):
         user = self.current_user()
@@ -2098,6 +2567,18 @@ class TodoHandler(SimpleHTTPRequestHandler):
             existing = conn.execute('SELECT * FROM schedule_items WHERE id = ? AND user_id = ?', (item_id, user['id'])).fetchone()
         if not existing:
             return self.write_json({'error': 'schedule item not found'}, status=HTTPStatus.NOT_FOUND)
+        if existing['habit_id']:
+            locked_fields = {
+                'date': existing['schedule_date'],
+                'slotKey': existing['slot_key'],
+                'slotLabel': existing['slot_label'],
+                'slotStart': existing['slot_start'],
+                'slotEnd': existing['slot_end'],
+                'durationMinutes': existing['duration_minutes'],
+            }
+            for key, current_value in locked_fields.items():
+                if key in payload and str(payload.get(key)) != str(current_value):
+                    return self.write_json({'error': 'habit schedule items can only be completed from the daily board'}, status=HTTPStatus.BAD_REQUEST)
 
         merged = {
             'taskId': existing['task_id'],
@@ -2151,12 +2632,27 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return
         with get_db() as conn:
             existing = conn.execute(
-                'SELECT task_id, schedule_date, slot_label FROM schedule_items WHERE id = ? AND user_id = ?',
+                '''
+                SELECT schedule_items.task_id, schedule_items.habit_id, schedule_items.schedule_date,
+                       schedule_items.slot_label, tasks.pool AS task_pool
+                FROM schedule_items
+                JOIN tasks ON tasks.id = schedule_items.task_id AND tasks.user_id = schedule_items.user_id
+                WHERE schedule_items.id = ? AND schedule_items.user_id = ?
+                ''',
                 (item_id, user['id']),
             ).fetchone()
             if not existing:
                 return self.write_json({'error': 'schedule item not found'}, status=HTTPStatus.NOT_FOUND)
+            if existing['habit_id']:
+                return self.write_json({'error': 'habit schedule items must be deleted from the habit'}, status=HTTPStatus.BAD_REQUEST)
             cursor = conn.execute('DELETE FROM schedule_items WHERE id = ? AND user_id = ?', (item_id, user['id']))
+            if existing['task_pool'] == 'schedule':
+                remaining = conn.execute(
+                    'SELECT 1 FROM schedule_items WHERE user_id = ? AND task_id = ? LIMIT 1',
+                    (user['id'], existing['task_id']),
+                ).fetchone()
+                if not remaining:
+                    conn.execute('DELETE FROM tasks WHERE id = ? AND user_id = ?', (existing['task_id'], user['id']))
             self.log_operation(
                 conn,
                 int(user['id']),
