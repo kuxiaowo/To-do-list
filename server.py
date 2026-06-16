@@ -6,12 +6,13 @@ import hashlib
 import hmac
 import ipaddress
 import json
+import math
 import os
 import posixpath
 import secrets
 import sqlite3
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -103,10 +104,18 @@ DEFAULT_WEEK_SLOTS = {
 }
 
 
+class ClosingConnection(sqlite3.Connection):
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+
+
 def init_db() -> None:
     """Create the SQLite schema and apply small in-place migrations."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, factory=ClosingConnection) as conn:
         conn.execute('PRAGMA foreign_keys = ON')
         conn.execute('PRAGMA busy_timeout = 5000')
         conn.execute(
@@ -349,7 +358,7 @@ def init_db() -> None:
 
 
 def get_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, factory=ClosingConnection)
     conn.execute('PRAGMA foreign_keys = ON')
     conn.execute('PRAGMA busy_timeout = 5000')
     conn.row_factory = sqlite3.Row
@@ -537,7 +546,7 @@ def clamp_habit_sync_window(start: str | None, end: str | None) -> tuple[str, st
 
 
 def today_key() -> str:
-    return datetime.utcnow().strftime('%Y-%m-%d')
+    return datetime.now(timezone.utc).strftime('%Y-%m-%d')
 
 
 def weekday_for_date(date_key: str) -> str:
@@ -1203,7 +1212,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return self.write_json({'error': 'invalid pagination'}, status=HTTPStatus.BAD_REQUEST)
         offset = (page - 1) * page_size
 
-        now = datetime.utcnow().replace(minute=0, second=0, microsecond=0)
+        now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0, tzinfo=None)
         today = now.date()
         today_key = today.isoformat()
         if traffic_view == '30d':
@@ -2573,11 +2582,15 @@ class TodoHandler(SimpleHTTPRequestHandler):
                 sort_order = float(raw_sort_order)
             except Exception:
                 return None, {'error': 'sortOrder must be a number'}
+            if not math.isfinite(sort_order):
+                return None, {'error': 'sortOrder must be a finite number'}
 
         if not task_id or not schedule_date or not slot_key or not slot_start or not slot_end:
             return None, {'error': 'taskId, date, slotKey, slotStart and slotEnd are required'}
         if not is_valid_date_key(schedule_date):
             return None, {'error': 'date must be a valid YYYY-MM-DD date'}
+        if len(slot_label) > 40:
+            return None, {'error': 'slotLabel must be at most 40 characters'}
         if duration_minutes <= 0:
             return None, {'error': 'durationMinutes must be positive'}
         slot_capacity = minutes_between(slot_start, slot_end)

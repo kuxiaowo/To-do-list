@@ -181,7 +181,7 @@
                 <div class="auth-title-row">
                   <div>
                     <div class="auth-title">账号</div>
-                    <div class="auth-status" v-if="currentUser">已登录：{{ currentUser.name }}（{{ currentUser.nickname }}）</div>
+                    <div class="auth-status" v-if="currentUser">已登录：{{ currentUser.nickname }}</div>
                     <div class="auth-status" v-else>未登录：可打开页面，但不能新增、编辑、删除或保存任务。</div>
                   </div>
                   <el-button v-if="currentUser" plain size="small" @click="logout">退出</el-button>
