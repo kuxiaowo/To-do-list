@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>To-Do List Timeline</title>
+  <link rel="icon" type="image/png" href="./assets/favicon.png" />
   <link rel="stylesheet" href="./vendor/element-plus.css" />
   <script>
     (() => {
@@ -11,7 +12,7 @@
       document.documentElement.dataset.theme = savedTheme === 'dark' ? 'dark' : 'light';
     })();
   </script>
-  <link rel="stylesheet" href="./style.css?v=guide-20260601" />
+  <link rel="stylesheet" href="./style.css?v=calendar-jump-20260616-2" />
 </head>
 <body>
   <div id="app" v-cloak>
@@ -279,6 +280,13 @@
                 :class="{ 'is-outside-month': !day.isCurrentMonth, 'is-today': day.isToday, 'is-selected': day.isSelected }"
                 :data-day="day.key"
               >
+                <button
+                  class="ddl-calendar-jump-button"
+                  type="button"
+                  :aria-label="`跳转到 ${day.key} 的时间线`"
+                  :title="`跳转到 ${day.key} 的时间线`"
+                  @click.stop="jumpDdlCalendarDayToTimeline(day.key)"
+                >↗</button>
                 <div class="ddl-calendar-day-number">{{ day.dayNumber }}</div>
                 <div class="ddl-calendar-task-list" v-if="day.tasks.length">
                   <article
@@ -847,6 +855,13 @@
                       :class="{ 'is-outside-month': !day.isCurrentMonth, 'is-today': day.isToday, 'is-selected': day.isSelected }"
                       :data-day="day.key"
                     >
+                      <button
+                        class="ddl-calendar-jump-button"
+                        type="button"
+                        :aria-label="`跳转到 ${day.key} 的时间线`"
+                        :title="`跳转到 ${day.key} 的时间线`"
+                        @click.stop="jumpDdlCalendarDayToTimeline(day.key)"
+                      >↗</button>
                       <div class="ddl-calendar-day-number">{{ day.dayNumber }}</div>
                       <div class="ddl-calendar-task-list" v-if="day.tasks.length">
                         <article
@@ -1525,7 +1540,7 @@
 
   <script src="./vendor/vue.global.prod.js"></script>
   <script src="./vendor/element-plus.full.min.js"></script>
-  <script src="./app.js?v=guide-20260601"></script>
+  <script src="./app.js?v=calendar-jump-20260616-2"></script>
 </body>
 </html>
 

@@ -115,6 +115,8 @@ createApp({
       quickJumpDate: '',
       form: this.emptyForm(),
       dayRange: { past: 90, future: 90 },
+      suppressTimelineAutoExpand: false,
+      timelineAutoExpandTimer: null,
       habitDialogVisible: false,
       habitDialogMode: 'create',
       activeHabitId: '',
@@ -625,6 +627,7 @@ createApp({
     document.removeEventListener('click', this.closeAccountMenu);
     window.removeEventListener('resize', this.handleViewportResize);
     window.removeEventListener('scroll', this.updateGuideTarget, true);
+    if (this.timelineAutoExpandTimer) window.clearTimeout(this.timelineAutoExpandTimer);
     this.removeSchedulePointerListeners();
     document.body.classList.remove('is-schedule-touch-dragging');
     this.scheduleDragPreview = null;
@@ -2654,6 +2657,17 @@ createApp({
     goToDdlCalendarToday() {
       this.scrollToDate(new Date(), 'ddl');
     },
+    jumpDdlCalendarDayToTimeline(dateLike) {
+      const targetDate = this.parseDateKey(dateLike);
+      const key = this.formatDateKey(targetDate);
+      this.currentViewDateKey = key;
+      this.pageViewDateKeys.ddl = key;
+      this.pauseTimelineAutoExpand();
+      this.ddlViewMode = 'timeline';
+      this.$nextTick(() => {
+        window.requestAnimationFrame(() => this.scrollToDate(targetDate, 'ddl', 'smooth'));
+      });
+    },
     openDdlCalendarTask(task) {
       if (this.adminMode) return;
       this.openEditDialog(task);
@@ -2854,19 +2868,20 @@ createApp({
       });
     },
     scrollToDate(dateLike, page = this.activePage, behavior = 'smooth', align = 'center') {
-      const key = this.formatDateKey(dateLike);
+      const targetDate = this.parseDateKey(dateLike);
+      const key = this.formatDateKey(targetDate);
       const expanded = this.ensureDateRangeForKey(key);
       if (expanded) {
         if (this.currentUser && (page === 'daily' || this.activePage === 'daily')) {
           this.loadScheduleItems();
         }
-        this.$nextTick(() => this.scrollToDate(key, page, behavior, align));
+        this.$nextTick(() => this.scrollToDate(targetDate, page, behavior, align));
         return;
       }
       if (page === 'ddl' && this.ddlViewMode === 'calendar') {
         this.currentViewDateKey = key;
         this.pageViewDateKeys.ddl = key;
-        this.setDdlCalendarMonth(key);
+        this.setDdlCalendarMonth(targetDate);
         return;
       }
       const container = page === 'daily' ? this.$refs.dailyScroll : this.$refs.timelineScroll;
@@ -2874,15 +2889,19 @@ createApp({
       const target = container.querySelector(`[data-day="${key}"]`);
       if (!target) return;
       const maxScrollLeft = Math.max(0, container.scrollWidth - container.clientWidth);
-      const targetCenter = target.offsetLeft + target.offsetWidth / 2;
+      const containerRect = container.getBoundingClientRect();
+      const targetRect = target.getBoundingClientRect();
+      const targetLeft = container.scrollLeft + targetRect.left - containerRect.left;
+      const targetCenter = targetLeft + targetRect.width / 2;
       const viewportCenter = container.clientWidth / 2;
       const peekOffset = align === 'peek-start' ? 24 : 0;
       const rawLeft = align === 'start' || align === 'peek-start'
-        ? target.offsetLeft - peekOffset
+        ? targetLeft - peekOffset
         : targetCenter - viewportCenter;
       const nextLeft = Math.min(maxScrollLeft, Math.max(0, rawLeft));
       this.currentViewDateKey = key;
       this.pageViewDateKeys[page] = key;
+      this.pauseTimelineAutoExpand(behavior === 'smooth' ? 700 : 120);
       if (behavior === 'instant') {
         const previousBehavior = container.style.scrollBehavior;
         container.style.scrollBehavior = 'auto';
@@ -2905,8 +2924,10 @@ createApp({
       const columns = [...container.querySelectorAll('[data-day]')];
       if (!columns.length) return;
       const viewportCenter = container.scrollLeft + container.clientWidth / 2;
+      const containerRect = container.getBoundingClientRect();
       const nearest = columns.reduce((best, column) => {
-        const center = column.offsetLeft + column.offsetWidth / 2;
+        const columnRect = column.getBoundingClientRect();
+        const center = container.scrollLeft + columnRect.left - containerRect.left + columnRect.width / 2;
         const distance = Math.abs(center - viewportCenter);
         return distance < best.distance ? { column, distance } : best;
       }, { column: columns[0], distance: Number.POSITIVE_INFINITY }).column;
@@ -2918,6 +2939,7 @@ createApp({
     handleTimelineScroll(page) {
       const container = page === 'daily' ? this.$refs.dailyScroll : this.$refs.timelineScroll;
       if (!container) return;
+      if (this.suppressTimelineAutoExpand) return;
       let expanded = false;
       if (container.scrollLeft + container.clientWidth > container.scrollWidth - 320) {
         this.dayRange.future += 30;
@@ -2930,6 +2952,14 @@ createApp({
       if (expanded && this.currentUser && page === 'daily') {
         this.loadScheduleItems();
       }
+    },
+    pauseTimelineAutoExpand(duration = 500) {
+      this.suppressTimelineAutoExpand = true;
+      if (this.timelineAutoExpandTimer) window.clearTimeout(this.timelineAutoExpandTimer);
+      this.timelineAutoExpandTimer = window.setTimeout(() => {
+        this.suppressTimelineAutoExpand = false;
+        this.timelineAutoExpandTimer = null;
+      }, duration);
     },
     jumpToOffset(days) {
       const base = this.parseDateKey(this.currentViewDateKey);
