@@ -7,6 +7,7 @@ import hmac
 import ipaddress
 import json
 import os
+import posixpath
 import secrets
 import sqlite3
 import time
@@ -14,7 +15,7 @@ from datetime import datetime, timedelta
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / 'data'
@@ -27,6 +28,9 @@ DEFAULT_FEEDBACK_LIMIT_PER_USER = 10
 FEEDBACK_LIMIT_SETTING_KEY = 'feedback_limit_per_user'
 TRUSTED_PROXY_IPS = {'127.0.0.1', '::1'}
 HABIT_SYNC_FUTURE_DAYS = 90
+MAX_HABIT_SYNC_FUTURE_DAYS = 365
+STATIC_FILE_PATHS = {'/index.html', '/app.js', '/style.css'}
+STATIC_DIRECTORY_PREFIXES = ('/vendor/', '/assets/')
 DEFAULT_SUBJECTS = [
     'Chinese',
     'Mathematics',
@@ -103,6 +107,8 @@ def init_db() -> None:
     """Create the SQLite schema and apply small in-place migrations."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(DB_PATH) as conn:
+        conn.execute('PRAGMA foreign_keys = ON')
+        conn.execute('PRAGMA busy_timeout = 5000')
         conn.execute(
             '''
             CREATE TABLE IF NOT EXISTS users (
@@ -313,6 +319,23 @@ def init_db() -> None:
             ''',
             (FEEDBACK_LIMIT_SETTING_KEY, str(DEFAULT_FEEDBACK_LIMIT_PER_USER), now_iso()),
         )
+        nickname_duplicates = conn.execute(
+            '''
+            SELECT lower(nickname) AS nickname_key, COUNT(*) AS duplicate_count
+            FROM users
+            GROUP BY lower(nickname)
+            HAVING COUNT(*) > 1
+            '''
+        ).fetchall()
+        if nickname_duplicates:
+            duplicate_keys = ', '.join(str(row[0]) for row in nickname_duplicates[:5])
+            raise RuntimeError(
+                'Cannot create case-insensitive nickname index; duplicate nicknames exist: '
+                f'{duplicate_keys}'
+            )
+        conn.execute(
+            'CREATE UNIQUE INDEX IF NOT EXISTS idx_users_nickname_nocase ON users(nickname COLLATE NOCASE)'
+        )
         task_columns = {row[1] for row in conn.execute('PRAGMA table_info(tasks)').fetchall()}
         if 'subject' not in task_columns:
             conn.execute("ALTER TABLE tasks ADD COLUMN subject TEXT NOT NULL DEFAULT ''")
@@ -327,6 +350,8 @@ def init_db() -> None:
 
 def get_db() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
+    conn.execute('PRAGMA foreign_keys = ON')
+    conn.execute('PRAGMA busy_timeout = 5000')
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -496,6 +521,21 @@ def add_days_key(date_key: str, days: int) -> str:
     return (base + timedelta(days=days)).strftime('%Y-%m-%d')
 
 
+def clamp_habit_sync_window(start: str | None, end: str | None) -> tuple[str, str]:
+    today = today_key()
+    default_end = add_days_key(today, HABIT_SYNC_FUTURE_DAYS)
+    max_end = add_days_key(today, MAX_HABIT_SYNC_FUTURE_DAYS)
+    start_key = str(start or '').strip()
+    end_key = str(end or '').strip()
+    if not is_valid_date_key(start_key):
+        start_key = today
+    if not is_valid_date_key(end_key):
+        end_key = default_end
+    start_key = max(today, min(start_key, max_end))
+    end_key = min(max(end_key, start_key), max_end)
+    return start_key, end_key
+
+
 def today_key() -> str:
     return datetime.utcnow().strftime('%Y-%m-%d')
 
@@ -586,11 +626,32 @@ def effective_slots_for_date(conn: sqlite3.Connection, user_id: int, date_key: s
         (user_id, date_key),
     ).fetchone()
     if override:
-        parsed = json.loads(override['slots_json'])
+        try:
+            parsed = json.loads(override['slots_json'])
+        except json.JSONDecodeError:
+            parsed = []
         return parsed if isinstance(parsed, list) else []
     week_slots = week_slots_for_date(conn, user_id, date_key)
     weekday = weekday_for_date(date_key)
     return week_slots.get(weekday, [])
+
+
+def matching_effective_slot(
+    conn: sqlite3.Connection,
+    user_id: int,
+    date_key: str,
+    slot_key_text: str,
+    slot_start: str,
+    slot_end: str,
+) -> dict | None:
+    for slot in effective_slots_for_date(conn, user_id, date_key):
+        if (
+            slot_key(date_key, slot) == slot_key_text
+            and slot.get('start') == slot_start
+            and slot.get('end') == slot_end
+        ):
+            return slot
+    return None
 
 
 def conflict_with_existing_items(
@@ -764,6 +825,28 @@ def normalize_ip(value: str) -> str:
         return ''
 
 
+def normalize_static_request_path(path: str) -> str:
+    decoded = unquote(str(path or ''))
+    if '\x00' in decoded or '\\' in decoded:
+        return ''
+    normalized = posixpath.normpath(decoded)
+    if not normalized.startswith('/'):
+        normalized = f'/{normalized}'
+    return normalized
+
+
+def is_allowed_static_path(path: str) -> bool:
+    normalized = normalize_static_request_path(path)
+    if normalized == '/':
+        return True
+    if normalized in STATIC_FILE_PATHS:
+        return True
+    return any(
+        normalized.startswith(prefix) and not normalized.endswith('/')
+        for prefix in STATIC_DIRECTORY_PREFIXES
+    )
+
+
 class TodoHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(BASE_DIR), **kwargs)
@@ -787,10 +870,22 @@ class TodoHandler(SimpleHTTPRequestHandler):
         if path == '/api/auth/me':
             return self.handle_auth_me()
         if path == '/api/health':
-            return self.write_json({'ok': True, 'database': str(DB_PATH)})
+            return self.write_json({'ok': True})
+        if path.startswith('/api/'):
+            return self.write_json({'error': 'not found'}, status=HTTPStatus.NOT_FOUND)
         if path in {'/', '/index.html'}:
             self.record_visit('home', path)
+        if not is_allowed_static_path(path):
+            self.send_error(HTTPStatus.NOT_FOUND, 'Not found')
+            return
         return super().do_GET()
+
+    def do_HEAD(self):
+        path = urlparse(self.path).path
+        if not is_allowed_static_path(path):
+            self.send_error(HTTPStatus.NOT_FOUND, 'Not found')
+            return
+        return super().do_HEAD()
 
     def do_POST(self):
         path = urlparse(self.path).path
@@ -1038,6 +1133,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
                 return self.handle_admin_user_tasks(target_user_id)
             if parts[4] == 'schedule-items':
                 return self.handle_admin_user_schedule_items(target_user_id)
+            if parts[4] == 'habits':
+                return self.handle_admin_user_habits(target_user_id)
             if parts[4] == 'schedule-config':
                 return self.handle_admin_user_schedule_config(target_user_id)
             if parts[4] == 'logs':
@@ -1243,11 +1340,13 @@ class TodoHandler(SimpleHTTPRequestHandler):
                 SELECT users.id, users.name, users.nickname, users.role, users.created_at,
                        COUNT(DISTINCT tasks.id) AS task_count,
                        COUNT(DISTINCT schedule_items.id) AS schedule_item_count,
+                       COUNT(DISTINCT habits.id) AS habit_count,
                        MAX(operation_logs.created_at) AS last_operation_at,
                        MAX(CASE WHEN operation_logs.action = 'auth.login' THEN operation_logs.created_at END) AS last_login_at
                 FROM users
                 LEFT JOIN tasks ON tasks.user_id = users.id
                 LEFT JOIN schedule_items ON schedule_items.user_id = users.id
+                LEFT JOIN habits ON habits.user_id = users.id AND habits.archived = 0
                 LEFT JOIN operation_logs ON operation_logs.target_user_id = users.id
                 GROUP BY users.id
                 ORDER BY users.created_at DESC, users.id DESC
@@ -1263,6 +1362,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
                     'createdAt': row['created_at'],
                     'taskCount': row['task_count'],
                     'scheduleItemCount': row['schedule_item_count'],
+                    'habitCount': row['habit_count'],
                     'lastOperationAt': row['last_operation_at'],
                     'lastLoginAt': row['last_login_at'],
                 }
@@ -1482,6 +1582,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
                 return self.write_json({'error': 'user not found'}, status=HTTPStatus.NOT_FOUND)
             task_count = conn.execute('SELECT COUNT(*) FROM tasks WHERE user_id = ?', (user_id,)).fetchone()[0]
             schedule_count = conn.execute('SELECT COUNT(*) FROM schedule_items WHERE user_id = ?', (user_id,)).fetchone()[0]
+            habit_count = conn.execute('SELECT COUNT(*) FROM habits WHERE user_id = ?', (user_id,)).fetchone()[0]
             log_count = conn.execute('SELECT COUNT(*) FROM operation_logs WHERE target_user_id = ?', (user_id,)).fetchone()[0]
             feedback_count = conn.execute('SELECT COUNT(*) FROM feedback WHERE user_id = ?', (user_id,)).fetchone()[0]
 
@@ -1514,6 +1615,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
                     },
                     'deletedTaskCount': int(task_count),
                     'deletedScheduleItemCount': int(schedule_count),
+                    'deletedHabitCount': int(habit_count),
                     'deletedFeedbackCount': int(feedback_count),
                     'deletedLogCount': int(log_count),
                 },
@@ -1534,11 +1636,16 @@ class TodoHandler(SimpleHTTPRequestHandler):
             user = self.ensure_user_exists(conn, user_id)
             if not user:
                 return self.write_json({'error': 'user not found'}, status=HTTPStatus.NOT_FOUND)
-            sync_start, sync_end = self.habit_sync_window_from_request()
-            sync_conflicts = self.sync_habit_instances(conn, user_id, window_start=sync_start, window_end=sync_end)
-            conn.commit()
             items = self.fetch_schedule_items_for_user(conn, user_id)
-        return self.write_json({'items': items, 'readOnly': True, 'user': public_user(user), 'habitSyncConflicts': sync_conflicts})
+        return self.write_json({'items': items, 'readOnly': True, 'user': public_user(user), 'habitSyncConflicts': []})
+
+    def handle_admin_user_habits(self, user_id: int):
+        with get_db() as conn:
+            user = self.ensure_user_exists(conn, user_id)
+            if not user:
+                return self.write_json({'error': 'user not found'}, status=HTTPStatus.NOT_FOUND)
+            habits = self.fetch_habits_for_user(conn, user_id)
+        return self.write_json({'habits': habits, 'readOnly': True, 'user': public_user(user)})
 
     def handle_admin_user_schedule_config(self, user_id: int):
         with get_db() as conn:
@@ -2013,10 +2120,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
         strict: bool = False,
     ) -> list[dict]:
         today = today_key()
-        window_start = max(window_start or today, today)
-        window_end = window_end or add_days_key(today, HABIT_SYNC_FUTURE_DAYS)
-        if window_end < window_start:
-            window_end = window_start
+        window_start, window_end = clamp_habit_sync_window(window_start or today, window_end)
         params: list = [user_id]
         id_filter = ''
         if habit_ids:
@@ -2126,16 +2230,10 @@ class TodoHandler(SimpleHTTPRequestHandler):
         return conflicts
 
     def habit_sync_window_from_request(self) -> tuple[str, str]:
-        today = today_key()
         query = parse_qs(urlparse(self.path).query)
         start = str((query.get('from') or [''])[0]).strip()
         end = str((query.get('to') or [''])[0]).strip()
-        if not is_valid_date_key(start):
-            start = today
-        if not is_valid_date_key(end):
-            end = add_days_key(today, HABIT_SYNC_FUTURE_DAYS)
-        end = max(end, add_days_key(today, HABIT_SYNC_FUTURE_DAYS))
-        return start, end
+        return clamp_habit_sync_window(start, end)
 
     def handle_list_habits(self):
         user = self.current_user()
@@ -2287,8 +2385,10 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return
         effective_from = str(payload.get('effectiveFrom', '')).strip()
         week_slots, error = normalize_week_slots(payload.get('slots'))
-        if not effective_from or error:
-            return self.write_json({'error': error or 'effectiveFrom is required'}, status=HTTPStatus.BAD_REQUEST)
+        if error:
+            return self.write_json({'error': error}, status=HTTPStatus.BAD_REQUEST)
+        if not is_valid_date_key(effective_from):
+            return self.write_json({'error': 'effectiveFrom must be a valid date'}, status=HTTPStatus.BAD_REQUEST)
 
         with get_db() as conn:
             rows = conn.execute(
@@ -2350,6 +2450,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
         user = self.require_user()
         if not user:
             return
+        if not is_valid_date_key(date_key):
+            return self.write_json({'error': 'invalid schedule date'}, status=HTTPStatus.BAD_REQUEST)
         payload = self.read_json_body()
         if payload is None:
             return
@@ -2387,6 +2489,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
         user = self.require_user()
         if not user:
             return
+        if not is_valid_date_key(date_key):
+            return self.write_json({'error': 'invalid schedule date'}, status=HTTPStatus.BAD_REQUEST)
         with get_db() as conn:
             template_slots = week_slots_for_date(conn, int(user['id']), date_key).get(weekday_for_date(date_key), [])
             conflict = conflict_with_existing_items(conn, int(user['id']), [date_key], {date_key: template_slots})
@@ -2441,14 +2545,21 @@ class TodoHandler(SimpleHTTPRequestHandler):
             conn.commit()
         return self.write_json({'ok': True})
 
-    def validate_schedule_payload(self, payload: dict, user_id: int, existing_id: str | None = None):
+    def validate_schedule_payload(
+        self,
+        conn: sqlite3.Connection,
+        payload: dict,
+        user_id: int,
+        existing_id: str | None = None,
+        enforce_slot_exists: bool = True,
+    ):
         """Validate schedule item edits and enforce per-slot capacity."""
         task_id = str(payload.get('taskId', '')).strip()
         schedule_date = str(payload.get('date', '')).strip()
         slot_key = str(payload.get('slotKey', '')).strip()
         slot_label = str(payload.get('slotLabel', '')).strip()
-        slot_start = str(payload.get('slotStart', '')).strip()
-        slot_end = str(payload.get('slotEnd', '')).strip()
+        slot_start = normalize_time_text(str(payload.get('slotStart', '')).strip())
+        slot_end = normalize_time_text(str(payload.get('slotEnd', '')).strip())
         note = str(payload.get('note', '') or '').strip()
         try:
             duration_minutes = int(payload.get('durationMinutes'))
@@ -2465,6 +2576,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
 
         if not task_id or not schedule_date or not slot_key or not slot_start or not slot_end:
             return None, {'error': 'taskId, date, slotKey, slotStart and slotEnd are required'}
+        if not is_valid_date_key(schedule_date):
+            return None, {'error': 'date must be a valid YYYY-MM-DD date'}
         if duration_minutes <= 0:
             return None, {'error': 'durationMinutes must be positive'}
         slot_capacity = minutes_between(slot_start, slot_end)
@@ -2474,27 +2587,28 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return None, {'error': 'duration exceeds slot capacity'}
         if len(note) > 500:
             return None, {'error': 'note is too long'}
+        if enforce_slot_exists and not matching_effective_slot(conn, user_id, schedule_date, slot_key, slot_start, slot_end):
+            return None, {'error': 'time slot does not exist for this date'}
 
-        with get_db() as conn:
-            task = conn.execute('SELECT id FROM tasks WHERE id = ? AND user_id = ?', (task_id, user_id)).fetchone()
-            if not task:
-                return None, {'error': 'task not found'}
-            if existing_id:
-                used = conn.execute(
-                    """
-                    SELECT COALESCE(SUM(duration_minutes), 0) FROM schedule_items
-                    WHERE user_id = ? AND schedule_date = ? AND slot_key = ? AND id != ?
-                    """,
-                    (user_id, schedule_date, slot_key, existing_id),
-                ).fetchone()[0]
-            else:
-                used = conn.execute(
-                    """
-                    SELECT COALESCE(SUM(duration_minutes), 0) FROM schedule_items
-                    WHERE user_id = ? AND schedule_date = ? AND slot_key = ?
-                    """,
-                    (user_id, schedule_date, slot_key),
-                ).fetchone()[0]
+        task = conn.execute('SELECT id FROM tasks WHERE id = ? AND user_id = ?', (task_id, user_id)).fetchone()
+        if not task:
+            return None, {'error': 'task not found'}
+        if existing_id:
+            used = conn.execute(
+                """
+                SELECT COALESCE(SUM(duration_minutes), 0) FROM schedule_items
+                WHERE user_id = ? AND schedule_date = ? AND slot_key = ? AND id != ?
+                """,
+                (user_id, schedule_date, slot_key, existing_id),
+            ).fetchone()[0]
+        else:
+            used = conn.execute(
+                """
+                SELECT COALESCE(SUM(duration_minutes), 0) FROM schedule_items
+                WHERE user_id = ? AND schedule_date = ? AND slot_key = ?
+                """,
+                (user_id, schedule_date, slot_key),
+            ).fetchone()[0]
         if int(used) + duration_minutes > slot_capacity:
             return None, {'error': 'time slot capacity exceeded', 'usedMinutes': int(used), 'capacityMinutes': slot_capacity}
 
@@ -2517,11 +2631,12 @@ class TodoHandler(SimpleHTTPRequestHandler):
         payload = self.read_json_body()
         if payload is None:
             return
-        item, error = self.validate_schedule_payload(payload, int(user['id']))
-        if error:
-            return self.write_json(error, status=HTTPStatus.BAD_REQUEST)
         item_id = f"schedule-{int(time.time() * 1000)}-{secrets.token_hex(4)}"
         with get_db() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            item, error = self.validate_schedule_payload(conn, payload, int(user['id']))
+            if error:
+                return self.write_json(error, status=HTTPStatus.BAD_REQUEST)
             sort_order = item['sortOrder']
             if sort_order is None:
                 sort_order = float(conn.execute(
@@ -2564,40 +2679,74 @@ class TodoHandler(SimpleHTTPRequestHandler):
         if payload is None:
             return
         with get_db() as conn:
+            conn.execute('BEGIN IMMEDIATE')
             existing = conn.execute('SELECT * FROM schedule_items WHERE id = ? AND user_id = ?', (item_id, user['id'])).fetchone()
-        if not existing:
-            return self.write_json({'error': 'schedule item not found'}, status=HTTPStatus.NOT_FOUND)
-        if existing['habit_id']:
-            locked_fields = {
-                'date': existing['schedule_date'],
-                'slotKey': existing['slot_key'],
-                'slotLabel': existing['slot_label'],
-                'slotStart': existing['slot_start'],
-                'slotEnd': existing['slot_end'],
-                'durationMinutes': existing['duration_minutes'],
-            }
-            for key, current_value in locked_fields.items():
-                if key in payload and str(payload.get(key)) != str(current_value):
-                    return self.write_json({'error': 'habit schedule items can only be completed from the daily board'}, status=HTTPStatus.BAD_REQUEST)
+            if not existing:
+                return self.write_json({'error': 'schedule item not found'}, status=HTTPStatus.NOT_FOUND)
+            if existing['habit_id']:
+                locked_fields = {
+                    'date': existing['schedule_date'],
+                    'slotKey': existing['slot_key'],
+                    'slotLabel': existing['slot_label'],
+                    'slotStart': existing['slot_start'],
+                    'slotEnd': existing['slot_end'],
+                    'durationMinutes': existing['duration_minutes'],
+                }
+                for key, current_value in locked_fields.items():
+                    if key in payload and str(payload.get(key)) != str(current_value):
+                        return self.write_json({'error': 'habit schedule items can only be completed from the daily board'}, status=HTTPStatus.BAD_REQUEST)
 
-        merged = {
-            'taskId': existing['task_id'],
-            'date': payload.get('date', existing['schedule_date']),
-            'slotKey': payload.get('slotKey', existing['slot_key']),
-            'slotLabel': payload.get('slotLabel', existing['slot_label']),
-            'slotStart': payload.get('slotStart', existing['slot_start']),
-            'slotEnd': payload.get('slotEnd', existing['slot_end']),
-            'durationMinutes': payload.get('durationMinutes', existing['duration_minutes']),
-            'sortOrder': payload.get('sortOrder', existing['sort_order']),
-            'note': payload.get('note', existing['note']),
-        }
-        item, error = self.validate_schedule_payload(merged, int(user['id']), existing_id=item_id)
-        if error:
-            return self.write_json(error, status=HTTPStatus.BAD_REQUEST)
-        if item['sortOrder'] is None:
-            item['sortOrder'] = existing['sort_order']
-        completed = bool(payload.get('completed')) if 'completed' in payload else bool(existing['completed'])
-        with get_db() as conn:
+            merged = {
+                'taskId': existing['task_id'],
+                'date': payload.get('date', existing['schedule_date']),
+                'slotKey': payload.get('slotKey', existing['slot_key']),
+                'slotLabel': payload.get('slotLabel', existing['slot_label']),
+                'slotStart': payload.get('slotStart', existing['slot_start']),
+                'slotEnd': payload.get('slotEnd', existing['slot_end']),
+                'durationMinutes': payload.get('durationMinutes', existing['duration_minutes']),
+                'sortOrder': payload.get('sortOrder', existing['sort_order']),
+                'note': payload.get('note', existing['note']),
+            }
+
+            schedule_changed = any(
+                str(merged[key]) != str(current_value)
+                for key, current_value in {
+                    'date': existing['schedule_date'],
+                    'slotKey': existing['slot_key'],
+                    'slotStart': existing['slot_start'],
+                    'slotEnd': existing['slot_end'],
+                    'durationMinutes': existing['duration_minutes'],
+                    'sortOrder': existing['sort_order'],
+                }.items()
+            )
+            if schedule_changed:
+                item, error = self.validate_schedule_payload(
+                    conn,
+                    merged,
+                    int(user['id']),
+                    existing_id=item_id,
+                    enforce_slot_exists=True,
+                )
+                if error:
+                    return self.write_json(error, status=HTTPStatus.BAD_REQUEST)
+                if item['sortOrder'] is None:
+                    item['sortOrder'] = existing['sort_order']
+            else:
+                note = str(merged.get('note', '') or '').strip()
+                if len(note) > 500:
+                    return self.write_json({'error': 'note is too long'}, status=HTTPStatus.BAD_REQUEST)
+                item = {
+                    'taskId': existing['task_id'],
+                    'date': existing['schedule_date'],
+                    'slotKey': existing['slot_key'],
+                    'slotLabel': existing['slot_label'],
+                    'slotStart': existing['slot_start'],
+                    'slotEnd': existing['slot_end'],
+                    'durationMinutes': existing['duration_minutes'],
+                    'sortOrder': existing['sort_order'],
+                    'note': note,
+                }
+            completed = bool(payload.get('completed')) if 'completed' in payload else bool(existing['completed'])
             conn.execute(
                 """
                 UPDATE schedule_items
@@ -2680,6 +2829,9 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return self.write_json({'error': 'password must be at least 6 characters'}, status=HTTPStatus.BAD_REQUEST)
 
         with get_db() as conn:
+            existing = conn.execute('SELECT id FROM users WHERE nickname = ? COLLATE NOCASE', (nickname,)).fetchone()
+            if existing:
+                return self.write_json({'error': 'nickname already exists'}, status=HTTPStatus.CONFLICT)
             try:
                 cursor = conn.execute(
                     'INSERT INTO users (name, nickname, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?)',
@@ -2708,22 +2860,19 @@ class TodoHandler(SimpleHTTPRequestHandler):
         nickname = str(payload.get('nickname', '')).strip()
         password = str(payload.get('password', ''))
         with get_db() as conn:
-            user = conn.execute('SELECT * FROM users WHERE lower(nickname) = lower(?)', (nickname,)).fetchone()
-            if user and verify_password(password, user['password_hash']):
-                self.log_operation(
-                    conn,
-                    int(user['id']),
-                    int(user['id']),
-                    'auth.login',
-                    'user',
-                    str(user['id']),
-                    {'nickname': user['nickname']},
-                )
-                conn.commit()
-            else:
-                user = None
-        if not user or not verify_password(password, user['password_hash']):
-            return self.write_json({'error': 'invalid nickname or password'}, status=HTTPStatus.UNAUTHORIZED)
+            user = conn.execute('SELECT * FROM users WHERE nickname = ? COLLATE NOCASE', (nickname,)).fetchone()
+            if not user or not verify_password(password, user['password_hash']):
+                return self.write_json({'error': 'invalid nickname or password'}, status=HTTPStatus.UNAUTHORIZED)
+            self.log_operation(
+                conn,
+                int(user['id']),
+                int(user['id']),
+                'auth.login',
+                'user',
+                str(user['id']),
+                {'nickname': user['nickname']},
+            )
+            conn.commit()
         return self.issue_session_response(user)
 
     def handle_auth_me(self):
@@ -2756,7 +2905,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
 
         with get_db() as conn:
             existing = conn.execute(
-                'SELECT id FROM users WHERE lower(nickname) = lower(?) AND id != ?',
+                'SELECT id FROM users WHERE nickname = ? COLLATE NOCASE AND id != ?',
                 (nickname, user['id']),
             ).fetchone()
             if existing:

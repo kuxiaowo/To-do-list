@@ -476,6 +476,7 @@
             <el-table-column prop="role" label="角色" width="100"></el-table-column>
             <el-table-column prop="taskCount" label="任务" width="90"></el-table-column>
             <el-table-column prop="scheduleItemCount" label="每日安排" width="110"></el-table-column>
+            <el-table-column prop="habitCount" label="习惯" width="90"></el-table-column>
             <el-table-column label="最近登录" min-width="160">
               <template #default="{ row }">{{ formatDateTime(row.lastLoginAt) }}</template>
             </el-table-column>
@@ -793,6 +794,39 @@
                   <div v-else class="summary-empty">
                     {{ activePage === 'daily' ? '任务池是空的' : '待安排DDL是空的' }}
                   </div>
+                </div>
+              </section>
+              <section v-if="activePage === 'daily'" class="summary-section habit-pool-section">
+                <h3>
+                  <span>习惯池</span>
+                  <span class="day-subtitle">{{ habitCount }} 项</span>
+                </h3>
+                <p class="summary-subtitle">按星期和时间格子自动同步到每日安排。</p>
+                <div v-if="habitSyncConflicts.length" class="habit-conflict-banner">
+                  有 {{ habitSyncConflicts.length }} 个习惯日期未能同步。
+                </div>
+                <div class="summary-card">
+                  <div class="summary-card-header">
+                    <div class="summary-card-title">习惯列表</div>
+                    <span class="day-subtitle">后台只读</span>
+                  </div>
+                  <template v-if="activeHabits.length">
+                    <div v-for="habit in activeHabits" :key="habit.id" class="summary-task">
+                      <div class="task-main">
+                        <div style="min-width: 0; flex: 1;">
+                          <div class="task-title">{{ habit.title }}</div>
+                          <div class="task-meta">
+                            <span v-if="habit.subject" class="meta-chip subject-chip">{{ habit.subject }}</span>
+                            <span>{{ habitWeekdaysLabel(habit) }}</span>
+                            <span>{{ habit.slotLabel }} {{ habit.slotStart }}-{{ habit.slotEnd }}</span>
+                            <span v-if="!habit.active" class="meta-chip completed-badge">已暂停</span>
+                          </div>
+                        </div>
+                        <div class="priority-dot" :class="priorityClass(habit.priority)"></div>
+                      </div>
+                    </div>
+                  </template>
+                  <div v-else class="summary-empty">还没有习惯。</div>
                 </div>
               </section>
             </aside>

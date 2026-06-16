@@ -390,6 +390,15 @@ createApp({
     filteredTasks() {
       return this.sortedTasks.filter(task => this.showCompleted || !task.completed);
     },
+    todoTasksByDueDate() {
+      return this.filteredTasks.reduce((groups, task) => {
+        if (!task.dueAt || this.taskPool(task) !== 'todo') return groups;
+        const key = String(task.dueAt).slice(0, 10);
+        if (!groups[key]) groups[key] = [];
+        groups[key].push(task);
+        return groups;
+      }, {});
+    },
     unscheduledTasks() {
       return this.filteredTasks
         .filter(task => !task.dueAt && this.taskPool(task) === 'todo')
@@ -488,9 +497,7 @@ createApp({
           .forEach(item => keys.add(String(item.date).slice(0, 10)));
         return keys;
       }
-      this.filteredTasks
-        .filter(task => task.dueAt && this.taskPool(task) === 'todo')
-        .forEach(task => keys.add(String(task.dueAt).slice(0, 10)));
+      Object.keys(this.todoTasksByDueDate).forEach(key => keys.add(key));
       return keys;
     },
     dayColumns() {
@@ -501,7 +508,7 @@ createApp({
       for (let date = new Date(start); date <= end; date = this.addDays(date, 1)) {
         const offset = this.daysBetween(base, date);
         const key = this.formatDateKey(date);
-        const tasks = this.filteredTasks.filter(task => task.dueAt && this.taskPool(task) === 'todo' && task.dueAt.startsWith(key));
+        const tasks = this.todoTasksByDueDate[key] || [];
         days.push({
           key,
           label: this.formatDateLabel(date),
@@ -571,13 +578,14 @@ createApp({
       }
     },
     scheduleItemsBySlot() {
-      return this.scheduleItems.reduce((groups, item) => {
+      const groups = this.scheduleItems.reduce((result, item) => {
         const key = this.scheduleSlotKey(item.date, item.slotKey);
-        if (!groups[key]) groups[key] = [];
-        groups[key].push(item);
-        groups[key].sort((a, b) => this.compareScheduleItems(a, b));
-        return groups;
+        if (!result[key]) result[key] = [];
+        result[key].push(item);
+        return result;
       }, {});
+      Object.values(groups).forEach(items => items.sort((a, b) => this.compareScheduleItems(a, b)));
+      return groups;
     },
     scheduleDayColumns() {
       const base = this.startOfDay(new Date());
@@ -1208,19 +1216,24 @@ createApp({
       if (!this.isAdmin || !this.adminSelectedUserId) {
         this.tasks = [];
         this.scheduleItems = [];
+        this.habits = [];
+        this.habitSyncConflicts = [];
         return;
       }
       this.adminLoading = true;
       try {
         const userId = this.adminSelectedUserId;
         const range = this.scheduleSyncRange();
-        const [taskPayload, itemPayload, configPayload] = await Promise.all([
+        const [taskPayload, itemPayload, habitPayload, configPayload] = await Promise.all([
           this.apiJson(`${ADMIN_API}/users/${userId}/tasks`, { cache: 'no-store' }),
           this.apiJson(`${ADMIN_API}/users/${userId}/schedule-items?from=${encodeURIComponent(range.from)}&to=${encodeURIComponent(range.to)}`, { cache: 'no-store' }),
+          this.apiJson(`${ADMIN_API}/users/${userId}/habits`, { cache: 'no-store' }),
           this.apiJson(`${ADMIN_API}/users/${userId}/schedule-config`, { cache: 'no-store' })
         ]);
         this.tasks = Array.isArray(taskPayload.tasks) ? taskPayload.tasks.map(task => this.normalizeTaskPool(task)) : [];
         this.scheduleItems = Array.isArray(itemPayload.items) ? itemPayload.items : [];
+        this.habits = Array.isArray(habitPayload.habits) ? habitPayload.habits : [];
+        this.habitSyncConflicts = Array.isArray(itemPayload.habitSyncConflicts) ? itemPayload.habitSyncConflicts : [];
         this.defaultWeekSlots = this.cloneSlots(configPayload.defaultWeekSlots || DEFAULT_WEEK_SLOTS);
         this.scheduleTemplateVersions = Array.isArray(configPayload.templateVersions) ? configPayload.templateVersions : [];
         this.scheduleDayOverrides = configPayload.dayOverrides && typeof configPayload.dayOverrides === 'object' ? configPayload.dayOverrides : {};
@@ -2644,7 +2657,7 @@ createApp({
       }).catch(() => {});
     },
     ddlTasksForDate(key) {
-      return this.filteredTasks.filter(task => task.dueAt && this.taskPool(task) === 'todo' && task.dueAt.startsWith(key));
+      return this.todoTasksByDueDate[key] || [];
     },
     setDdlViewMode(mode) {
       if (mode === this.ddlViewMode) return;
