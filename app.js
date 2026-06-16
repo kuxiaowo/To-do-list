@@ -1765,8 +1765,15 @@ createApp({
     },
     moveScheduleDragPreview(clientX, clientY) {
       if (!this.scheduleDragPreview) return;
-      this.scheduleDragPreview.x = clientX - this.scheduleDragPreview.offsetX;
-      this.scheduleDragPreview.y = clientY - this.scheduleDragPreview.offsetY;
+      const x = clientX - this.scheduleDragPreview.offsetX;
+      const y = clientY - this.scheduleDragPreview.offsetY;
+      const previewElement = this.$refs.scheduleDragPreview;
+      if (previewElement) {
+        previewElement.style.transform = `translate3d(${x}px, ${y}px, 0)`;
+        return;
+      }
+      this.scheduleDragPreview.x = x;
+      this.scheduleDragPreview.y = y;
     },
     showScheduleDragPreview(drag) {
       if (!drag || !drag.preview) return;
@@ -1836,7 +1843,7 @@ createApp({
       const slotElement = this.scheduleSlotElementFromPoint(event.clientX, event.clientY);
       const context = this.scheduleSlotContextFromElement(slotElement);
       if (!context) {
-        this.scheduleDropPosition = null;
+        if (this.scheduleDropPosition) this.scheduleDropPosition = null;
         return;
       }
       this.updateScheduleDropPosition({
@@ -1927,6 +1934,7 @@ createApp({
     updateScheduleDropPosition(event, day, slot) {
       if (this.adminMode || !this.hasActiveScheduleDrag()) return;
       const slotElement = event.currentTarget;
+      if (!slotElement) return;
       const cards = Array.from(slotElement.querySelectorAll('.schedule-card'))
         .filter(card => String(card.dataset.scheduleId) !== String(this.draggedScheduleItemId));
       let index = cards.length;
@@ -1937,8 +1945,14 @@ createApp({
         });
         index = targetIndex < 0 ? cards.length : targetIndex;
       }
+      const key = this.scheduleDropKey(day.key, slot.key);
+      if (this.scheduleDropPosition
+        && this.scheduleDropPosition.key === key
+        && this.scheduleDropPosition.index === index) {
+        return;
+      }
       this.scheduleDropPosition = {
-        key: this.scheduleDropKey(day.key, slot.key),
+        key,
         date: day.key,
         slotKey: slot.key,
         index
