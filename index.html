@@ -174,7 +174,8 @@
                 :title="currentUser ? `账号：${currentUser.nickname}` : '登录 / 注册'"
                 @click="accountMenuOpen = !accountMenuOpen"
               >
-                {{ avatarText }}
+                <img v-if="avatarImageUrl" :src="avatarImageUrl" alt="" class="avatar-button-image">
+                <span v-else>{{ avatarText }}</span>
               </button>
 
               <div v-if="accountMenuOpen" class="auth-card">
@@ -189,6 +190,7 @@
 
                 <div v-if="currentUser" class="auth-form">
                   <div class="account-setting-actions">
+                    <el-button text @click="openAvatarDialog">修改头像</el-button>
                     <el-button text @click="openPasswordDialog">修改密码</el-button>
                     <el-button text @click="openNicknameDialog">修改昵称</el-button>
                   </div>
@@ -1095,6 +1097,81 @@
           <div class="right-actions">
             <el-button @click="passwordDialogVisible = false">取消</el-button>
             <el-button type="primary" @click="savePassword">保存</el-button>
+          </div>
+        </div>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="avatarDialogVisible"
+      title="修改头像"
+      width="min(94vw, 720px)"
+      destroy-on-close
+      @closed="resetAvatarDraft"
+    >
+      <div class="avatar-editor" v-loading="avatarLoading">
+        <input
+          ref="avatarFileInput"
+          class="avatar-file-input"
+          type="file"
+          accept="image/png,image/jpeg,image/webp"
+          @change="handleAvatarFileChange"
+        >
+        <div class="avatar-editor-main">
+          <div class="avatar-crop-column">
+            <div
+              class="avatar-cropper"
+              :class="{ 'is-empty': !avatarImage }"
+              @pointerdown.prevent="startAvatarDrag"
+              @pointermove.prevent="moveAvatarDrag"
+              @pointerup.prevent="endAvatarDrag"
+              @pointercancel.prevent="endAvatarDrag"
+              @wheel.prevent="handleAvatarWheel"
+            >
+              <img
+                v-if="avatarSourceUrl"
+                :src="avatarSourceUrl"
+                alt=""
+                class="avatar-crop-image"
+                :style="avatarCropImageStyle"
+                draggable="false"
+              >
+              <div v-else class="avatar-empty-preview">
+                <img v-if="avatarImageUrl" :src="avatarImageUrl" alt="">
+                <span v-else>{{ avatarText }}</span>
+              </div>
+              <div class="avatar-crop-mask"></div>
+            </div>
+            <el-slider
+              :model-value="avatarCrop.scale"
+              :min="avatarCrop.minScale"
+              :max="avatarCrop.maxScale"
+              :step="0.001"
+              :disabled="!avatarImage"
+              :show-tooltip="false"
+              @input="setAvatarScale"
+            ></el-slider>
+          </div>
+          <div class="avatar-preview-column">
+            <div class="avatar-preview">
+              <img v-if="avatarPreviewUrl" :src="avatarPreviewUrl" alt="">
+              <img v-else-if="avatarImageUrl" :src="avatarImageUrl" alt="">
+              <span v-else>{{ avatarText }}</span>
+            </div>
+            <div class="avatar-editor-actions">
+              <el-button plain @click="chooseAvatarFile">选择图片</el-button>
+              <el-button v-if="avatarSourceUrl" plain @click="chooseAvatarFile">重新选择</el-button>
+              <el-button v-if="currentUser && currentUser.avatarUrl" plain type="danger" @click="deleteAvatar">移除头像</el-button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <template #footer>
+        <div class="dialog-footer">
+          <div></div>
+          <div class="right-actions">
+            <el-button @click="avatarDialogVisible = false">取消</el-button>
+            <el-button type="primary" :disabled="!avatarImage" :loading="avatarLoading" @click="saveAvatar">保存头像</el-button>
           </div>
         </div>
       </template>

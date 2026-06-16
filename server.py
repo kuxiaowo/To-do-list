@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import hmac
 import ipaddress
@@ -30,6 +31,13 @@ FEEDBACK_LIMIT_SETTING_KEY = 'feedback_limit_per_user'
 TRUSTED_PROXY_IPS = {'127.0.0.1', '::1'}
 HABIT_SYNC_FUTURE_DAYS = 90
 MAX_HABIT_SYNC_FUTURE_DAYS = 365
+MAX_AVATAR_BYTES = 2 * 1024 * 1024
+AVATAR_CONTENT_TYPES = {
+    'image/png': 'png',
+    'image/jpeg': 'jpg',
+    'image/webp': 'webp',
+}
+AVATAR_EXTENSIONS = {'png', 'jpg', 'jpeg', 'webp'}
 STATIC_FILE_PATHS = {'/index.html', '/app.js', '/style.css'}
 STATIC_DIRECTORY_PREFIXES = ('/vendor/', '/assets/')
 DEFAULT_SUBJECTS = [
@@ -112,9 +120,14 @@ class ClosingConnection(sqlite3.Connection):
             self.close()
 
 
+def avatar_dir() -> Path:
+    return DATA_DIR / 'uploads' / 'avatars'
+
+
 def init_db() -> None:
     """Create the SQLite schema and apply small in-place migrations."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    avatar_dir().mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(DB_PATH, factory=ClosingConnection) as conn:
         conn.execute('PRAGMA foreign_keys = ON')
         conn.execute('PRAGMA busy_timeout = 5000')
@@ -126,6 +139,8 @@ def init_db() -> None:
                 nickname TEXT NOT NULL UNIQUE,
                 password_hash TEXT NOT NULL,
                 role TEXT NOT NULL DEFAULT 'student',
+                avatar_file TEXT NOT NULL DEFAULT '',
+                avatar_updated_at TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL
             )
             '''
@@ -345,6 +360,12 @@ def init_db() -> None:
         conn.execute(
             'CREATE UNIQUE INDEX IF NOT EXISTS idx_users_nickname_nocase ON users(nickname COLLATE NOCASE)'
         )
+
+        user_columns = {row[1] for row in conn.execute('PRAGMA table_info(users)').fetchall()}
+        if 'avatar_file' not in user_columns:
+            conn.execute("ALTER TABLE users ADD COLUMN avatar_file TEXT NOT NULL DEFAULT ''")
+        if 'avatar_updated_at' not in user_columns:
+            conn.execute("ALTER TABLE users ADD COLUMN avatar_updated_at TEXT NOT NULL DEFAULT ''")
         task_columns = {row[1] for row in conn.execute('PRAGMA table_info(tasks)').fetchall()}
         if 'subject' not in task_columns:
             conn.execute("ALTER TABLE tasks ADD COLUMN subject TEXT NOT NULL DEFAULT ''")
@@ -427,12 +448,75 @@ def public_task(row: sqlite3.Row) -> dict:
 
 
 def public_user(row: sqlite3.Row | dict) -> dict:
+    avatar_file = row_value(row, 'avatar_file', '')
+    avatar_updated_at = row_value(row, 'avatar_updated_at', '')
     return {
         'id': row['id'],
         'name': row['name'],
         'nickname': row['nickname'],
         'role': row['role'],
+        'avatarUrl': avatar_url(avatar_file, avatar_updated_at),
     }
+
+
+def row_value(row: sqlite3.Row | dict, key: str, default=''):
+    if isinstance(row, sqlite3.Row):
+        return row[key] if key in row.keys() else default
+    return row.get(key, default)
+
+
+def avatar_url(avatar_file: str, avatar_updated_at: str = '') -> str:
+    avatar_file = str(avatar_file or '').strip()
+    if not is_safe_avatar_filename(avatar_file):
+        return ''
+    version = str(avatar_updated_at or '').strip()
+    suffix = f'?v={version}' if version else ''
+    return f'/uploads/avatars/{avatar_file}{suffix}'
+
+
+def is_safe_avatar_filename(filename: str) -> bool:
+    filename = str(filename or '')
+    if not filename or '/' in filename or '\\' in filename or '\x00' in filename:
+        return False
+    if filename in {'.', '..'} or Path(filename).name != filename:
+        return False
+    stem, dot, ext = filename.rpartition('.')
+    if not stem or dot != '.' or ext.lower() not in AVATAR_EXTENSIONS:
+        return False
+    allowed = set('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.')
+    return all(char in allowed for char in filename)
+
+
+def avatar_magic_type(raw: bytes) -> str:
+    if raw.startswith(b'\x89PNG\r\n\x1a\n'):
+        return 'image/png'
+    if raw.startswith(b'\xff\xd8\xff'):
+        return 'image/jpeg'
+    if len(raw) >= 12 and raw[:4] == b'RIFF' and raw[8:12] == b'WEBP':
+        return 'image/webp'
+    return ''
+
+
+def avatar_content_type(filename: str) -> str:
+    ext = filename.rpartition('.')[2].lower()
+    if ext == 'png':
+        return 'image/png'
+    if ext in {'jpg', 'jpeg'}:
+        return 'image/jpeg'
+    if ext == 'webp':
+        return 'image/webp'
+    return 'application/octet-stream'
+
+
+def cleanup_avatar_file(filename: str) -> None:
+    if not is_safe_avatar_filename(filename):
+        return
+    path = avatar_dir() / filename
+    try:
+        if path.is_file():
+            path.unlink()
+    except OSError:
+        pass
 
 
 def default_subject_template() -> list[dict]:
@@ -862,6 +946,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self):
         path = urlparse(self.path).path
+        if path.startswith('/uploads/avatars/'):
+            return self.handle_avatar_file(path, send_body=True)
         if path.startswith('/api/admin/'):
             return self.handle_admin_get(path)
         if path == '/api/tasks':
@@ -891,6 +977,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
 
     def do_HEAD(self):
         path = urlparse(self.path).path
+        if path.startswith('/uploads/avatars/'):
+            return self.handle_avatar_file(path, send_body=False)
         if not is_allowed_static_path(path):
             self.send_error(HTTPStatus.NOT_FOUND, 'Not found')
             return
@@ -906,6 +994,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return self.handle_auth_login()
         if path == '/api/auth/logout':
             return self.handle_auth_logout()
+        if path == '/api/auth/avatar':
+            return self.handle_auth_update_avatar()
         if path == '/api/tasks':
             return self.handle_create_task()
         if path == '/api/schedule-items':
@@ -950,6 +1040,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return self.handle_admin_delete_feedback(path.rsplit('/', 1)[-1])
         if path.startswith('/api/feedback/'):
             return self.handle_delete_feedback(path.rsplit('/', 1)[-1])
+        if path == '/api/auth/avatar':
+            return self.handle_auth_delete_avatar()
         if path.startswith('/api/admin/users/'):
             return self.handle_admin_delete_user(path.rsplit('/', 1)[-1])
         if path.startswith('/api/tasks/'):
@@ -964,6 +1056,30 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return self.handle_reset_schedule_day(path.rsplit('/', 1)[-1])
         self.send_error(HTTPStatus.NOT_FOUND, 'Not found')
 
+    def handle_avatar_file(self, path: str, send_body: bool = True):
+        prefix = '/uploads/avatars/'
+        filename = unquote(path[len(prefix):]) if path.startswith(prefix) else ''
+        if not is_safe_avatar_filename(filename):
+            self.send_error(HTTPStatus.NOT_FOUND, 'Not found')
+            return
+        file_path = avatar_dir() / filename
+        if not file_path.is_file():
+            self.send_error(HTTPStatus.NOT_FOUND, 'Not found')
+            return
+        try:
+            raw = file_path.read_bytes() if send_body else b''
+            size = file_path.stat().st_size
+        except OSError:
+            self.send_error(HTTPStatus.NOT_FOUND, 'Not found')
+            return
+        self.send_response(HTTPStatus.OK)
+        self.send_header('Content-Type', avatar_content_type(filename))
+        self.send_header('Content-Length', str(size))
+        self.send_header('Cache-Control', 'public, max-age=31536000, immutable')
+        self.end_headers()
+        if send_body:
+            self.wfile.write(raw)
+
     def current_user(self):
         """Resolve the bearer token and slide the session expiration forward."""
         auth = self.headers.get('Authorization', '')
@@ -976,7 +1092,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
         with get_db() as conn:
             row = conn.execute(
                 '''
-                SELECT users.id, users.name, users.nickname, users.role, sessions.expires_at
+                SELECT users.id, users.name, users.nickname, users.role,
+                       users.avatar_file, users.avatar_updated_at, sessions.expires_at
                 FROM sessions
                 JOIN users ON users.id = sessions.user_id
                 WHERE sessions.token = ?
@@ -2863,7 +2980,10 @@ class TodoHandler(SimpleHTTPRequestHandler):
                 conn.commit()
             except sqlite3.IntegrityError:
                 return self.write_json({'error': 'nickname already exists'}, status=HTTPStatus.CONFLICT)
-            user = conn.execute('SELECT id, name, nickname, role FROM users WHERE id = ?', (user_id,)).fetchone()
+            user = conn.execute(
+                'SELECT id, name, nickname, role, avatar_file, avatar_updated_at FROM users WHERE id = ?',
+                (user_id,),
+            ).fetchone()
         return self.issue_session_response(user)
 
     def handle_auth_login(self):
@@ -2903,6 +3023,118 @@ class TodoHandler(SimpleHTTPRequestHandler):
                 conn.commit()
         return self.write_json({'ok': True})
 
+    def handle_auth_update_avatar(self):
+        user = self.require_user()
+        if not user:
+            return
+        payload = self.read_json_body()
+        if payload is None:
+            return
+        filename = str(payload.get('filename', '')).strip()
+        content_type = str(payload.get('contentType', '')).strip().lower()
+        data = str(payload.get('data', '')).strip()
+        if not filename or not content_type or not data:
+            return self.write_json({'error': 'filename, contentType and data are required'}, status=HTTPStatus.BAD_REQUEST)
+        if content_type not in AVATAR_CONTENT_TYPES:
+            return self.write_json({'error': 'avatar must be a PNG, JPEG or WebP image'}, status=HTTPStatus.BAD_REQUEST)
+        ext = filename.rpartition('.')[2].lower()
+        if ext not in AVATAR_EXTENSIONS:
+            return self.write_json({'error': 'avatar filename must end with png, jpg, jpeg or webp'}, status=HTTPStatus.BAD_REQUEST)
+        if content_type == 'image/png' and ext != 'png':
+            return self.write_json({'error': 'avatar extension does not match content type'}, status=HTTPStatus.BAD_REQUEST)
+        if content_type == 'image/jpeg' and ext not in {'jpg', 'jpeg'}:
+            return self.write_json({'error': 'avatar extension does not match content type'}, status=HTTPStatus.BAD_REQUEST)
+        if content_type == 'image/webp' and ext != 'webp':
+            return self.write_json({'error': 'avatar extension does not match content type'}, status=HTTPStatus.BAD_REQUEST)
+        if data.startswith('data:') and ',' in data:
+            data = data.split(',', 1)[1]
+        try:
+            raw = base64.b64decode(data, validate=True)
+        except (binascii.Error, ValueError):
+            return self.write_json({'error': 'avatar data must be valid base64'}, status=HTTPStatus.BAD_REQUEST)
+        if not raw:
+            return self.write_json({'error': 'avatar data is empty'}, status=HTTPStatus.BAD_REQUEST)
+        if len(raw) > MAX_AVATAR_BYTES:
+            return self.write_json({'error': 'avatar must be at most 2MB'}, status=HTTPStatus.BAD_REQUEST)
+        if avatar_magic_type(raw) != content_type:
+            return self.write_json({'error': 'avatar content does not match image type'}, status=HTTPStatus.BAD_REQUEST)
+
+        stored_ext = AVATAR_CONTENT_TYPES[content_type]
+        new_filename = f'user-{user["id"]}-{secrets.token_urlsafe(12)}.{stored_ext}'
+        target_dir = avatar_dir()
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target_path = target_dir / new_filename
+        old_avatar = row_value(user, 'avatar_file', '')
+        updated_at = now_iso()
+        try:
+            target_path.write_bytes(raw)
+            with get_db() as conn:
+                current = conn.execute(
+                    'SELECT id, name, nickname, role, avatar_file, avatar_updated_at FROM users WHERE id = ?',
+                    (user['id'],),
+                ).fetchone()
+                if not current:
+                    cleanup_avatar_file(new_filename)
+                    return self.write_json({'error': 'user not found'}, status=HTTPStatus.NOT_FOUND)
+                old_avatar = current['avatar_file']
+                conn.execute(
+                    'UPDATE users SET avatar_file = ?, avatar_updated_at = ? WHERE id = ?',
+                    (new_filename, updated_at, user['id']),
+                )
+                self.log_operation(
+                    conn,
+                    int(user['id']),
+                    int(user['id']),
+                    'user.avatar.update',
+                    'user',
+                    str(user['id']),
+                    {'filename': new_filename},
+                )
+                conn.commit()
+                updated = conn.execute(
+                    'SELECT id, name, nickname, role, avatar_file, avatar_updated_at FROM users WHERE id = ?',
+                    (user['id'],),
+                ).fetchone()
+        except OSError:
+            cleanup_avatar_file(new_filename)
+            return self.write_json({'error': 'avatar could not be saved'}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+        cleanup_avatar_file(old_avatar)
+        return self.write_json({'ok': True, 'user': public_user(updated)})
+
+    def handle_auth_delete_avatar(self):
+        user = self.require_user()
+        if not user:
+            return
+        old_avatar = ''
+        with get_db() as conn:
+            current = conn.execute(
+                'SELECT id, name, nickname, role, avatar_file, avatar_updated_at FROM users WHERE id = ?',
+                (user['id'],),
+            ).fetchone()
+            if not current:
+                return self.write_json({'error': 'user not found'}, status=HTTPStatus.NOT_FOUND)
+            old_avatar = current['avatar_file']
+            conn.execute(
+                "UPDATE users SET avatar_file = '', avatar_updated_at = '' WHERE id = ?",
+                (user['id'],),
+            )
+            self.log_operation(
+                conn,
+                int(user['id']),
+                int(user['id']),
+                'user.avatar.delete',
+                'user',
+                str(user['id']),
+                {'filename': old_avatar},
+            )
+            conn.commit()
+            updated = conn.execute(
+                'SELECT id, name, nickname, role, avatar_file, avatar_updated_at FROM users WHERE id = ?',
+                (user['id'],),
+            ).fetchone()
+        cleanup_avatar_file(old_avatar)
+        return self.write_json({'ok': True, 'user': public_user(updated)})
+
     def handle_auth_update_nickname(self):
         user = self.require_user()
         if not user:
@@ -2923,7 +3155,10 @@ class TodoHandler(SimpleHTTPRequestHandler):
             ).fetchone()
             if existing:
                 return self.write_json({'error': 'nickname already exists', 'message': '这个昵称已被使用。'}, status=HTTPStatus.CONFLICT)
-            current = conn.execute('SELECT id, name, nickname, role FROM users WHERE id = ?', (user['id'],)).fetchone()
+            current = conn.execute(
+                'SELECT id, name, nickname, role, avatar_file, avatar_updated_at FROM users WHERE id = ?',
+                (user['id'],),
+            ).fetchone()
             if not current:
                 return self.write_json({'error': 'user not found'}, status=HTTPStatus.NOT_FOUND)
             if current['nickname'] == nickname:
@@ -2942,7 +3177,10 @@ class TodoHandler(SimpleHTTPRequestHandler):
                 {'oldNickname': current['nickname'], 'newNickname': nickname},
             )
             conn.commit()
-            updated = conn.execute('SELECT id, name, nickname, role FROM users WHERE id = ?', (user['id'],)).fetchone()
+            updated = conn.execute(
+                'SELECT id, name, nickname, role, avatar_file, avatar_updated_at FROM users WHERE id = ?',
+                (user['id'],),
+            ).fetchone()
         return self.write_json({'ok': True, 'user': public_user(updated)})
 
     def handle_auth_update_password(self):

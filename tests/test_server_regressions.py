@@ -1,4 +1,5 @@
 import concurrent.futures
+import base64
 import json
 import sqlite3
 import tempfile
@@ -50,8 +51,25 @@ class ServerRegressionTests(unittest.TestCase):
             with urllib.request.urlopen(req, timeout=5) as response:
                 return response.status, json.loads(response.read().decode('utf-8') or '{}')
         except urllib.error.HTTPError as error:
-            body = error.read().decode('utf-8') or '{}'
+            try:
+                body = error.read().decode('utf-8') or '{}'
+            finally:
+                error.close()
             return error.code, json.loads(body)
+
+    def raw_request(self, method, path, token=None):
+        headers = {}
+        if token:
+            headers['Authorization'] = f'Bearer {token}'
+        req = urllib.request.Request(f'{self.base_url}{path}', method=method, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=5) as response:
+                return response.status, response.headers, response.read()
+        except urllib.error.HTTPError as error:
+            try:
+                return error.code, error.headers, error.read()
+            finally:
+                error.close()
 
     def register_user(self, nickname='student'):
         status, payload = self.request('POST', '/api/auth/register', {
@@ -75,6 +93,16 @@ class ServerRegressionTests(unittest.TestCase):
         }, token=token)
         self.assertEqual(status, 201, payload)
         return task_id
+
+    def avatar_payload(self, raw=None, filename='avatar.png', content_type='image/png'):
+        png = base64.b64decode(
+            'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII='
+        )
+        return {
+            'filename': filename,
+            'contentType': content_type,
+            'data': base64.b64encode(raw if raw is not None else png).decode('ascii'),
+        }
 
     def first_slot_for(self, user_id, date_key):
         conn = server.get_db()
@@ -209,6 +237,55 @@ class ServerRegressionTests(unittest.TestCase):
 
         self.assertEqual(status, 200, body)
         self.assertEqual(calls, ['secret123'])
+
+    def test_avatar_upload_static_access_replacement_and_delete(self):
+        token, user = self.register_user('avatar-user')
+        self.assertEqual(user.get('avatarUrl'), '')
+
+        status, body = self.request('POST', '/api/auth/avatar', self.avatar_payload(), token=token)
+        self.assertEqual(status, 200, body)
+        avatar_url = body['user']['avatarUrl']
+        self.assertTrue(avatar_url.startswith('/uploads/avatars/user-'))
+        first_filename = avatar_url.split('/uploads/avatars/', 1)[1].split('?', 1)[0]
+        first_path = server.avatar_dir() / first_filename
+        self.assertTrue(first_path.is_file())
+
+        status, headers, raw = self.raw_request('GET', avatar_url)
+        self.assertEqual(status, 200)
+        self.assertEqual(headers.get_content_type(), 'image/png')
+        self.assertTrue(raw.startswith(b'\x89PNG\r\n\x1a\n'))
+
+        status, body = self.request('POST', '/api/auth/avatar', self.avatar_payload(), token=token)
+        self.assertEqual(status, 200, body)
+        second_url = body['user']['avatarUrl']
+        second_filename = second_url.split('/uploads/avatars/', 1)[1].split('?', 1)[0]
+        self.assertNotEqual(first_filename, second_filename)
+        self.assertFalse(first_path.exists())
+        self.assertTrue((server.avatar_dir() / second_filename).is_file())
+
+        status, body = self.request('DELETE', '/api/auth/avatar', token=token)
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body['user']['avatarUrl'], '')
+        self.assertFalse((server.avatar_dir() / second_filename).exists())
+
+    def test_avatar_upload_rejects_unauthorized_and_invalid_images(self):
+        status, body = self.request('POST', '/api/auth/avatar', self.avatar_payload())
+        self.assertEqual(status, 401, body)
+
+        token, _ = self.register_user('avatar-invalid')
+        cases = [
+            self.avatar_payload(filename='avatar.jpg', content_type='image/png'),
+            self.avatar_payload(raw=b'not an image'),
+            self.avatar_payload(raw=b'\x89PNG\r\n\x1a\n' + (b'x' * server.MAX_AVATAR_BYTES)),
+        ]
+        for payload in cases:
+            with self.subTest(payload={key: payload[key] for key in ('filename', 'contentType')}):
+                status, body = self.request('POST', '/api/auth/avatar', payload, token=token)
+                self.assertEqual(status, 400, body)
+
+    def test_avatar_static_path_rejects_traversal(self):
+        status, _, _ = self.raw_request('GET', '/uploads/avatars/../todo-list.db')
+        self.assertEqual(status, 404)
 
     def test_frontend_uses_due_date_task_grouping(self):
         app_js = Path('app.js').read_text(encoding='utf-8')

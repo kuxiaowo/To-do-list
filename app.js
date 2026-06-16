@@ -15,6 +15,11 @@ const GUIDE_STORAGE_KEY = 'todo-list-guide-v1';
 const SIDEBAR_AUTO_COLLAPSE_WIDTH = 1100;
 const DATE_RANGE_EXPAND_MARGIN = 21;
 const HABIT_SYNC_FUTURE_DAYS = 90;
+const AVATAR_SOURCE_MAX_BYTES = 8 * 1024 * 1024;
+const AVATAR_UPLOAD_MAX_BYTES = 2 * 1024 * 1024;
+const AVATAR_OUTPUT_SIZE = 512;
+const AVATAR_CROP_SIZE = 260;
+const AVATAR_ALLOWED_TYPES = ['image/png', 'image/jpeg', 'image/webp'];
 // JavaScript Date months are zero-based, so 4 means May.
 const TIMELINE_START_MONTH = 4;
 const TIMELINE_START_DAY = 1;
@@ -151,6 +156,26 @@ createApp({
       nicknameForm: { nickname: '' },
       passwordDialogVisible: false,
       passwordForm: { currentPassword: '', newPassword: '', confirmPassword: '' },
+      avatarDialogVisible: false,
+      avatarLoading: false,
+      avatarSourceUrl: '',
+      avatarSourceName: '',
+      avatarSourceType: '',
+      avatarImage: null,
+      avatarCrop: {
+        x: 0,
+        y: 0,
+        scale: 1,
+        minScale: 1,
+        maxScale: 4,
+        dragging: false,
+        pointerId: null,
+        startX: 0,
+        startY: 0,
+        originX: 0,
+        originY: 0
+      },
+      avatarPreviewUrl: '',
       subjectTemplate: JSON.parse(JSON.stringify(DEFAULT_SUBJECT_TEMPLATE)),
       subjectTemplateDialogVisible: false,
       subjectTemplateDraft: [],
@@ -551,6 +576,19 @@ createApp({
       if (!this.currentUser) return '登';
       const source = this.currentUser.nickname || this.currentUser.name || '?';
       return source.trim().slice(0, 1).toUpperCase();
+    },
+    avatarImageUrl() {
+      return this.currentUser && this.currentUser.avatarUrl ? this.currentUser.avatarUrl : '';
+    },
+    avatarCropImageStyle() {
+      if (!this.avatarImage) return {};
+      const width = this.avatarImage.width * this.avatarCrop.scale;
+      const height = this.avatarImage.height * this.avatarCrop.scale;
+      return {
+        width: `${width}px`,
+        height: `${height}px`,
+        transform: `translate(${this.avatarCrop.x}px, ${this.avatarCrop.y}px)`
+      };
     },
     ddlTasks() {
       return this.sortedTasks.filter(task => task.dueAt && this.taskPool(task) === 'todo' && !task.completed);
@@ -1434,6 +1472,211 @@ createApp({
         ElementPlus.ElMessage.error(`密码更新失败：${error.message}`);
       }
     },
+    openAvatarDialog() {
+      if (!this.currentUser) return;
+      this.accountMenuOpen = false;
+      this.resetAvatarDraft();
+      this.avatarDialogVisible = true;
+    },
+    resetAvatarDraft() {
+      if (this.avatarSourceUrl) URL.revokeObjectURL(this.avatarSourceUrl);
+      this.avatarSourceUrl = '';
+      this.avatarSourceName = '';
+      this.avatarSourceType = '';
+      this.avatarImage = null;
+      this.avatarPreviewUrl = '';
+      this.avatarCrop = {
+        x: 0,
+        y: 0,
+        scale: 1,
+        minScale: 1,
+        maxScale: 4,
+        dragging: false,
+        pointerId: null,
+        startX: 0,
+        startY: 0,
+        originX: 0,
+        originY: 0
+      };
+      if (this.$refs.avatarFileInput) this.$refs.avatarFileInput.value = '';
+    },
+    chooseAvatarFile() {
+      if (this.$refs.avatarFileInput) this.$refs.avatarFileInput.click();
+    },
+    handleAvatarFileChange(event) {
+      const file = event.target.files && event.target.files[0];
+      if (!file) return;
+      if (!AVATAR_ALLOWED_TYPES.includes(file.type)) {
+        ElementPlus.ElMessage.warning('请选择 PNG、JPEG 或 WebP 图片。');
+        event.target.value = '';
+        return;
+      }
+      if (file.size > AVATAR_SOURCE_MAX_BYTES) {
+        ElementPlus.ElMessage.warning('原图不能超过 8MB。');
+        event.target.value = '';
+        return;
+      }
+      this.resetAvatarDraft();
+      this.avatarSourceName = file.name || 'avatar.png';
+      this.avatarSourceType = file.type;
+      const objectUrl = URL.createObjectURL(file);
+      const image = new Image();
+      image.onload = () => {
+        this.avatarSourceUrl = objectUrl;
+        this.avatarImage = {
+          element: image,
+          width: image.naturalWidth || image.width,
+          height: image.naturalHeight || image.height
+        };
+        this.initializeAvatarCrop();
+        this.updateAvatarPreview();
+      };
+      image.onerror = () => {
+        URL.revokeObjectURL(objectUrl);
+        ElementPlus.ElMessage.error('图片读取失败，请换一张图片。');
+      };
+      image.src = objectUrl;
+    },
+    initializeAvatarCrop() {
+      if (!this.avatarImage) return;
+      const minScale = Math.max(
+        AVATAR_CROP_SIZE / this.avatarImage.width,
+        AVATAR_CROP_SIZE / this.avatarImage.height
+      );
+      const scale = minScale;
+      this.avatarCrop.minScale = minScale;
+      this.avatarCrop.maxScale = minScale * 4;
+      this.avatarCrop.scale = scale;
+      this.avatarCrop.x = (AVATAR_CROP_SIZE - this.avatarImage.width * scale) / 2;
+      this.avatarCrop.y = (AVATAR_CROP_SIZE - this.avatarImage.height * scale) / 2;
+      this.constrainAvatarCrop();
+    },
+    constrainAvatarCrop() {
+      if (!this.avatarImage) return;
+      const width = this.avatarImage.width * this.avatarCrop.scale;
+      const height = this.avatarImage.height * this.avatarCrop.scale;
+      const minX = Math.min(0, AVATAR_CROP_SIZE - width);
+      const minY = Math.min(0, AVATAR_CROP_SIZE - height);
+      this.avatarCrop.x = Math.min(0, Math.max(minX, this.avatarCrop.x));
+      this.avatarCrop.y = Math.min(0, Math.max(minY, this.avatarCrop.y));
+    },
+    setAvatarScale(value, centerX = AVATAR_CROP_SIZE / 2, centerY = AVATAR_CROP_SIZE / 2) {
+      if (!this.avatarImage) return;
+      const oldScale = this.avatarCrop.scale;
+      const nextScale = Math.min(this.avatarCrop.maxScale, Math.max(this.avatarCrop.minScale, Number(value)));
+      if (!Number.isFinite(nextScale) || nextScale <= 0) return;
+      const imageCenterX = (centerX - this.avatarCrop.x) / oldScale;
+      const imageCenterY = (centerY - this.avatarCrop.y) / oldScale;
+      this.avatarCrop.scale = nextScale;
+      this.avatarCrop.x = centerX - imageCenterX * nextScale;
+      this.avatarCrop.y = centerY - imageCenterY * nextScale;
+      this.constrainAvatarCrop();
+      this.updateAvatarPreview();
+    },
+    handleAvatarWheel(event) {
+      if (!this.avatarImage) return;
+      const rect = event.currentTarget.getBoundingClientRect();
+      const centerX = event.clientX - rect.left;
+      const centerY = event.clientY - rect.top;
+      const factor = event.deltaY > 0 ? 0.94 : 1.06;
+      this.setAvatarScale(this.avatarCrop.scale * factor, centerX, centerY);
+    },
+    startAvatarDrag(event) {
+      if (!this.avatarImage || event.button > 0) return;
+      this.avatarCrop.dragging = true;
+      this.avatarCrop.pointerId = event.pointerId;
+      this.avatarCrop.startX = event.clientX;
+      this.avatarCrop.startY = event.clientY;
+      this.avatarCrop.originX = this.avatarCrop.x;
+      this.avatarCrop.originY = this.avatarCrop.y;
+      event.currentTarget.setPointerCapture(event.pointerId);
+    },
+    moveAvatarDrag(event) {
+      if (!this.avatarCrop.dragging || event.pointerId !== this.avatarCrop.pointerId) return;
+      this.avatarCrop.x = this.avatarCrop.originX + event.clientX - this.avatarCrop.startX;
+      this.avatarCrop.y = this.avatarCrop.originY + event.clientY - this.avatarCrop.startY;
+      this.constrainAvatarCrop();
+      this.updateAvatarPreview();
+    },
+    endAvatarDrag(event) {
+      if (event.pointerId !== this.avatarCrop.pointerId) return;
+      this.avatarCrop.dragging = false;
+      this.avatarCrop.pointerId = null;
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+    },
+    updateAvatarPreview() {
+      if (!this.avatarImage) {
+        this.avatarPreviewUrl = '';
+        return;
+      }
+      this.avatarPreviewUrl = this.renderAvatarCanvas(160).toDataURL('image/png');
+    },
+    renderAvatarCanvas(size) {
+      const canvas = document.createElement('canvas');
+      canvas.width = size;
+      canvas.height = size;
+      const ctx = canvas.getContext('2d');
+      const ratio = size / AVATAR_CROP_SIZE;
+      ctx.drawImage(
+        this.avatarImage.element,
+        this.avatarCrop.x * ratio,
+        this.avatarCrop.y * ratio,
+        this.avatarImage.width * this.avatarCrop.scale * ratio,
+        this.avatarImage.height * this.avatarCrop.scale * ratio
+      );
+      return canvas;
+    },
+    async saveAvatar() {
+      if (!this.currentUser) {
+        ElementPlus.ElMessage.warning('请先登录后再修改头像。');
+        return;
+      }
+      if (!this.avatarImage) {
+        ElementPlus.ElMessage.warning('请先选择一张图片。');
+        return;
+      }
+      this.avatarLoading = true;
+      try {
+        const dataUrl = this.renderAvatarCanvas(AVATAR_OUTPUT_SIZE).toDataURL('image/png');
+        const base64 = dataUrl.split(',', 2)[1] || '';
+        const byteLength = Math.ceil(base64.length * 3 / 4);
+        if (byteLength > AVATAR_UPLOAD_MAX_BYTES) {
+          throw new Error('裁剪后的头像不能超过 2MB。');
+        }
+        const payload = await this.apiJson(`${AUTH_API}/avatar`, {
+          method: 'POST',
+          body: JSON.stringify({
+            filename: 'avatar.png',
+            contentType: 'image/png',
+            data: base64
+          })
+        });
+        this.currentUser = payload.user;
+        this.avatarDialogVisible = false;
+        this.resetAvatarDraft();
+        ElementPlus.ElMessage.success('头像已更新。');
+      } catch (error) {
+        ElementPlus.ElMessage.error(`头像保存失败：${error.message}`);
+      } finally {
+        this.avatarLoading = false;
+      }
+    },
+    async deleteAvatar() {
+      if (!this.currentUser || !this.currentUser.avatarUrl) return;
+      this.avatarLoading = true;
+      try {
+        const payload = await this.apiJson(`${AUTH_API}/avatar`, { method: 'DELETE' });
+        this.currentUser = payload.user;
+        this.resetAvatarDraft();
+        ElementPlus.ElMessage.success('头像已移除。');
+      } catch (error) {
+        ElementPlus.ElMessage.error(`头像移除失败：${error.message}`);
+      } finally {
+        this.avatarLoading = false;
+      }
+    },
     async openFeedbackDialog() {
       if (!this.currentUser) {
         ElementPlus.ElMessage.warning('请先登录后再提交反馈。');
@@ -1556,6 +1799,8 @@ createApp({
       this.nicknameForm.nickname = '';
       this.passwordDialogVisible = false;
       this.passwordForm = { currentPassword: '', newPassword: '', confirmPassword: '' };
+      this.avatarDialogVisible = false;
+      this.resetAvatarDraft();
       this.resetSubjectTemplateState();
       this.feedbackDialogVisible = false;
       this.feedbackForm.content = '';
