@@ -324,6 +324,46 @@ body {
   gap: 10px;
 }
 
+.auth-title-main {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.account-profile-avatar-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+
+.account-profile-avatar {
+  width: 56px;
+  height: 56px;
+  border-radius: 999px;
+  border: 1px solid rgba(99, 102, 241, 0.28);
+  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+  color: #fff;
+  font-weight: 900;
+  font-size: 1.15rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 10px 22px rgba(79, 70, 229, 0.2);
+  cursor: pointer;
+  overflow: hidden;
+  padding: 0;
+}
+
+.account-avatar-hint {
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
 .auth-title {
   font-weight: 800;
 }
@@ -507,6 +547,89 @@ body {
   flex-direction: column;
   gap: 10px;
   width: 100%;
+}
+
+.avatar-color-panel {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.avatar-color-title {
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 700;
+  text-align: center;
+}
+
+.avatar-color-picker-row {
+  display: grid;
+  grid-template-columns: 48px 1fr;
+  gap: 10px;
+  align-items: center;
+}
+
+.avatar-color-picker {
+  width: 48px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.avatar-color-value {
+  color: var(--text);
+  font-size: 0.86rem;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+.avatar-rgb-fields {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+}
+
+.avatar-rgb-fields label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.avatar-rgb-fields input {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 5px 4px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 0.82rem;
+}
+
+.avatar-color-options {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 8px;
+}
+
+.avatar-color-swatch {
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  border: 2px solid rgba(255, 255, 255, 0.9);
+  box-shadow: 0 0 0 1px var(--line), 0 6px 14px rgba(15, 23, 42, 0.12);
+  cursor: pointer;
+}
+
+.avatar-color-swatch.active {
+  box-shadow: 0 0 0 3px var(--brand-line), 0 8px 18px rgba(15, 23, 42, 0.18);
 }
 
 .avatar-editor-actions .el-button {

@@ -38,6 +38,7 @@ AVATAR_CONTENT_TYPES = {
     'image/webp': 'webp',
 }
 AVATAR_EXTENSIONS = {'png', 'jpg', 'jpeg', 'webp'}
+DEFAULT_AVATAR_COLOR = '#6366f1'
 STATIC_FILE_PATHS = {'/index.html', '/app.js', '/style.css'}
 STATIC_DIRECTORY_PREFIXES = ('/vendor/', '/assets/')
 DEFAULT_SUBJECTS = [
@@ -141,6 +142,7 @@ def init_db() -> None:
                 role TEXT NOT NULL DEFAULT 'student',
                 avatar_file TEXT NOT NULL DEFAULT '',
                 avatar_updated_at TEXT NOT NULL DEFAULT '',
+                avatar_color TEXT NOT NULL DEFAULT '#6366f1',
                 created_at TEXT NOT NULL
             )
             '''
@@ -366,6 +368,8 @@ def init_db() -> None:
             conn.execute("ALTER TABLE users ADD COLUMN avatar_file TEXT NOT NULL DEFAULT ''")
         if 'avatar_updated_at' not in user_columns:
             conn.execute("ALTER TABLE users ADD COLUMN avatar_updated_at TEXT NOT NULL DEFAULT ''")
+        if 'avatar_color' not in user_columns:
+            conn.execute(f"ALTER TABLE users ADD COLUMN avatar_color TEXT NOT NULL DEFAULT '{DEFAULT_AVATAR_COLOR}'")
         task_columns = {row[1] for row in conn.execute('PRAGMA table_info(tasks)').fetchall()}
         if 'subject' not in task_columns:
             conn.execute("ALTER TABLE tasks ADD COLUMN subject TEXT NOT NULL DEFAULT ''")
@@ -450,12 +454,14 @@ def public_task(row: sqlite3.Row) -> dict:
 def public_user(row: sqlite3.Row | dict) -> dict:
     avatar_file = row_value(row, 'avatar_file', '')
     avatar_updated_at = row_value(row, 'avatar_updated_at', '')
+    avatar_color = normalize_avatar_color(row_value(row, 'avatar_color', DEFAULT_AVATAR_COLOR))
     return {
         'id': row['id'],
         'name': row['name'],
         'nickname': row['nickname'],
         'role': row['role'],
         'avatarUrl': avatar_url(avatar_file, avatar_updated_at),
+        'avatarColor': avatar_color,
     }
 
 
@@ -472,6 +478,18 @@ def avatar_url(avatar_file: str, avatar_updated_at: str = '') -> str:
     version = str(avatar_updated_at or '').strip()
     suffix = f'?v={version}' if version else ''
     return f'/uploads/avatars/{avatar_file}{suffix}'
+
+
+def normalize_avatar_color(value: str) -> str:
+    color = str(value or '').strip().lower()
+    return color if is_valid_avatar_color(color) else DEFAULT_AVATAR_COLOR
+
+
+def is_valid_avatar_color(value: str) -> bool:
+    color = str(value or '').strip().lower()
+    if len(color) != 7 or not color.startswith('#'):
+        return False
+    return all(char in '0123456789abcdef' for char in color[1:])
 
 
 def is_safe_avatar_filename(filename: str) -> bool:
@@ -1012,6 +1030,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return self.handle_auth_update_nickname()
         if path == '/api/auth/password':
             return self.handle_auth_update_password()
+        if path == '/api/auth/avatar-color':
+            return self.handle_auth_update_avatar_color()
         if path == '/api/admin/feedback-settings':
             return self.handle_admin_update_feedback_settings()
         if path.startswith('/api/admin/feedback/') and path.endswith('/reply'):
@@ -1093,7 +1113,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
             row = conn.execute(
                 '''
                 SELECT users.id, users.name, users.nickname, users.role,
-                       users.avatar_file, users.avatar_updated_at, sessions.expires_at
+                       users.avatar_file, users.avatar_updated_at, users.avatar_color, sessions.expires_at
                 FROM sessions
                 JOIN users ON users.id = sessions.user_id
                 WHERE sessions.token = ?
@@ -2981,7 +3001,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
             except sqlite3.IntegrityError:
                 return self.write_json({'error': 'nickname already exists'}, status=HTTPStatus.CONFLICT)
             user = conn.execute(
-                'SELECT id, name, nickname, role, avatar_file, avatar_updated_at FROM users WHERE id = ?',
+                'SELECT id, name, nickname, role, avatar_file, avatar_updated_at, avatar_color FROM users WHERE id = ?',
                 (user_id,),
             ).fetchone()
         return self.issue_session_response(user)
@@ -3070,7 +3090,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
             target_path.write_bytes(raw)
             with get_db() as conn:
                 current = conn.execute(
-                    'SELECT id, name, nickname, role, avatar_file, avatar_updated_at FROM users WHERE id = ?',
+                    'SELECT id, name, nickname, role, avatar_file, avatar_updated_at, avatar_color FROM users WHERE id = ?',
                     (user['id'],),
                 ).fetchone()
                 if not current:
@@ -3092,7 +3112,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
                 )
                 conn.commit()
                 updated = conn.execute(
-                    'SELECT id, name, nickname, role, avatar_file, avatar_updated_at FROM users WHERE id = ?',
+                    'SELECT id, name, nickname, role, avatar_file, avatar_updated_at, avatar_color FROM users WHERE id = ?',
                     (user['id'],),
                 ).fetchone()
         except OSError:
@@ -3108,7 +3128,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
         old_avatar = ''
         with get_db() as conn:
             current = conn.execute(
-                'SELECT id, name, nickname, role, avatar_file, avatar_updated_at FROM users WHERE id = ?',
+                'SELECT id, name, nickname, role, avatar_file, avatar_updated_at, avatar_color FROM users WHERE id = ?',
                 (user['id'],),
             ).fetchone()
             if not current:
@@ -3129,10 +3149,46 @@ class TodoHandler(SimpleHTTPRequestHandler):
             )
             conn.commit()
             updated = conn.execute(
-                'SELECT id, name, nickname, role, avatar_file, avatar_updated_at FROM users WHERE id = ?',
+                'SELECT id, name, nickname, role, avatar_file, avatar_updated_at, avatar_color FROM users WHERE id = ?',
                 (user['id'],),
             ).fetchone()
         cleanup_avatar_file(old_avatar)
+        return self.write_json({'ok': True, 'user': public_user(updated)})
+
+    def handle_auth_update_avatar_color(self):
+        user = self.require_user()
+        if not user:
+            return
+        payload = self.read_json_body()
+        if payload is None:
+            return
+        raw_color = str(payload.get('color', '')).strip().lower()
+        if not is_valid_avatar_color(raw_color):
+            return self.write_json({'error': 'avatar color is not allowed'}, status=HTTPStatus.BAD_REQUEST)
+        color = raw_color
+        with get_db() as conn:
+            current = conn.execute(
+                'SELECT id, name, nickname, role, avatar_file, avatar_updated_at, avatar_color FROM users WHERE id = ?',
+                (user['id'],),
+            ).fetchone()
+            if not current:
+                return self.write_json({'error': 'user not found'}, status=HTTPStatus.NOT_FOUND)
+            if normalize_avatar_color(current['avatar_color']) != color:
+                conn.execute('UPDATE users SET avatar_color = ? WHERE id = ?', (color, user['id']))
+                self.log_operation(
+                    conn,
+                    int(user['id']),
+                    int(user['id']),
+                    'user.avatar_color.update',
+                    'user',
+                    str(user['id']),
+                    {'color': color},
+                )
+                conn.commit()
+            updated = conn.execute(
+                'SELECT id, name, nickname, role, avatar_file, avatar_updated_at, avatar_color FROM users WHERE id = ?',
+                (user['id'],),
+            ).fetchone()
         return self.write_json({'ok': True, 'user': public_user(updated)})
 
     def handle_auth_update_nickname(self):
@@ -3156,7 +3212,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
             if existing:
                 return self.write_json({'error': 'nickname already exists', 'message': '这个昵称已被使用。'}, status=HTTPStatus.CONFLICT)
             current = conn.execute(
-                'SELECT id, name, nickname, role, avatar_file, avatar_updated_at FROM users WHERE id = ?',
+                'SELECT id, name, nickname, role, avatar_file, avatar_updated_at, avatar_color FROM users WHERE id = ?',
                 (user['id'],),
             ).fetchone()
             if not current:
@@ -3178,7 +3234,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
             )
             conn.commit()
             updated = conn.execute(
-                'SELECT id, name, nickname, role, avatar_file, avatar_updated_at FROM users WHERE id = ?',
+                'SELECT id, name, nickname, role, avatar_file, avatar_updated_at, avatar_color FROM users WHERE id = ?',
                 (user['id'],),
             ).fetchone()
         return self.write_json({'ok': True, 'user': public_user(updated)})

@@ -20,6 +20,18 @@ const AVATAR_UPLOAD_MAX_BYTES = 2 * 1024 * 1024;
 const AVATAR_OUTPUT_SIZE = 512;
 const AVATAR_CROP_SIZE = 260;
 const AVATAR_ALLOWED_TYPES = ['image/png', 'image/jpeg', 'image/webp'];
+const DEFAULT_AVATAR_COLOR = '#6366f1';
+const AVATAR_QUICK_COLORS = [
+  '#6366f1',
+  '#0ea5e9',
+  '#14b8a6',
+  '#22c55e',
+  '#f59e0b',
+  '#ef4444',
+  '#ec4899',
+  '#8b5cf6',
+  '#64748b'
+];
 // JavaScript Date months are zero-based, so 4 means May.
 const TIMELINE_START_MONTH = 4;
 const TIMELINE_START_DAY = 1;
@@ -176,6 +188,7 @@ createApp({
         originY: 0
       },
       avatarPreviewUrl: '',
+      avatarColorDraft: DEFAULT_AVATAR_COLOR,
       subjectTemplate: JSON.parse(JSON.stringify(DEFAULT_SUBJECT_TEMPLATE)),
       subjectTemplateDialogVisible: false,
       subjectTemplateDraft: [],
@@ -579,6 +592,36 @@ createApp({
     },
     avatarImageUrl() {
       return this.currentUser && this.currentUser.avatarUrl ? this.currentUser.avatarUrl : '';
+    },
+    avatarQuickColors() {
+      return AVATAR_QUICK_COLORS;
+    },
+    avatarColor() {
+      const color = this.currentUser && this.currentUser.avatarColor ? String(this.currentUser.avatarColor).toLowerCase() : '';
+      return this.isValidHexColor(color) ? color : DEFAULT_AVATAR_COLOR;
+    },
+    avatarFallbackStyle() {
+      return { background: this.avatarColor };
+    },
+    avatarDraftColor() {
+      return this.isValidHexColor(this.avatarColorDraft) ? this.avatarColorDraft.toLowerCase() : this.avatarColor;
+    },
+    avatarDraftFallbackStyle() {
+      return { background: this.avatarDraftColor };
+    },
+    avatarHasPendingColor() {
+      return this.avatarDraftColor !== this.avatarColor;
+    },
+    avatarCanSave() {
+      return !!this.avatarImage || this.avatarHasPendingColor;
+    },
+    avatarDraftRgb() {
+      const color = this.avatarDraftColor.slice(1);
+      return {
+        r: parseInt(color.slice(0, 2), 16),
+        g: parseInt(color.slice(2, 4), 16),
+        b: parseInt(color.slice(4, 6), 16)
+      };
     },
     avatarCropImageStyle() {
       if (!this.avatarImage) return {};
@@ -1498,6 +1541,7 @@ createApp({
         originX: 0,
         originY: 0
       };
+      this.avatarColorDraft = this.avatarColor;
       if (this.$refs.avatarFileInput) this.$refs.avatarFileInput.value = '';
     },
     chooseAvatarFile() {
@@ -1516,7 +1560,9 @@ createApp({
         event.target.value = '';
         return;
       }
+      const colorDraft = this.avatarDraftColor;
       this.resetAvatarDraft();
+      this.avatarColorDraft = colorDraft;
       this.avatarSourceName = file.name || 'avatar.png';
       this.avatarSourceType = file.type;
       const objectUrl = URL.createObjectURL(file);
@@ -1628,35 +1674,61 @@ createApp({
       );
       return canvas;
     },
+    isValidHexColor(color) {
+      return /^#[0-9a-f]{6}$/i.test(String(color || '').trim());
+    },
+    setAvatarColorDraft(color) {
+      const nextColor = String(color || '').trim().toLowerCase();
+      if (!this.isValidHexColor(nextColor)) return;
+      this.avatarColorDraft = nextColor;
+    },
+    setAvatarRgbPart(part, value) {
+      const channel = Math.min(255, Math.max(0, Number.parseInt(value, 10) || 0));
+      const rgb = this.avatarDraftRgb;
+      rgb[part] = channel;
+      const hex = ['r', 'g', 'b']
+        .map(key => rgb[key].toString(16).padStart(2, '0'))
+        .join('');
+      this.avatarColorDraft = `#${hex}`;
+    },
     async saveAvatar() {
       if (!this.currentUser) {
         ElementPlus.ElMessage.warning('请先登录后再修改头像。');
         return;
       }
-      if (!this.avatarImage) {
-        ElementPlus.ElMessage.warning('请先选择一张图片。');
+      if (!this.avatarCanSave) {
+        ElementPlus.ElMessage.warning('请先选择图片或调整背景颜色。');
         return;
       }
       this.avatarLoading = true;
       try {
-        const dataUrl = this.renderAvatarCanvas(AVATAR_OUTPUT_SIZE).toDataURL('image/png');
-        const base64 = dataUrl.split(',', 2)[1] || '';
-        const byteLength = Math.ceil(base64.length * 3 / 4);
-        if (byteLength > AVATAR_UPLOAD_MAX_BYTES) {
-          throw new Error('裁剪后的头像不能超过 2MB。');
+        if (this.avatarImage) {
+          const dataUrl = this.renderAvatarCanvas(AVATAR_OUTPUT_SIZE).toDataURL('image/png');
+          const base64 = dataUrl.split(',', 2)[1] || '';
+          const byteLength = Math.ceil(base64.length * 3 / 4);
+          if (byteLength > AVATAR_UPLOAD_MAX_BYTES) {
+            throw new Error('裁剪后的头像不能超过 2MB。');
+          }
+          const payload = await this.apiJson(`${AUTH_API}/avatar`, {
+            method: 'POST',
+            body: JSON.stringify({
+              filename: 'avatar.png',
+              contentType: 'image/png',
+              data: base64
+            })
+          });
+          this.currentUser = payload.user;
         }
-        const payload = await this.apiJson(`${AUTH_API}/avatar`, {
-          method: 'POST',
-          body: JSON.stringify({
-            filename: 'avatar.png',
-            contentType: 'image/png',
-            data: base64
-          })
-        });
-        this.currentUser = payload.user;
+        if (this.avatarHasPendingColor) {
+          const payload = await this.apiJson(`${AUTH_API}/avatar-color`, {
+            method: 'PUT',
+            body: JSON.stringify({ color: this.avatarDraftColor })
+          });
+          this.currentUser = payload.user;
+        }
         this.avatarDialogVisible = false;
         this.resetAvatarDraft();
-        ElementPlus.ElMessage.success('头像已更新。');
+        ElementPlus.ElMessage.success('头像设置已保存。');
       } catch (error) {
         ElementPlus.ElMessage.error(`头像保存失败：${error.message}`);
       } finally {

@@ -283,6 +283,22 @@ class ServerRegressionTests(unittest.TestCase):
                 status, body = self.request('POST', '/api/auth/avatar', payload, token=token)
                 self.assertEqual(status, 400, body)
 
+    def test_avatar_color_updates_for_text_avatar(self):
+        token, user = self.register_user('avatar-color')
+        self.assertEqual(user.get('avatarColor'), server.DEFAULT_AVATAR_COLOR)
+
+        status, body = self.request('PUT', '/api/auth/avatar-color', {'color': '#123abc'}, token=token)
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body['user']['avatarColor'], '#123abc')
+        self.assertEqual(body['user']['avatarUrl'], '')
+
+        status, body = self.request('GET', '/api/auth/me', token=token)
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body['user']['avatarColor'], '#123abc')
+
+        status, body = self.request('PUT', '/api/auth/avatar-color', {'color': 'javascript:bad'}, token=token)
+        self.assertEqual(status, 400, body)
+
     def test_avatar_static_path_rejects_traversal(self):
         status, _, _ = self.raw_request('GET', '/uploads/avatars/../todo-list.db')
         self.assertEqual(status, 404)

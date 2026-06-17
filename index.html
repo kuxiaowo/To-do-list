@@ -172,6 +172,7 @@
                 class="avatar-button"
                 :class="{ 'is-guest': !currentUser }"
                 :title="currentUser ? `账号：${currentUser.nickname}` : '登录 / 注册'"
+                :style="currentUser && !avatarImageUrl ? avatarFallbackStyle : null"
                 @click="accountMenuOpen = !accountMenuOpen"
               >
                 <img v-if="avatarImageUrl" :src="avatarImageUrl" alt="" class="avatar-button-image">
@@ -180,17 +181,31 @@
 
               <div v-if="accountMenuOpen" class="auth-card">
                 <div class="auth-title-row">
-                  <div>
-                    <div class="auth-title">账号</div>
-                    <div class="auth-status" v-if="currentUser">已登录：{{ currentUser.nickname }}</div>
-                    <div class="auth-status" v-else>未登录：可打开页面，但不能新增、编辑、删除或保存任务。</div>
+                  <div class="auth-title-main">
+                    <div v-if="currentUser" class="account-profile-avatar-wrap">
+                      <button
+                        class="account-profile-avatar"
+                        type="button"
+                        title="修改头像"
+                        :style="avatarFallbackStyle"
+                        @click="openAvatarDialog"
+                      >
+                        <img v-if="avatarImageUrl" :src="avatarImageUrl" alt="" class="avatar-button-image">
+                        <span v-else>{{ avatarText }}</span>
+                      </button>
+                      <div class="account-avatar-hint">点击修改头像</div>
+                    </div>
+                    <div>
+                      <div class="auth-title">账号</div>
+                      <div class="auth-status" v-if="currentUser">已登录：{{ currentUser.nickname }}</div>
+                      <div class="auth-status" v-else>未登录：可打开页面，但不能新增、编辑、删除或保存任务。</div>
+                    </div>
                   </div>
                   <el-button v-if="currentUser" plain size="small" @click="logout">退出</el-button>
                 </div>
 
                 <div v-if="currentUser" class="auth-form">
                   <div class="account-setting-actions">
-                    <el-button text @click="openAvatarDialog">修改头像</el-button>
                     <el-button text @click="openPasswordDialog">修改密码</el-button>
                     <el-button text @click="openNicknameDialog">修改昵称</el-button>
                   </div>
@@ -1136,7 +1151,7 @@
                 :style="avatarCropImageStyle"
                 draggable="false"
               >
-              <div v-else class="avatar-empty-preview">
+              <div v-else class="avatar-empty-preview" :style="avatarDraftFallbackStyle">
                 <img v-if="avatarImageUrl" :src="avatarImageUrl" alt="">
                 <span v-else>{{ avatarText }}</span>
               </div>
@@ -1153,10 +1168,48 @@
             ></el-slider>
           </div>
           <div class="avatar-preview-column">
-            <div class="avatar-preview">
+            <div class="avatar-preview" :style="!avatarPreviewUrl && !avatarImageUrl ? avatarDraftFallbackStyle : null">
               <img v-if="avatarPreviewUrl" :src="avatarPreviewUrl" alt="">
               <img v-else-if="avatarImageUrl" :src="avatarImageUrl" alt="">
               <span v-else>{{ avatarText }}</span>
+            </div>
+            <div class="avatar-color-panel">
+              <div class="avatar-color-title">背景颜色</div>
+              <div class="avatar-color-picker-row">
+                <input
+                  class="avatar-color-picker"
+                  type="color"
+                  :value="avatarDraftColor"
+                  @input="setAvatarColorDraft($event.target.value)"
+                >
+                <span class="avatar-color-value">{{ avatarDraftColor.toUpperCase() }}</span>
+              </div>
+              <div class="avatar-rgb-fields">
+                <label>
+                  R
+                  <input type="number" min="0" max="255" :value="avatarDraftRgb.r" @input="setAvatarRgbPart('r', $event.target.value)">
+                </label>
+                <label>
+                  G
+                  <input type="number" min="0" max="255" :value="avatarDraftRgb.g" @input="setAvatarRgbPart('g', $event.target.value)">
+                </label>
+                <label>
+                  B
+                  <input type="number" min="0" max="255" :value="avatarDraftRgb.b" @input="setAvatarRgbPart('b', $event.target.value)">
+                </label>
+              </div>
+              <div class="avatar-color-options">
+                <button
+                  v-for="color in avatarQuickColors"
+                  :key="color"
+                  class="avatar-color-swatch"
+                  :class="{ active: color === avatarDraftColor }"
+                  :style="{ background: color }"
+                  type="button"
+                  :title="color"
+                  @click="setAvatarColorDraft(color)"
+                ></button>
+              </div>
             </div>
             <div class="avatar-editor-actions">
               <el-button plain @click="chooseAvatarFile">选择图片</el-button>
@@ -1171,7 +1224,7 @@
           <div></div>
           <div class="right-actions">
             <el-button @click="avatarDialogVisible = false">取消</el-button>
-            <el-button type="primary" :disabled="!avatarImage" :loading="avatarLoading" @click="saveAvatar">保存头像</el-button>
+            <el-button type="primary" :disabled="!avatarCanSave" :loading="avatarLoading" @click="saveAvatar">保存</el-button>
           </div>
         </div>
       </template>
