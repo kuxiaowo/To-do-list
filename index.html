@@ -1059,6 +1059,183 @@
       <span v-if="scheduleDragPreview.completed" class="schedule-check">✓</span>
     </div>
 
+    <div v-if="!adminMode" class="ai-assistant">
+      <button
+        class="ai-fab"
+        :class="{ 'is-open': aiChatOpen }"
+        type="button"
+        title="AI 助手"
+        :disabled="!currentUser"
+        @click="toggleAiChat"
+      >
+        AI
+      </button>
+      <section v-if="aiChatOpen" class="ai-chat-panel" aria-label="AI 助手聊天框">
+        <header class="ai-chat-header">
+          <div class="ai-chat-heading">
+            <div class="ai-chat-title">AI 助手</div>
+            <div class="ai-chat-subtitle">生成任务指令后需要你逐条批准</div>
+          </div>
+          <div class="ai-chat-header-actions">
+            <el-popover
+              placement="top-end"
+              trigger="click"
+              width="320"
+              popper-class="ai-help-popover"
+            >
+              <template #reference>
+                <button class="ai-help-button" type="button" title="AI 规则和信息范围">?</button>
+              </template>
+              <div class="ai-help-content">
+                <div class="ai-help-title">AI 规则和信息范围</div>
+                <ul>
+                  <li>只会生成“创建任务”和“修改任务详情”两类指令。</li>
+                  <li>不会删除任务、标记完成、修改每日安排、时间格子或习惯。</li>
+                  <li>所有指令必须等本轮输出结束后，在卡片列表里单独批准才会执行。</li>
+                  <li>会读取本轮请求、最近最多 20 条聊天/审批结果、当前时间/时区，以及最多 200 条未完成时间线任务。</li>
+                  <li>任务字段包括 id、标题、科目、截止时间、优先级、备注、状态和任务池。</li>
+                  <li>未完成时间线任务超过 200 条时，只给前 200 条详情，同时告诉 AI 有截断；看不到目标时应追问。</li>
+                  <li>不会发送 API Key、登录 token、密码、后台日志或其他用户数据。</li>
+                </ul>
+              </div>
+            </el-popover>
+            <el-button text @click="aiChatOpen = false">收起</el-button>
+          </div>
+        </header>
+        <div ref="aiChatBody" class="ai-chat-body">
+          <div v-if="!aiChatMessages.length" class="ai-chat-empty">
+            例如：创建一个数学作业，明天 23:00 截止；或者把物理作业备注改成复习错题。
+          </div>
+          <div
+            v-for="(message, index) in aiChatMessages"
+            :key="index"
+            class="ai-chat-message"
+            :class="[`is-${message.role}`, { 'is-approval-result': message.kind === 'approval-result' }]"
+          >
+            <div class="ai-chat-bubble">{{ message.content }}</div>
+          </div>
+          <div v-if="aiChatLoading && (!aiChatMessages.length || !aiChatMessages[aiChatMessages.length - 1].content)" class="ai-chat-message is-assistant">
+            <div class="ai-chat-bubble">正在整理指令……</div>
+          </div>
+        </div>
+        <footer class="ai-chat-footer">
+          <el-input
+            ref="aiChatInput"
+            v-model="aiChatInput"
+            type="textarea"
+            :rows="3"
+            maxlength="2000"
+            show-word-limit
+            resize="none"
+            placeholder="说出你想创建或修改的任务，Enter 发送，Shift + Enter 换行"
+            @keydown="handleAiChatKeydown"
+          ></el-input>
+          <div class="ai-chat-actions">
+            <el-button :disabled="aiChatLoading || !aiChatInput.trim()" type="primary" @click="sendAiMessage">发送</el-button>
+          </div>
+        </footer>
+      </section>
+    </div>
+
+    <el-dialog
+      v-model="aiApprovalVisible"
+      title="审批 AI 指令"
+      width="min(94vw, 820px)"
+      class="ai-approval-dialog"
+      :show-close="false"
+      :close-on-click-modal="false"
+      :close-on-press-escape="false"
+    >
+      <div v-if="aiPendingActions.length" class="ai-approval">
+        <div class="ai-approval-progress">
+          <span>{{ aiApprovalProgressText() }}</span>
+          <el-tag type="info">{{ aiPendingActions.length }} 条指令</el-tag>
+        </div>
+        <div class="ai-approval-card-list">
+          <article
+            v-for="(action, index) in aiPendingActions"
+            :key="action.id"
+            class="ai-approval-card"
+            :class="`status-${aiActionStatus(action)}`"
+          >
+            <header class="ai-approval-card-header">
+              <div>
+                <div class="ai-approval-card-kicker">
+                  <el-tag size="small">{{ aiActionTypeLabel(action) }}</el-tag>
+                  <span>指令 {{ index + 1 }}</span>
+                </div>
+                <h3>{{ action.summary }}</h3>
+                <p v-if="action.type === 'update_task'">目标任务：{{ action.targetTaskTitle }}</p>
+              </div>
+              <el-tag :type="aiActionStatusType(action)">{{ aiActionStatusLabel(action) }}</el-tag>
+            </header>
+
+            <el-form label-position="top" class="ai-approval-form" @submit.prevent>
+              <el-form-item v-for="field in aiEditableFields()" :key="field.field" :label="field.label">
+                <template v-if="field.field === 'priority'">
+                  <el-select v-model="action.draft.priority" :class="{ 'ai-edited-field': aiActionFieldChanged(action, field.field) }" :disabled="aiActionLocked(action)" style="width: 100%;">
+                    <el-option label="高 / 红" value="high"></el-option>
+                    <el-option label="中 / 黄" value="medium"></el-option>
+                    <el-option label="低 / 绿" value="low"></el-option>
+                  </el-select>
+                </template>
+                <template v-else-if="field.field === 'note'">
+                  <el-input
+                    v-model="action.draft.note"
+                    :class="{ 'ai-edited-field': aiActionFieldChanged(action, field.field) }"
+                    type="textarea"
+                    :rows="2"
+                    resize="none"
+                    :disabled="aiActionLocked(action)"
+                    placeholder="备注"
+                  ></el-input>
+                </template>
+                <template v-else>
+                  <el-input
+                    v-model="action.draft[field.field]"
+                    :class="{ 'ai-edited-field': aiActionFieldChanged(action, field.field) }"
+                    :disabled="aiActionLocked(action)"
+                    :maxlength="field.field === 'title' ? 80 : (field.field === 'subject' ? 40 : undefined)"
+                    :show-word-limit="field.field === 'title' || field.field === 'subject'"
+                    :placeholder="field.field === 'dueAt' ? '留空，或 YYYY-MM-DDTHH:mm:00' : field.label"
+                  ></el-input>
+                </template>
+                <div v-if="action.type === 'update_task'" class="ai-field-before">
+                  原值：{{ aiFormatFieldValue(field.field, (action.before || {})[field.field] || '') }}
+                </div>
+              </el-form-item>
+            </el-form>
+
+            <div v-if="aiActionResult(action) && aiActionResult(action).message" class="ai-approval-result-line">
+              {{ aiActionResult(action).message }}
+            </div>
+
+            <footer class="ai-approval-card-actions">
+              <el-button
+                :disabled="aiActionLocked(action) || !!aiExecutingActionId"
+                @click="skipAiAction(action)"
+              >跳过</el-button>
+              <el-button
+                type="primary"
+                :loading="aiExecutingActionId === action.id"
+                :disabled="aiActionStatus(action) === 'executed' || aiActionStatus(action) === 'skipped' || (!!aiExecutingActionId && aiExecutingActionId !== action.id)"
+                @click="approveAiAction(action)"
+              >批准并执行</el-button>
+            </footer>
+          </article>
+        </div>
+      </div>
+      <template #footer>
+        <div class="dialog-footer">
+          <div class="left-actions">
+          </div>
+          <div class="right-actions">
+            <el-button :disabled="!!aiExecutingActionId" @click="closeAiApproval">完成审批</el-button>
+          </div>
+        </div>
+      </template>
+    </el-dialog>
+
     <el-dialog
       v-model="nicknameDialogVisible"
       title="修改昵称"

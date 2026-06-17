@@ -1,6 +1,7 @@
 import concurrent.futures
 import base64
 import json
+import os
 import sqlite3
 import tempfile
 import threading
@@ -71,6 +72,36 @@ class ServerRegressionTests(unittest.TestCase):
             finally:
                 error.close()
 
+    def stream_request(self, path, payload, token=None):
+        headers = {'Content-Type': 'application/json'}
+        if token:
+            headers['Authorization'] = f'Bearer {token}'
+        data = json.dumps(payload).encode('utf-8')
+        req = urllib.request.Request(f'{self.base_url}{path}', data=data, method='POST', headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=5) as response:
+                return response.status, response.headers, response.read().decode('utf-8')
+        except urllib.error.HTTPError as error:
+            try:
+                body = error.read().decode('utf-8') or '{}'
+                return error.code, error.headers, body
+            finally:
+                error.close()
+
+    def parse_sse(self, raw):
+        events = []
+        for block in raw.strip().split('\n\n'):
+            event = 'message'
+            data_lines = []
+            for line in block.splitlines():
+                if line.startswith('event:'):
+                    event = line.split(':', 1)[1].strip()
+                elif line.startswith('data:'):
+                    data_lines.append(line.split(':', 1)[1].strip())
+            if data_lines:
+                events.append((event, json.loads('\n'.join(data_lines))))
+        return events
+
     def register_user(self, nickname='student'):
         status, payload = self.request('POST', '/api/auth/register', {
             'name': 'Student',
@@ -93,6 +124,77 @@ class ServerRegressionTests(unittest.TestCase):
         }, token=token)
         self.assertEqual(status, 201, payload)
         return task_id
+
+    def test_ai_context_uses_incomplete_timeline_tasks_and_reports_truncation(self):
+        limit = server.AI_CONTEXT_TASK_LIMIT
+        tasks = [
+            {
+                'id': 'task-completed',
+                'title': 'Completed task',
+                'subject': 'Math',
+                'dueAt': '',
+                'priority': 'medium',
+                'note': '',
+                'completed': True,
+                'pool': 'todo',
+            },
+            {
+                'id': 'task-schedule',
+                'title': 'Schedule task',
+                'subject': 'Math',
+                'dueAt': '',
+                'priority': 'medium',
+                'note': '',
+                'completed': False,
+                'pool': 'schedule',
+            },
+            {
+                'id': 'task-habit',
+                'title': 'Habit task',
+                'subject': 'Math',
+                'dueAt': '',
+                'priority': 'medium',
+                'note': '',
+                'completed': False,
+                'pool': 'habit',
+            },
+            {
+                'id': 'task-arrangement',
+                'title': 'Arrangement task',
+                'subject': 'Math',
+                'dueAt': '',
+                'priority': 'medium',
+                'note': '',
+                'completed': False,
+                'pool': 'arrangement',
+            },
+        ]
+        tasks.extend({
+            'id': f'task-{index}',
+            'title': f'Task {index}',
+            'subject': 'Math',
+            'dueAt': '',
+            'priority': 'medium',
+            'note': '',
+            'completed': False,
+            'pool': 'todo',
+        } for index in range(limit + 2))
+
+        included, context = server.ai_context_tasks(tasks)
+
+        self.assertEqual(len(included), limit)
+        self.assertTrue(all(not task['completed'] and task['pool'] == 'todo' for task in included))
+        self.assertEqual(context['taskSelection']['status'], 'incomplete_timeline_only')
+        self.assertEqual(context['taskSelection']['pool'], 'todo')
+        self.assertEqual(context['taskSelection']['totalIncompleteTimelineTaskCount'], limit + 2)
+        self.assertEqual(context['taskSelection']['includedTaskCount'], limit)
+        self.assertEqual(context['taskSelection']['omittedIncompleteTimelineTaskCount'], 2)
+        self.assertTrue(context['taskSelection']['truncated'])
+        context_json = json.dumps(context, ensure_ascii=False)
+        self.assertNotIn('task-completed', context_json)
+        self.assertNotIn('task-schedule', context_json)
+        self.assertNotIn('task-habit', context_json)
+        self.assertNotIn('task-arrangement', context_json)
 
     def avatar_payload(self, raw=None, filename='avatar.png', content_type='image/png'):
         png = base64.b64decode(
@@ -155,6 +257,154 @@ class ServerRegressionTests(unittest.TestCase):
         self.create_task(token)
         status, body = self.request('POST', '/api/schedule-items', self.schedule_payload(user['id']), token=token)
         self.assertEqual(status, 201, body)
+
+    def test_ai_chat_requires_login_and_configured_key(self):
+        original_key = os.environ.pop('DEEPSEEK_API_KEY', None)
+        try:
+            status, body = self.request('POST', '/api/ai/chat', {'message': '创建一个任务'})
+            self.assertEqual(status, 401, body)
+
+            token, _ = self.register_user('ai-no-key')
+            status, body = self.request('POST', '/api/ai/chat', {'message': '创建一个任务'}, token=token)
+            self.assertEqual(status, 503, body)
+            self.assertEqual(body.get('error'), 'DeepSeek API key is not configured')
+        finally:
+            if original_key is not None:
+                os.environ['DEEPSEEK_API_KEY'] = original_key
+
+    def test_ai_chat_returns_actions_without_writing_tasks(self):
+        token, _ = self.register_user('ai-actions')
+        self.create_task(token, 'task-ai-existing')
+        original_key = os.environ.get('DEEPSEEK_API_KEY')
+        original_call = server.TodoHandler.call_deepseek_chat
+        captured = {}
+
+        def fake_call(handler, messages):
+            captured['messages'] = messages
+            return json.dumps({
+                'reply': '我整理了两条待审批指令。',
+                'actions': [
+                    {
+                        'type': 'create_task',
+                        'task': {
+                            'title': 'Read chapter 3',
+                            'subject': 'English B',
+                            'dueAt': '2026-06-18T23:00:00',
+                            'priority': 'medium',
+                            'note': 'Annotate key paragraphs',
+                        },
+                    },
+                    {
+                        'type': 'update_task',
+                        'targetTaskId': 'task-ai-existing',
+                        'patch': {'note': 'Review mistakes'},
+                    },
+                ],
+            })
+
+        try:
+            os.environ['DEEPSEEK_API_KEY'] = 'test-key'
+            server.TodoHandler.call_deepseek_chat = fake_call
+            status, body = self.request('POST', '/api/ai/chat', {
+                'message': '创建阅读任务，并修改已有任务备注',
+                'clientNow': '2026-06-17T12:00:00.000Z',
+                'timezone': 'Asia/Shanghai',
+            }, token=token)
+        finally:
+            server.TodoHandler.call_deepseek_chat = original_call
+            if original_key is None:
+                os.environ.pop('DEEPSEEK_API_KEY', None)
+            else:
+                os.environ['DEEPSEEK_API_KEY'] = original_key
+
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body.get('reply'), '我整理了两条待审批指令。')
+        self.assertEqual([action['type'] for action in body['actions']], ['create_task', 'update_task'])
+        self.assertIn('task-ai-existing', captured['messages'][-1]['content'])
+
+        status, tasks_body = self.request('GET', '/api/tasks', token=token)
+        self.assertEqual(status, 200, tasks_body)
+        tasks = tasks_body['tasks']
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0]['id'], 'task-ai-existing')
+        self.assertEqual(tasks[0]['note'], '')
+
+    def test_ai_chat_rejects_unsafe_or_invalid_actions(self):
+        token, _ = self.register_user('ai-rejects')
+        self.create_task(token, 'task-ai-reject')
+        original_key = os.environ.get('DEEPSEEK_API_KEY')
+        original_call = server.TodoHandler.call_deepseek_chat
+
+        def fake_call(handler, messages):
+            return json.dumps({
+                'reply': '我找到了一些候选操作。',
+                'actions': [
+                    {'type': 'delete_task', 'targetTaskId': 'task-ai-reject'},
+                    {'type': 'update_task', 'targetTaskId': 'task-ai-reject', 'patch': {'completed': True}},
+                    {
+                        'type': 'create_task',
+                        'task': {
+                            'title': 'Bad task',
+                            'subject': 'x' * 41,
+                            'dueAt': '',
+                            'priority': 'medium',
+                            'note': '',
+                        },
+                    },
+                ],
+            })
+
+        try:
+            os.environ['DEEPSEEK_API_KEY'] = 'test-key'
+            server.TodoHandler.call_deepseek_chat = fake_call
+            status, body = self.request('POST', '/api/ai/chat', {'message': '做点危险操作'}, token=token)
+        finally:
+            server.TodoHandler.call_deepseek_chat = original_call
+            if original_key is None:
+                os.environ.pop('DEEPSEEK_API_KEY', None)
+            else:
+                os.environ['DEEPSEEK_API_KEY'] = original_key
+
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body['actions'], [])
+        self.assertEqual(len(body['rejectedActions']), 3)
+
+    def test_ai_chat_stream_sends_deltas_then_done_actions(self):
+        token, _ = self.register_user('ai-stream')
+        original_key = os.environ.get('DEEPSEEK_API_KEY')
+        original_stream = server.TodoHandler.stream_deepseek_chat
+
+        def fake_stream(handler, messages):
+            yield '我会创建一个待审批任务。'
+            yield '\n<AI_ACTIONS_'
+            yield 'JSON>{"actions":[{"type":"create_task","task":{"title":"Stream task","subject":"Math","dueAt":"","priority":"low","note":"From stream"}}]}</AI_ACTIONS_JSON>'
+
+        try:
+            os.environ['DEEPSEEK_API_KEY'] = 'test-key'
+            server.TodoHandler.stream_deepseek_chat = fake_stream
+            status, headers, raw = self.stream_request('/api/ai/chat-stream', {
+                'message': '创建一个流式任务',
+                'clientNow': '2026-06-18T12:00:00.000Z',
+                'timezone': 'Asia/Shanghai',
+            }, token=token)
+        finally:
+            server.TodoHandler.stream_deepseek_chat = original_stream
+            if original_key is None:
+                os.environ.pop('DEEPSEEK_API_KEY', None)
+            else:
+                os.environ['DEEPSEEK_API_KEY'] = original_key
+
+        self.assertEqual(status, 200, raw)
+        self.assertEqual(headers.get_content_type(), 'text/event-stream')
+        events = self.parse_sse(raw)
+        self.assertGreaterEqual(len(events), 2)
+        self.assertEqual(events[0][0], 'delta')
+        delta_text = ''.join(event[1].get('text', '') for event in events if event[0] == 'delta')
+        self.assertIn('我会创建一个待审批任务。', delta_text)
+        self.assertEqual(events[-1][0], 'done')
+        self.assertEqual(events[-1][1]['reply'], '我会创建一个待审批任务。')
+        self.assertEqual(events[-1][1]['actions'][0]['type'], 'create_task')
+        self.assertNotIn('AI_ACTIONS_JSON', delta_text)
 
     def test_foreign_keys_are_enforced_on_new_connections(self):
         token, user = self.register_user()

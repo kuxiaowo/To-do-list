@@ -9,6 +9,7 @@ const HABITS_API = '/api/habits';
 const ADMIN_API = '/api/admin';
 const FEEDBACK_API = '/api/feedback';
 const VISITS_API = '/api/visits';
+const AI_CHAT_STREAM_API = '/api/ai/chat-stream';
 const AUTH_TOKEN_KEY = 'todo-list-auth-token-v1';
 const THEME_STORAGE_KEY = 'todo-list-theme-v1';
 const GUIDE_STORAGE_KEY = 'todo-list-guide-v1';
@@ -113,6 +114,15 @@ createApp({
       tasks: [],
       scheduleItems: [],
       habits: [],
+      aiChatOpen: false,
+      aiChatMessages: [],
+      aiChatInput: '',
+      aiChatLoading: false,
+      aiPendingActions: [],
+      aiActionResults: [],
+      aiApprovalVisible: false,
+      aiCurrentActionIndex: 0,
+      aiExecutingActionId: '',
       defaultWeekSlots: JSON.parse(JSON.stringify(DEFAULT_WEEK_SLOTS)),
       scheduleTemplateVersions: [],
       scheduleDayOverrides: {},
@@ -896,6 +906,396 @@ createApp({
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.message || payload.error || '请求失败');
       return payload;
+    },
+    toggleAiChat() {
+      if (this.adminMode) return;
+      if (!this.currentUser) {
+        ElementPlus.ElMessage.warning('请先登录或注册，再使用 AI 助手。');
+        return;
+      }
+      this.aiChatOpen = !this.aiChatOpen;
+      if (this.aiChatOpen) {
+        this.$nextTick(() => {
+          const input = this.$refs.aiChatInput;
+          if (input && input.focus) input.focus();
+          this.scrollAiChatToBottom();
+        });
+      }
+    },
+    scrollAiChatToBottom() {
+      this.$nextTick(() => {
+        const body = this.$refs.aiChatBody;
+        if (body) body.scrollTop = body.scrollHeight;
+      });
+    },
+    aiHistoryForRequest() {
+      return this.aiChatMessages
+        .slice(-20)
+        .map(item => ({ role: item.role, content: item.content }))
+        .filter(item => ['user', 'assistant'].includes(item.role) && item.content);
+    },
+    handleAiChatKeydown(event) {
+      if (event.key !== 'Enter' || event.shiftKey) return;
+      event.preventDefault();
+      this.sendAiMessage();
+    },
+    setAiChatMessageContent(message, content) {
+      const index = this.aiChatMessages.indexOf(message);
+      const nextMessage = { ...message, content };
+      if (index !== -1) {
+        this.aiChatMessages.splice(index, 1, nextMessage);
+        return nextMessage;
+      }
+      message.content = content;
+      return message;
+    },
+    async readAiChatStream(body, onDelta) {
+      const response = await fetch(AI_CHAT_STREAM_API, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...this.authHeaders()
+        },
+        body: JSON.stringify(body)
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.message || payload.error || '请求失败');
+      }
+      if (!response.body) throw new Error('当前浏览器不支持流式响应');
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let donePayload = null;
+
+      const handleBlock = block => {
+        const lines = block.split(/\r?\n/);
+        let event = 'message';
+        const dataLines = [];
+        lines.forEach(line => {
+          if (line.startsWith('event:')) {
+            event = line.slice(6).trim();
+          } else if (line.startsWith('data:')) {
+            dataLines.push(line.slice(5).trimStart());
+          }
+        });
+        if (!dataLines.length) return;
+        const payload = JSON.parse(dataLines.join('\n'));
+        if (event === 'delta') {
+          onDelta(String(payload.text || ''));
+        } else if (event === 'done') {
+          donePayload = payload;
+        } else if (event === 'error') {
+          throw new Error(payload.message || payload.error || 'AI 请求失败');
+        }
+      };
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let boundaryIndex = buffer.indexOf('\n\n');
+        while (boundaryIndex !== -1) {
+          const block = buffer.slice(0, boundaryIndex);
+          buffer = buffer.slice(boundaryIndex + 2);
+          if (block.trim()) handleBlock(block);
+          boundaryIndex = buffer.indexOf('\n\n');
+        }
+      }
+      buffer += decoder.decode();
+      if (buffer.trim()) handleBlock(buffer);
+      if (!donePayload) throw new Error('AI 流式响应没有结束标记');
+      return donePayload;
+    },
+    async sendAiMessage() {
+      if (!this.currentUser) {
+        ElementPlus.ElMessage.warning('请先登录或注册，再使用 AI 助手。');
+        return;
+      }
+      const message = this.aiChatInput.trim();
+      if (!message || this.aiChatLoading) return;
+      const history = this.aiHistoryForRequest();
+      this.aiChatInput = '';
+      this.aiChatMessages.push({ role: 'user', content: message });
+      let assistantMessage = { role: 'assistant', content: '' };
+      this.aiChatMessages.push(assistantMessage);
+      this.aiChatLoading = true;
+      this.scrollAiChatToBottom();
+      try {
+        const payload = await this.readAiChatStream({
+          message,
+          history,
+          clientNow: new Date().toISOString(),
+          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai'
+        }, text => {
+          if (!text) return;
+          assistantMessage = this.setAiChatMessageContent(assistantMessage, assistantMessage.content + text);
+          this.scrollAiChatToBottom();
+        });
+        const reply = payload.reply || '我没有生成可执行操作。';
+        assistantMessage = this.setAiChatMessageContent(assistantMessage, reply);
+        const actions = Array.isArray(payload.actions) ? payload.actions : [];
+        if (actions.length) {
+          this.openAiApproval(actions);
+        }
+        const rejected = Array.isArray(payload.rejectedActions) ? payload.rejectedActions : [];
+        if (!actions.length && rejected.length) {
+          this.aiChatMessages.push({ role: 'assistant', content: '有些候选操作被安全校验拦下了，没有写入任务。' });
+        }
+      } catch (error) {
+        console.error('AI 助手请求失败：', error);
+        assistantMessage = this.setAiChatMessageContent(assistantMessage, `AI 请求失败：${error.message}`);
+        ElementPlus.ElMessage.error(`AI 请求失败：${error.message}`);
+      } finally {
+        this.aiChatLoading = false;
+        this.scrollAiChatToBottom();
+      }
+    },
+    openAiApproval(actions) {
+      this.aiPendingActions = actions.map(action => this.normalizeAiApprovalAction(action));
+      this.aiActionResults = this.aiPendingActions.map(action => ({
+        actionId: action.id,
+        status: 'pending',
+        message: ''
+      }));
+      this.aiCurrentActionIndex = 0;
+      this.aiExecutingActionId = '';
+      this.aiApprovalVisible = true;
+    },
+    normalizeAiApprovalAction(action) {
+      const normalized = { ...action };
+      if (normalized.type === 'create_task') {
+        normalized.draft = {
+          title: '',
+          subject: '',
+          dueAt: '',
+          priority: 'medium',
+          note: '',
+          ...(normalized.task || {})
+        };
+      } else {
+        normalized.draft = {
+          title: '',
+          subject: '',
+          dueAt: '',
+          priority: 'medium',
+          note: '',
+          ...(normalized.before || {}),
+          ...(normalized.patch || {}),
+          ...(normalized.after || {})
+        };
+      }
+      return normalized;
+    },
+    currentAiAction() {
+      return this.aiPendingActions[this.aiCurrentActionIndex] || null;
+    },
+    aiActionResult(action) {
+      if (!action) return null;
+      return this.aiActionResults.find(result => result.actionId === action.id) || null;
+    },
+    aiActionStatus(action) {
+      const result = this.aiActionResult(action);
+      return result ? result.status : 'pending';
+    },
+    aiActionStatusLabel(action) {
+      const status = this.aiActionStatus(action);
+      return {
+        pending: '待审批',
+        executed: '已执行',
+        skipped: '已跳过',
+        failed: '失败'
+      }[status] || '待审批';
+    },
+    aiActionStatusType(action) {
+      const status = this.aiActionStatus(action);
+      return {
+        pending: 'info',
+        executed: 'success',
+        skipped: 'warning',
+        failed: 'danger'
+      }[status] || 'info';
+    },
+    aiActionTypeLabel(action) {
+      if (!action) return '';
+      return action.type === 'create_task' ? '创建任务' : '修改任务';
+    },
+    aiEditableFields() {
+      return ['title', 'subject', 'dueAt', 'priority', 'note'].map(field => ({
+        field,
+        label: this.aiFieldLabel(field)
+      }));
+    },
+    aiActionLocked(action) {
+      return ['executed', 'skipped'].includes(this.aiActionStatus(action));
+    },
+    aiActionFieldChanged(action, field) {
+      if (!action || action.type !== 'update_task') return false;
+      const before = action.before || {};
+      const draft = action.draft || {};
+      return String(before[field] || '') !== String(draft[field] || '');
+    },
+    aiFieldLabel(field) {
+      return {
+        title: '标题',
+        subject: '科目',
+        dueAt: '截止时间',
+        priority: '优先级',
+        note: '备注'
+      }[field] || field;
+    },
+    aiFormatFieldValue(field, value) {
+      if (field === 'priority') return this.priorityLabel(value || 'medium');
+      if (field === 'dueAt') return value ? String(value).replace('T', ' ').slice(0, 16) : '无截止时间';
+      return value === '' || value === null || value === undefined ? '空' : String(value);
+    },
+    aiActionPreviewFields(action) {
+      if (!action) return [];
+      if (action.type === 'create_task') {
+        const task = action.task || {};
+        return ['title', 'subject', 'dueAt', 'priority', 'note'].map(field => ({
+          field,
+          label: this.aiFieldLabel(field),
+          mode: 'create',
+          after: this.aiFormatFieldValue(field, task[field] || '')
+        }));
+      }
+      const patch = action.patch || {};
+      const before = action.before || {};
+      return Object.keys(patch).map(field => ({
+        field,
+        label: this.aiFieldLabel(field),
+        mode: 'update',
+        before: this.aiFormatFieldValue(field, before[field] || ''),
+        after: this.aiFormatFieldValue(field, patch[field] || '')
+      }));
+    },
+    normalizeAiDraftFields(draft) {
+      const fields = {
+        title: String(draft.title || '').trim(),
+        subject: String(draft.subject || '').trim(),
+        dueAt: String(draft.dueAt || '').trim(),
+        priority: String(draft.priority || 'medium').trim() || 'medium',
+        note: String(draft.note || '').trim()
+      };
+      if (!fields.title) throw new Error('标题不能为空');
+      if (fields.title.length > 80) throw new Error('标题不能超过 80 个字符');
+      if (!fields.subject) throw new Error('科目不能为空');
+      if (fields.subject.length > 40) throw new Error('科目不能超过 40 个字符');
+      if (!['high', 'medium', 'low'].includes(fields.priority)) throw new Error('优先级无效');
+      if (fields.dueAt && !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:00$/.test(fields.dueAt)) {
+        throw new Error('截止时间必须为空，或使用 YYYY-MM-DDTHH:mm:00');
+      }
+      if (fields.dueAt && Number.isNaN(new Date(fields.dueAt).getTime())) {
+        throw new Error('截止时间不是有效日期');
+      }
+      return fields;
+    },
+    aiPatchFromDraft(action, existing) {
+      const fields = this.normalizeAiDraftFields(action.draft || {});
+      const patch = {};
+      ['title', 'subject', 'dueAt', 'priority', 'note'].forEach(field => {
+        if (String(fields[field] || '') !== String(existing[field] || '')) {
+          patch[field] = fields[field];
+        }
+      });
+      return patch;
+    },
+    markAiAction(action, status, message = '') {
+      this.aiActionResults = this.aiActionResults.map(result => (
+        result.actionId === action.id ? { ...result, status, message } : result
+      ));
+    },
+    aiApprovalCounts() {
+      return this.aiActionResults.reduce((summary, result) => {
+        summary[result.status] = (summary[result.status] || 0) + 1;
+        return summary;
+      }, {});
+    },
+    aiApprovalProgressText() {
+      const counts = this.aiApprovalCounts();
+      return `已执行 ${counts.executed || 0} · 已跳过 ${counts.skipped || 0} · 失败 ${counts.failed || 0} · 待处理 ${counts.pending || 0}`;
+    },
+    appendAiActionSummary() {
+      const counts = this.aiApprovalCounts();
+      const parts = [
+        `已执行 ${counts.executed || 0} 条`,
+        `已跳过 ${counts.skipped || 0} 条`,
+        `失败 ${counts.failed || 0} 条`,
+        `未处理 ${counts.pending || 0} 条`
+      ];
+      const details = this.aiPendingActions.map((action, index) => {
+        const result = this.aiActionResult(action);
+        const status = result ? this.aiActionStatusLabel(action) : '待审批';
+        const message = result && result.message ? `，${result.message}` : '';
+        return `${index + 1}. ${action.summary}：${status}${message}`;
+      });
+      this.aiChatMessages.push({
+        role: 'assistant',
+        kind: 'approval-result',
+        content: `审批结果：${parts.join('，')}。\n${details.join('\n')}`
+      });
+      this.scrollAiChatToBottom();
+      this.aiPendingActions = [];
+      this.aiActionResults = [];
+      this.aiCurrentActionIndex = 0;
+      this.aiExecutingActionId = '';
+    },
+    closeAiApproval() {
+      if (this.aiExecutingActionId) return;
+      this.aiApprovalVisible = false;
+      this.appendAiActionSummary();
+    },
+    aiTaskPayloadFromFields(fields) {
+      return {
+        id: this.createTaskId(),
+        createdAt: new Date().toISOString(),
+        title: String(fields.title || '').trim(),
+        subject: String(fields.subject || '').trim(),
+        dueAt: String(fields.dueAt || '').trim(),
+        pool: 'todo',
+        priority: fields.priority || 'medium',
+        note: String(fields.note || '').trim(),
+        completed: false
+      };
+    },
+    async approveAiAction(action) {
+      if (!action || this.aiExecutingActionId) return;
+      if (this.aiActionStatus(action) === 'executed') return;
+      this.aiExecutingActionId = action.id;
+      try {
+        if (action.type === 'create_task') {
+          const task = this.aiTaskPayloadFromFields(this.normalizeAiDraftFields(action.draft || {}));
+          const savedTask = await this.createTaskOnServer(task);
+          this.tasks = [...this.tasks, savedTask || task];
+          this.markAiAction(action, 'executed', '任务已创建');
+          ElementPlus.ElMessage.success('AI 指令已执行：任务已创建。');
+        } else if (action.type === 'update_task') {
+          const existing = this.tasks.find(task => task.id === action.targetTaskId);
+          if (!existing) throw new Error('目标任务不存在或已变化');
+          const patch = this.aiPatchFromDraft(action, existing);
+          if (!Object.keys(patch).length) throw new Error('没有实际变更');
+          const nextTask = { ...existing, ...patch, updatedAt: new Date().toISOString() };
+          const savedTask = await this.updateTaskOnServer(action.targetTaskId, nextTask);
+          this.tasks = this.tasks.map(task => task.id === action.targetTaskId ? (savedTask || nextTask) : task);
+          await this.loadScheduleItems();
+          this.markAiAction(action, 'executed', '任务已更新');
+          ElementPlus.ElMessage.success('AI 指令已执行：任务已更新。');
+        } else {
+          throw new Error('不支持的 AI 指令');
+        }
+      } catch (error) {
+        console.error('AI 指令执行失败：', error);
+        this.markAiAction(action, 'failed', error.message);
+        ElementPlus.ElMessage.error(`AI 指令执行失败：${error.message}`);
+      } finally {
+        this.aiExecutingActionId = '';
+      }
+    },
+    skipAiAction(action) {
+      if (!action || this.aiExecutingActionId) return;
+      this.markAiAction(action, 'skipped', '用户跳过');
     },
     defaultSubjectTemplate() {
       return JSON.parse(JSON.stringify(DEFAULT_SUBJECT_TEMPLATE));
@@ -1900,6 +2300,14 @@ createApp({
       this.tasks = [];
       this.scheduleItems = [];
       this.habits = [];
+      this.aiChatOpen = false;
+      this.aiChatMessages = [];
+      this.aiChatInput = '';
+      this.aiPendingActions = [];
+      this.aiActionResults = [];
+      this.aiApprovalVisible = false;
+      this.aiCurrentActionIndex = 0;
+      this.aiExecutingActionId = '';
       this.habitSyncConflicts = [];
       this.scheduleTemplateVersions = [];
       this.scheduleDayOverrides = {};

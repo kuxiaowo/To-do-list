@@ -13,6 +13,8 @@ import posixpath
 import secrets
 import sqlite3
 import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -29,6 +31,13 @@ SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
 DEFAULT_FEEDBACK_LIMIT_PER_USER = 10
 FEEDBACK_LIMIT_SETTING_KEY = 'feedback_limit_per_user'
 TRUSTED_PROXY_IPS = {'127.0.0.1', '::1'}
+DEEPSEEK_API_URL = 'https://api.deepseek.com/chat/completions'
+DEFAULT_DEEPSEEK_MODEL = 'deepseek-v4-flash'
+DEFAULT_DEEPSEEK_TIMEOUT_SECONDS = 20
+AI_ACTION_LIMIT = 10
+AI_HISTORY_LIMIT = 20
+AI_CONTEXT_TASK_LIMIT = 200
+AI_TASK_FIELDS = {'title', 'subject', 'dueAt', 'priority', 'note'}
 HABIT_SYNC_FUTURE_DAYS = 90
 MAX_HABIT_SYNC_FUTURE_DAYS = 365
 MAX_AVATAR_BYTES = 2 * 1024 * 1024
@@ -449,6 +458,225 @@ def public_task(row: sqlite3.Row) -> dict:
         'createdAt': row['created_at'],
         'updatedAt': row['updated_at'],
     }
+
+
+def deepseek_api_key() -> str:
+    return os.environ.get('DEEPSEEK_API_KEY', '').strip()
+
+
+def deepseek_model() -> str:
+    return os.environ.get('DEEPSEEK_MODEL', DEFAULT_DEEPSEEK_MODEL).strip() or DEFAULT_DEEPSEEK_MODEL
+
+
+def deepseek_timeout_seconds() -> float:
+    try:
+        return max(1.0, float(os.environ.get('DEEPSEEK_TIMEOUT_SECONDS', str(DEFAULT_DEEPSEEK_TIMEOUT_SECONDS))))
+    except (TypeError, ValueError):
+        return float(DEFAULT_DEEPSEEK_TIMEOUT_SECONDS)
+
+
+def compact_task_for_ai(task: dict) -> dict:
+    return {
+        'id': task.get('id', ''),
+        'title': task.get('title', ''),
+        'subject': task.get('subject', ''),
+        'dueAt': task.get('dueAt', ''),
+        'priority': task.get('priority', 'medium'),
+        'note': task.get('note', ''),
+        'completed': bool(task.get('completed', False)),
+        'pool': task.get('pool', 'todo'),
+    }
+
+
+def ai_context_tasks(tasks: list[dict]) -> tuple[list[dict], dict]:
+    timeline_tasks = [
+        task for task in tasks
+        if not bool(task.get('completed')) and task.get('pool', 'todo') == 'todo'
+    ]
+    included_tasks = timeline_tasks[:AI_CONTEXT_TASK_LIMIT]
+    omitted_count = max(0, len(timeline_tasks) - len(included_tasks))
+    return included_tasks, {
+        'taskSelection': {
+            'status': 'incomplete_timeline_only',
+            'pool': 'todo',
+            'totalIncompleteTimelineTaskCount': len(timeline_tasks),
+            'includedTaskCount': len(included_tasks),
+            'omittedIncompleteTimelineTaskCount': omitted_count,
+            'truncated': omitted_count > 0,
+            'limit': AI_CONTEXT_TASK_LIMIT,
+            'policy': 'Only included incomplete timeline tasks with pool=todo may be used as update targets. Daily schedule items, habits, arrangement-pool tasks, and completed tasks are not visible. If truncated and the target is not visible, ask the user to narrow the request.',
+        },
+        'tasks': [compact_task_for_ai(task) for task in included_tasks],
+    }
+
+
+def is_valid_ai_due_at(value: str) -> bool:
+    if value == '':
+        return True
+    if not value.endswith(':00'):
+        return False
+    try:
+        datetime.strptime(value, '%Y-%m-%dT%H:%M:%S')
+        return True
+    except ValueError:
+        return False
+
+
+def normalize_ai_task_fields(raw: object, *, partial: bool) -> tuple[dict | None, str | None]:
+    if not isinstance(raw, dict):
+        return None, 'task fields must be an object'
+    unsupported = sorted(set(raw) - AI_TASK_FIELDS)
+    if unsupported:
+        return None, f'unsupported task fields: {", ".join(unsupported)}'
+
+    fields: dict = {}
+    if not partial or 'title' in raw:
+        title = str(raw.get('title', '') or '').strip()
+        if not title:
+            return None, 'task title is required'
+        if len(title) > 80:
+            return None, 'task title is too long'
+        fields['title'] = title
+
+    if not partial or 'subject' in raw:
+        subject = str(raw.get('subject', '') or '').strip()
+        if not subject:
+            return None, 'task subject is required'
+        if len(subject) > 40:
+            return None, 'task subject is too long'
+        fields['subject'] = subject
+
+    if not partial or 'dueAt' in raw:
+        due_at = str(raw.get('dueAt', '') or '').strip()
+        if not is_valid_ai_due_at(due_at):
+            return None, 'task dueAt must be empty or YYYY-MM-DDTHH:mm:00'
+        fields['dueAt'] = due_at
+
+    if not partial or 'priority' in raw:
+        priority = str(raw.get('priority', 'medium') or 'medium').strip()
+        if priority not in {'high', 'medium', 'low'}:
+            return None, 'invalid task priority'
+        fields['priority'] = priority
+
+    if not partial or 'note' in raw:
+        note = str(raw.get('note', '') or '').strip()
+        if len(note) > 4000:
+            return None, 'task note is too long'
+        fields['note'] = note
+
+    if partial and not fields:
+        return None, 'update patch is empty'
+    return fields, None
+
+
+def ai_priority_label(priority: str) -> str:
+    return {'high': '高', 'medium': '中', 'low': '低'}.get(priority, priority or '中')
+
+
+def ai_due_label(value: str) -> str:
+    return value.replace('T', ' ')[:16] if value else '无截止时间'
+
+
+def ai_task_summary(task: dict) -> str:
+    return f"{task.get('title', '')} / {task.get('subject', '')} / {ai_due_label(task.get('dueAt', ''))} / {ai_priority_label(task.get('priority', 'medium'))}"
+
+
+def normalize_ai_actions(raw_actions: object, tasks: list[dict]) -> tuple[list[dict], list[dict]]:
+    if raw_actions is None:
+        return [], []
+    if not isinstance(raw_actions, list):
+        return [], [{'index': 0, 'reason': 'actions must be a list'}]
+
+    tasks_by_id = {str(task.get('id', '')): task for task in tasks}
+    actions: list[dict] = []
+    rejected: list[dict] = []
+    for index, raw_action in enumerate(raw_actions[:AI_ACTION_LIMIT]):
+        if not isinstance(raw_action, dict):
+            rejected.append({'index': index, 'reason': 'action must be an object'})
+            continue
+        action_type = str(raw_action.get('type', '') or '').strip()
+        if action_type == 'create_task':
+            fields, error = normalize_ai_task_fields(raw_action.get('task'), partial=False)
+            if error:
+                rejected.append({'index': index, 'reason': error})
+                continue
+            action = {
+                'id': f'ai-action-{index + 1}',
+                'type': 'create_task',
+                'summary': f"创建任务：{ai_task_summary(fields)}",
+                'task': fields,
+            }
+            actions.append(action)
+            continue
+
+        if action_type == 'update_task':
+            target_task_id = str(raw_action.get('targetTaskId', '') or '').strip()
+            existing = tasks_by_id.get(target_task_id)
+            if not existing:
+                rejected.append({'index': index, 'reason': 'target task not found'})
+                continue
+            if existing.get('pool') in {'habit', 'schedule'}:
+                rejected.append({'index': index, 'reason': 'habit or schedule tasks cannot be updated by AI'})
+                continue
+            patch, error = normalize_ai_task_fields(raw_action.get('patch'), partial=True)
+            if error:
+                rejected.append({'index': index, 'reason': error})
+                continue
+            before = {key: existing.get(key, '') for key in AI_TASK_FIELDS}
+            changed_patch = {key: value for key, value in patch.items() if before.get(key, '') != value}
+            if not changed_patch:
+                rejected.append({'index': index, 'reason': 'update has no actual changes'})
+                continue
+            after = {**before, **changed_patch}
+            action = {
+                'id': f'ai-action-{index + 1}',
+                'type': 'update_task',
+                'summary': f"修改任务：{existing.get('title', '')}",
+                'targetTaskId': target_task_id,
+                'targetTaskTitle': existing.get('title', ''),
+                'patch': changed_patch,
+                'before': before,
+                'after': after,
+            }
+            actions.append(action)
+            continue
+
+        rejected.append({'index': index, 'reason': 'unsupported action type'})
+
+    if isinstance(raw_actions, list) and len(raw_actions) > AI_ACTION_LIMIT:
+        rejected.append({'index': AI_ACTION_LIMIT, 'reason': f'only first {AI_ACTION_LIMIT} actions are accepted'})
+    return actions, rejected
+
+
+def parse_ai_json_content(content: str) -> tuple[dict | None, str | None]:
+    try:
+        payload = json.loads(content)
+    except (TypeError, json.JSONDecodeError):
+        return None, 'AI returned invalid JSON'
+    if not isinstance(payload, dict):
+        return None, 'AI JSON response must be an object'
+    return payload, None
+
+
+def parse_ai_stream_content(content: str) -> tuple[str, object, str | None]:
+    start_tag = '<AI_ACTIONS_JSON>'
+    end_tag = '</AI_ACTIONS_JSON>'
+    start = content.find(start_tag)
+    end = content.find(end_tag, start + len(start_tag)) if start != -1 else -1
+    if start == -1 or end == -1:
+        payload, error = parse_ai_json_content(content)
+        if error:
+            return content.strip(), [], 'AI stream response missing actions JSON'
+        return str(payload.get('reply', '') or '').strip(), payload.get('actions'), None
+    reply = content[:start].strip()
+    raw_json = content[start + len(start_tag):end].strip()
+    try:
+        payload = json.loads(raw_json)
+    except (TypeError, json.JSONDecodeError):
+        return reply, [], 'AI actions JSON is invalid'
+    if not isinstance(payload, dict):
+        return reply, [], 'AI actions JSON must be an object'
+    return reply, payload.get('actions'), None
 
 
 def public_user(row: sqlite3.Row | dict) -> dict:
@@ -1014,6 +1242,10 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return self.handle_auth_logout()
         if path == '/api/auth/avatar':
             return self.handle_auth_update_avatar()
+        if path == '/api/ai/chat':
+            return self.handle_ai_chat()
+        if path == '/api/ai/chat-stream':
+            return self.handle_ai_chat_stream()
         if path == '/api/tasks':
             return self.handle_create_task()
         if path == '/api/schedule-items':
@@ -1189,6 +1421,216 @@ class TodoHandler(SimpleHTTPRequestHandler):
             (user_id,),
         ).fetchall()
         return [public_task(row) for row in rows]
+
+    def normalize_ai_history(self, raw_history: object) -> list[dict]:
+        if not isinstance(raw_history, list):
+            return []
+        history = []
+        for item in raw_history[-AI_HISTORY_LIMIT:]:
+            if not isinstance(item, dict):
+                continue
+            role = str(item.get('role', '') or '').strip()
+            if role not in {'user', 'assistant'}:
+                continue
+            content = str(item.get('content', '') or '').strip()
+            if not content:
+                continue
+            history.append({'role': role, 'content': content[:1000]})
+        return history
+
+    def build_ai_messages(self, message: str, history: list[dict], tasks: list[dict], client_now: str, timezone_name: str) -> list[dict]:
+        system_prompt = '''
+你是待办清单应用里的任务助手。你必须只输出一个 JSON object，不要输出 Markdown。
+JSON schema 示例：
+{
+  "reply": "给用户看的简短中文回复",
+  "actions": [
+    {
+      "type": "create_task",
+      "task": {
+        "title": "任务标题",
+        "subject": "科目",
+        "dueAt": "2026-06-18T23:00:00",
+        "priority": "medium",
+        "note": "备注"
+      }
+    },
+    {
+      "type": "update_task",
+      "targetTaskId": "必须使用上下文里已有的任务 id",
+      "patch": {
+        "note": "新的备注"
+      }
+    }
+  ]
+}
+规则：
+1. 只能生成 create_task 或 update_task。
+2. 不允许删除任务，不允许标记完成/取消完成，不允许创建或修改每日安排、时间格子、习惯。
+3. create_task 必须包含 title、subject、dueAt、priority、note；没有截止时间时 dueAt 用空字符串。
+4. update_task 只能修改 title、subject、dueAt、priority、note，必须使用上下文里已有的 targetTaskId。
+5. priority 只能是 high、medium、low。
+6. dueAt 必须是空字符串或 YYYY-MM-DDTHH:mm:00。
+7. 如果请求含糊、目标任务不确定、或缺少创建任务必需信息，reply 里追问，actions 返回 []。
+8. 一次最多生成 10 条 action。
+'''.strip()
+        _, task_context = ai_context_tasks(tasks)
+        context = {
+            'clientNow': client_now,
+            'timezone': timezone_name,
+            'request': message,
+            **task_context,
+        }
+        return [
+            {'role': 'system', 'content': system_prompt},
+            *history,
+            {
+                'role': 'user',
+                'content': '请根据下面 JSON 上下文处理用户请求，并按 system 中的 JSON schema 输出：\n'
+                           + json.dumps(context, ensure_ascii=False),
+            },
+        ]
+
+    def build_ai_stream_messages(self, message: str, history: list[dict], tasks: list[dict], client_now: str, timezone_name: str) -> list[dict]:
+        system_prompt = '''
+你是待办清单应用里的任务助手。输出必须分成两部分：
+第一部分：给用户看的简短中文自然语言回复，可以直接流式输出，不要 Markdown。
+第二部分：最后一行必须输出完整动作 JSON，格式严格如下：
+<AI_ACTIONS_JSON>{"actions":[]}</AI_ACTIONS_JSON>
+动作 JSON schema：
+{
+  "actions": [
+    {
+      "type": "create_task",
+      "task": {
+        "title": "任务标题",
+        "subject": "科目",
+        "dueAt": "2026-06-18T23:00:00",
+        "priority": "medium",
+        "note": "备注"
+      }
+    },
+    {
+      "type": "update_task",
+      "targetTaskId": "必须使用上下文里已有的任务 id",
+      "patch": {
+        "note": "新的备注"
+      }
+    }
+  ]
+}
+规则：
+1. 只能生成 create_task 或 update_task。
+2. 不允许删除任务，不允许标记完成/取消完成，不允许创建或修改每日安排、时间格子、习惯。
+3. create_task 必须包含 title、subject、dueAt、priority、note；没有截止时间时 dueAt 用空字符串。
+4. update_task 只能修改 title、subject、dueAt、priority、note，必须使用上下文里已有的 targetTaskId。
+5. priority 只能是 high、medium、low。
+6. dueAt 必须是空字符串或 YYYY-MM-DDTHH:mm:00。
+7. 如果请求含糊、目标任务不确定、或缺少创建任务必需信息，第一部分追问，actions 返回 []。
+8. 一次最多生成 10 条 action。
+9. 不要在 <AI_ACTIONS_JSON> 后输出任何文字。
+'''.strip()
+        _, task_context = ai_context_tasks(tasks)
+        context = {
+            'clientNow': client_now,
+            'timezone': timezone_name,
+            'request': message,
+            **task_context,
+        }
+        return [
+            {'role': 'system', 'content': system_prompt},
+            *history,
+            {
+                'role': 'user',
+                'content': '请根据下面 JSON 上下文处理用户请求，先输出自然语言回复，最后输出动作 JSON 标签：\n'
+                           + json.dumps(context, ensure_ascii=False),
+            },
+        ]
+
+    def call_deepseek_chat(self, messages: list[dict]) -> str:
+        api_key = deepseek_api_key()
+        if not api_key:
+            raise ValueError('missing api key')
+        body = json.dumps({
+            'model': deepseek_model(),
+            'messages': messages,
+            'response_format': {'type': 'json_object'},
+            'stream': False,
+            'max_tokens': 2000,
+        }, ensure_ascii=False).encode('utf-8')
+        request = urllib.request.Request(
+            DEEPSEEK_API_URL,
+            data=body,
+            method='POST',
+            headers={
+                'Content-Type': 'application/json',
+                'Authorization': f'Bearer {api_key}',
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=deepseek_timeout_seconds()) as response:
+                payload = json.loads(response.read().decode('utf-8') or '{}')
+        except urllib.error.HTTPError as error:
+            detail = error.read().decode('utf-8', errors='replace')[:500]
+            raise RuntimeError(f'DeepSeek HTTP {error.code}: {detail}') from error
+        except urllib.error.URLError as error:
+            raise RuntimeError(f'DeepSeek request failed: {error.reason}') from error
+        except (TimeoutError, json.JSONDecodeError) as error:
+            raise RuntimeError(f'DeepSeek response failed: {error}') from error
+
+        try:
+            content = payload['choices'][0]['message']['content']
+        except (KeyError, IndexError, TypeError) as error:
+            raise RuntimeError('DeepSeek response missing message content') from error
+        return str(content or '').strip()
+
+    def stream_deepseek_chat(self, messages: list[dict]):
+        api_key = deepseek_api_key()
+        if not api_key:
+            raise ValueError('missing api key')
+        body = json.dumps({
+            'model': deepseek_model(),
+            'messages': messages,
+            'stream': True,
+            'max_tokens': 2000,
+        }, ensure_ascii=False).encode('utf-8')
+        request = urllib.request.Request(
+            DEEPSEEK_API_URL,
+            data=body,
+            method='POST',
+            headers={
+                'Content-Type': 'application/json',
+                'Authorization': f'Bearer {api_key}',
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=deepseek_timeout_seconds()) as response:
+                for raw_line in response:
+                    line = raw_line.decode('utf-8', errors='replace').strip()
+                    if not line or line.startswith(':'):
+                        continue
+                    if not line.startswith('data:'):
+                        continue
+                    data = line[len('data:'):].strip()
+                    if data == '[DONE]':
+                        break
+                    try:
+                        payload = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+                    try:
+                        delta = payload['choices'][0].get('delta', {}).get('content', '')
+                    except (KeyError, IndexError, TypeError):
+                        delta = ''
+                    if delta:
+                        yield str(delta)
+        except urllib.error.HTTPError as error:
+            detail = error.read().decode('utf-8', errors='replace')[:500]
+            raise RuntimeError(f'DeepSeek HTTP {error.code}: {detail}') from error
+        except urllib.error.URLError as error:
+            raise RuntimeError(f'DeepSeek request failed: {error.reason}') from error
+        except TimeoutError as error:
+            raise RuntimeError(f'DeepSeek response failed: {error}') from error
 
     def fetch_schedule_items_for_user(self, conn: sqlite3.Connection, user_id: int) -> list[dict]:
         rows = conn.execute(
@@ -1944,6 +2386,139 @@ class TodoHandler(SimpleHTTPRequestHandler):
             )
             conn.commit()
         return self.write_json({'ok': True, 'id': feedback_id})
+
+    def handle_ai_chat(self):
+        user = self.require_user()
+        if not user:
+            return
+        if not deepseek_api_key():
+            return self.write_json(
+                {'error': 'DeepSeek API key is not configured'},
+                status=HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+        payload = self.read_json_body()
+        if payload is None:
+            return
+        message = str(payload.get('message', '') or '').strip()
+        if not message:
+            return self.write_json({'error': 'message is required'}, status=HTTPStatus.BAD_REQUEST)
+        if len(message) > 2000:
+            return self.write_json({'error': 'message is too long'}, status=HTTPStatus.BAD_REQUEST)
+
+        client_now = str(payload.get('clientNow', '') or '').strip()[:40]
+        timezone_name = str(payload.get('timezone', 'Asia/Shanghai') or 'Asia/Shanghai').strip()[:64]
+        history = self.normalize_ai_history(payload.get('history'))
+        with get_db() as conn:
+            tasks = self.fetch_tasks_for_user(conn, int(user['id']))
+
+        messages = self.build_ai_messages(message, history, tasks, client_now, timezone_name)
+        try:
+            content = self.call_deepseek_chat(messages)
+        except ValueError:
+            return self.write_json(
+                {'error': 'DeepSeek API key is not configured'},
+                status=HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+        except RuntimeError as error:
+            return self.write_json(
+                {'error': 'DeepSeek request failed', 'message': str(error)},
+                status=HTTPStatus.BAD_GATEWAY,
+            )
+
+        ai_payload, parse_error = parse_ai_json_content(content)
+        if parse_error:
+            return self.write_json({
+                'ok': True,
+                'reply': 'AI 返回的格式不是可执行 JSON，我没有生成任何操作。',
+                'actions': [],
+                'rejectedActions': [{'index': 0, 'reason': parse_error}],
+            })
+
+        reply = str(ai_payload.get('reply', '') or '').strip()
+        visible_tasks, _ = ai_context_tasks(tasks)
+        actions, rejected = normalize_ai_actions(ai_payload.get('actions'), visible_tasks)
+        if not reply:
+            reply = '我整理好了可审批的操作。' if actions else '我还需要更明确的信息。'
+        return self.write_json({
+            'ok': True,
+            'reply': reply[:2000],
+            'actions': actions,
+            'rejectedActions': rejected,
+        })
+
+    def handle_ai_chat_stream(self):
+        user = self.require_user()
+        if not user:
+            return
+        if not deepseek_api_key():
+            return self.write_json(
+                {'error': 'DeepSeek API key is not configured'},
+                status=HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+        payload = self.read_json_body()
+        if payload is None:
+            return
+        message = str(payload.get('message', '') or '').strip()
+        if not message:
+            return self.write_json({'error': 'message is required'}, status=HTTPStatus.BAD_REQUEST)
+        if len(message) > 2000:
+            return self.write_json({'error': 'message is too long'}, status=HTTPStatus.BAD_REQUEST)
+
+        client_now = str(payload.get('clientNow', '') or '').strip()[:40]
+        timezone_name = str(payload.get('timezone', 'Asia/Shanghai') or 'Asia/Shanghai').strip()[:64]
+        history = self.normalize_ai_history(payload.get('history'))
+        with get_db() as conn:
+            tasks = self.fetch_tasks_for_user(conn, int(user['id']))
+
+        messages = self.build_ai_stream_messages(message, history, tasks, client_now, timezone_name)
+        self.start_sse()
+        full_content = ''
+        visible_buffer = ''
+        hidden_actions = False
+        marker = '<AI_ACTIONS_JSON>'
+        keep_tail = len(marker) - 1
+
+        try:
+            for chunk in self.stream_deepseek_chat(messages):
+                full_content += chunk
+                if hidden_actions:
+                    continue
+                visible_buffer += chunk
+                marker_index = visible_buffer.find(marker)
+                if marker_index != -1:
+                    text = visible_buffer[:marker_index]
+                    if text:
+                        self.write_sse_event('delta', {'text': text})
+                    visible_buffer = ''
+                    hidden_actions = True
+                    continue
+                safe_length = max(0, len(visible_buffer) - keep_tail)
+                if safe_length:
+                    text = visible_buffer[:safe_length]
+                    visible_buffer = visible_buffer[safe_length:]
+                    self.write_sse_event('delta', {'text': text})
+
+            if visible_buffer and not hidden_actions:
+                self.write_sse_event('delta', {'text': visible_buffer})
+
+            reply, raw_actions, parse_error = parse_ai_stream_content(full_content)
+            visible_tasks, _ = ai_context_tasks(tasks)
+            actions, rejected = normalize_ai_actions(raw_actions, visible_tasks)
+            if parse_error:
+                rejected.append({'index': 0, 'reason': parse_error})
+            if not reply:
+                reply = '我整理好了可审批的操作。' if actions else '我还需要更明确的信息。'
+            self.write_sse_event('done', {
+                'reply': reply[:2000],
+                'actions': actions,
+                'rejectedActions': rejected,
+            })
+        except ValueError:
+            self.write_sse_event('error', {'error': 'DeepSeek API key is not configured'})
+        except RuntimeError as error:
+            self.write_sse_event('error', {'error': 'DeepSeek request failed', 'message': str(error)})
+        finally:
+            self.close_connection = True
 
     def handle_list_tasks(self):
         user = self.current_user()
@@ -3309,6 +3884,24 @@ class TodoHandler(SimpleHTTPRequestHandler):
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def start_sse(self):
+        self.send_response(HTTPStatus.OK)
+        self.send_header('Content-Type', 'text/event-stream; charset=utf-8')
+        self.send_header('Cache-Control', 'no-cache, no-store')
+        self.send_header('X-Accel-Buffering', 'no')
+        self.send_header('Connection', 'close')
+        self.end_headers()
+        self.wfile.write(b': connected\n\n')
+        self.wfile.flush()
+
+    def write_sse_event(self, event: str, payload: dict):
+        body = (
+            f'event: {event}\n'
+            f'data: {json.dumps(payload, ensure_ascii=False)}\n\n'
+        ).encode('utf-8')
+        self.wfile.write(body)
+        self.wfile.flush()
 
     def log_message(self, format: str, *args):
         super().log_message(format, *args)
