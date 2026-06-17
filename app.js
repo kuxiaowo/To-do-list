@@ -202,6 +202,8 @@ createApp({
       adminMode: false,
       adminSection: 'users',
       adminUsers: [],
+      adminUsersPage: 1,
+      adminUsersPageSize: 20,
       adminSelectedUserId: '',
       adminEditingUserId: '',
       adminEditingName: '',
@@ -347,6 +349,10 @@ createApp({
         ...user,
         label: `${user.name}（${user.nickname}）`
       }));
+    },
+    paginatedAdminUsers() {
+      const start = (this.adminUsersPage - 1) * this.adminUsersPageSize;
+      return this.adminUsers.slice(start, start + this.adminUsersPageSize);
     },
     trafficMetricCards() {
       return [
@@ -1049,6 +1055,8 @@ createApp({
       try {
         const payload = await this.apiJson(`${ADMIN_API}/users`, { cache: 'no-store' });
         this.adminUsers = Array.isArray(payload.users) ? payload.users : [];
+        const maxPage = Math.max(1, Math.ceil(this.adminUsers.length / this.adminUsersPageSize));
+        this.adminUsersPage = Math.min(this.adminUsersPage, maxPage);
       } catch (error) {
         ElementPlus.ElMessage.error(`后台用户列表读取失败：${error.message}`);
       } finally {
@@ -1677,6 +1685,15 @@ createApp({
     isValidHexColor(color) {
       return /^#[0-9a-f]{6}$/i.test(String(color || '').trim());
     },
+    adminUserAvatarText(user) {
+      if (!user) return '?';
+      const source = user.nickname || user.name || '?';
+      return source.trim().slice(0, 1).toUpperCase();
+    },
+    adminUserAvatarStyle(user) {
+      const color = user && user.avatarColor ? String(user.avatarColor).toLowerCase() : '';
+      return { background: this.isValidHexColor(color) ? color : DEFAULT_AVATAR_COLOR };
+    },
     setAvatarColorDraft(color) {
       const nextColor = String(color || '').trim().toLowerCase();
       if (!this.isValidHexColor(nextColor)) return;
@@ -1841,6 +1858,7 @@ createApp({
       this.adminMode = false;
       this.adminSection = 'users';
       this.adminUsers = [];
+      this.adminUsersPage = 1;
       this.adminSelectedUserId = '';
       this.adminEditingUserId = '';
       this.adminEditingName = '';

@@ -468,8 +468,16 @@
             </div>
             <el-button plain @click="loadAdminUsers">刷新</el-button>
           </div>
-          <el-table :data="adminUsers" style="width: 100%;">
+          <el-table :data="paginatedAdminUsers" style="width: 100%;">
             <el-table-column prop="id" label="ID" width="80"></el-table-column>
+            <el-table-column label="头像" width="78">
+              <template #default="{ row }">
+                <div class="admin-user-avatar" :style="!row.avatarUrl ? adminUserAvatarStyle(row) : null">
+                  <img v-if="row.avatarUrl" :src="row.avatarUrl" alt="">
+                  <span v-else>{{ adminUserAvatarText(row) }}</span>
+                </div>
+              </template>
+            </el-table-column>
             <el-table-column label="姓名" min-width="180">
               <template #default="{ row }">
                 <div v-if="String(adminEditingUserId) === String(row.id)" class="admin-name-editor">
@@ -514,6 +522,16 @@
               </template>
             </el-table-column>
           </el-table>
+          <div class="admin-pagination">
+            <el-pagination
+              background
+              layout="prev, pager, next, total"
+              :total="adminUsers.length"
+              :page-size="adminUsersPageSize"
+              :current-page="adminUsersPage"
+              @current-change="adminUsersPage = $event"
+            ></el-pagination>
+          </div>
         </section>
 
         <section v-else-if="adminSection === 'logs'" class="admin-panel">

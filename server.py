@@ -1288,7 +1288,10 @@ class TodoHandler(SimpleHTTPRequestHandler):
         return self.write_json({'error': 'not found'}, status=HTTPStatus.NOT_FOUND)
 
     def ensure_user_exists(self, conn: sqlite3.Connection, user_id: int):
-        row = conn.execute('SELECT id, name, nickname, role, created_at FROM users WHERE id = ?', (user_id,)).fetchone()
+        row = conn.execute(
+            'SELECT id, name, nickname, role, created_at, avatar_file, avatar_updated_at, avatar_color FROM users WHERE id = ?',
+            (user_id,),
+        ).fetchone()
         return row
 
     def request_ip(self) -> str:
@@ -1484,6 +1487,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
             rows = conn.execute(
                 '''
                 SELECT users.id, users.name, users.nickname, users.role, users.created_at,
+                       users.avatar_file, users.avatar_updated_at, users.avatar_color,
                        COUNT(DISTINCT tasks.id) AS task_count,
                        COUNT(DISTINCT schedule_items.id) AS schedule_item_count,
                        COUNT(DISTINCT habits.id) AS habit_count,
@@ -1505,6 +1509,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
                     'name': row['name'],
                     'nickname': row['nickname'],
                     'role': row['role'],
+                    'avatarUrl': avatar_url(row['avatar_file'], row['avatar_updated_at']),
+                    'avatarColor': normalize_avatar_color(row['avatar_color']),
                     'createdAt': row['created_at'],
                     'taskCount': row['task_count'],
                     'scheduleItemCount': row['schedule_item_count'],

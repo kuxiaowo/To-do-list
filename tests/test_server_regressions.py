@@ -333,6 +333,29 @@ class ServerRegressionTests(unittest.TestCase):
         status, _, _ = self.raw_request('GET', '/uploads/avatars/../todo-list.db')
         self.assertEqual(status, 404)
 
+    def test_admin_users_include_avatar_fields(self):
+        admin_token, admin_user = self.register_user('admin-avatar-list')
+        student_token, student = self.register_user('student-avatar-list')
+        conn = server.get_db()
+        try:
+            conn.execute("UPDATE users SET role = 'admin' WHERE id = ?", (admin_user['id'],))
+            conn.commit()
+        finally:
+            conn.close()
+
+        status, body = self.request('PUT', '/api/auth/avatar-color', {'color': '#123abc'}, token=student_token)
+        self.assertEqual(status, 200, body)
+        status, body = self.request('POST', '/api/auth/avatar', self.avatar_payload(), token=student_token)
+        self.assertEqual(status, 200, body)
+        avatar_url = body['user']['avatarUrl']
+
+        status, body = self.request('GET', '/api/admin/users', token=admin_token)
+        self.assertEqual(status, 200, body)
+        users_by_id = {user['id']: user for user in body['users']}
+        self.assertIn(student['id'], users_by_id)
+        self.assertEqual(users_by_id[student['id']]['avatarUrl'], avatar_url)
+        self.assertEqual(users_by_id[student['id']]['avatarColor'], '#123abc')
+
     def test_frontend_uses_due_date_task_grouping(self):
         app_js = Path('app.js').read_text(encoding='utf-8')
         self.assertIn('todoTasksByDueDate()', app_js)
@@ -342,6 +365,28 @@ class ServerRegressionTests(unittest.TestCase):
             "this.filteredTasks.filter(task => task.dueAt && this.taskPool(task) === 'todo' && task.dueAt.startsWith(key))",
             app_js,
         )
+
+    def test_admin_user_list_renders_avatar_column(self):
+        index_html = Path('index.html').read_text(encoding='utf-8')
+        app_js = Path('app.js').read_text(encoding='utf-8')
+        style_css = Path('style.css').read_text(encoding='utf-8')
+
+        self.assertIn('label="头像"', index_html)
+        self.assertIn(':data="paginatedAdminUsers"', index_html)
+        self.assertIn('class="admin-user-avatar"', index_html)
+        self.assertLess(
+            index_html.index('prop="id" label="ID"'),
+            index_html.index('class="admin-user-avatar"'),
+        )
+        self.assertIn('adminUserAvatarText(row)', index_html)
+        self.assertIn('adminUserAvatarStyle(row)', index_html)
+        self.assertIn(':page-size="adminUsersPageSize"', index_html)
+        self.assertIn('adminUserAvatarText(user)', app_js)
+        self.assertIn('adminUserAvatarStyle(user)', app_js)
+        self.assertIn('adminUsersPageSize: 20', app_js)
+        self.assertIn('paginatedAdminUsers()', app_js)
+        self.assertIn('.admin-user-avatar', style_css)
+        self.assertIn('border-radius: 50%;', style_css)
 
 
 if __name__ == '__main__':
