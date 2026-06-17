@@ -38,9 +38,9 @@ class ServerRegressionTests(unittest.TestCase):
         server.PASSWORD_ITERATIONS = self.original_iterations
         self.temp_dir.cleanup()
 
-    def request(self, method, path, payload=None, token=None):
+    def request(self, method, path, payload=None, token=None, extra_headers=None):
         data = None
-        headers = {}
+        headers = dict(extra_headers or {})
         if payload is not None:
             data = json.dumps(payload).encode('utf-8')
             headers['Content-Type'] = 'application/json'
@@ -237,6 +237,36 @@ class ServerRegressionTests(unittest.TestCase):
 
         self.assertEqual(status, 200, body)
         self.assertEqual(calls, ['secret123'])
+
+    def test_operation_logs_use_forwarded_ip_from_trusted_proxy(self):
+        self.register_user('proxy-user')
+
+        status, body = self.request(
+            'POST',
+            '/api/auth/login',
+            {
+                'nickname': 'proxy-user',
+                'password': 'secret123',
+            },
+            extra_headers={'X-Forwarded-For': '203.0.113.9, 10.0.0.5'},
+        )
+
+        self.assertEqual(status, 200, body)
+        conn = server.get_db()
+        try:
+            row = conn.execute(
+                '''
+                SELECT ip
+                FROM operation_logs
+                WHERE action = 'auth.login'
+                ORDER BY id DESC
+                LIMIT 1
+                '''
+            ).fetchone()
+        finally:
+            conn.close()
+        self.assertIsNotNone(row)
+        self.assertEqual(row['ip'], '203.0.113.9')
 
     def test_avatar_upload_static_access_replacement_and_delete(self):
         token, user = self.register_user('avatar-user')

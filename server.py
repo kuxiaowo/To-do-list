@@ -1169,7 +1169,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
                 entity_type,
                 entity_id,
                 json.dumps(detail or {}, ensure_ascii=False),
-                self.client_address[0] if self.client_address else '',
+                self.request_ip(),
                 now_iso(),
             ),
         )
