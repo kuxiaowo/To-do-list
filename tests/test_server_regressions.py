@@ -125,6 +125,47 @@ class ServerRegressionTests(unittest.TestCase):
         self.assertEqual(status, 201, payload)
         return task_id
 
+    def ai_request_context(self, messages):
+        content = messages[-1]['content']
+        return json.loads(content.split('\n', 1)[1])
+
+    def insert_task_direct(
+        self,
+        user_id,
+        task_id,
+        title,
+        *,
+        subject='Math',
+        due_at='',
+        pool='todo',
+        priority='medium',
+        note='',
+        completed=False,
+    ):
+        now = server.now_iso()
+        with server.get_db() as conn:
+            conn.execute(
+                '''
+                INSERT INTO tasks
+                (id, user_id, title, subject, due_at, pool, priority, note, completed, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''',
+                (
+                    task_id,
+                    user_id,
+                    title,
+                    subject,
+                    due_at,
+                    pool,
+                    priority,
+                    note,
+                    1 if completed else 0,
+                    now,
+                    now,
+                ),
+            )
+            conn.commit()
+
     def test_ai_context_uses_incomplete_timeline_tasks_and_reports_truncation(self):
         limit = server.AI_CONTEXT_TASK_LIMIT
         tasks = [
@@ -195,6 +236,37 @@ class ServerRegressionTests(unittest.TestCase):
         self.assertNotIn('task-schedule', context_json)
         self.assertNotIn('task-habit', context_json)
         self.assertNotIn('task-arrangement', context_json)
+
+    def test_dotenv_loader_sets_missing_values_without_overriding_existing_env(self):
+        keys = ['DOTENV_TEST_KEY', 'DOTENV_EXISTING_KEY', 'DOTENV_QUOTED_KEY']
+        original = {key: os.environ.get(key) for key in keys}
+        dotenv_path = Path(self.temp_dir.name) / '.env'
+        dotenv_path.write_text(
+            '\n'.join([
+                '\ufeff# comment',
+                'DOTENV_TEST_KEY=loaded',
+                'DOTENV_EXISTING_KEY=from-file',
+                'DOTENV_QUOTED_KEY="quoted value"',
+                '',
+            ]),
+            encoding='utf-8',
+        )
+        try:
+            os.environ.pop('DOTENV_TEST_KEY', None)
+            os.environ['DOTENV_EXISTING_KEY'] = 'from-env'
+            os.environ.pop('DOTENV_QUOTED_KEY', None)
+
+            server.load_dotenv(dotenv_path)
+
+            self.assertEqual(os.environ['DOTENV_TEST_KEY'], 'loaded')
+            self.assertEqual(os.environ['DOTENV_EXISTING_KEY'], 'from-env')
+            self.assertEqual(os.environ['DOTENV_QUOTED_KEY'], 'quoted value')
+        finally:
+            for key, value in original.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
 
     def avatar_payload(self, raw=None, filename='avatar.png', content_type='image/png'):
         png = base64.b64decode(
@@ -334,8 +406,10 @@ class ServerRegressionTests(unittest.TestCase):
         self.create_task(token, 'task-ai-reject')
         original_key = os.environ.get('DEEPSEEK_API_KEY')
         original_call = server.TodoHandler.call_deepseek_chat
+        calls = []
 
         def fake_call(handler, messages):
+            calls.append(messages)
             return json.dumps({
                 'reply': '我找到了一些候选操作。',
                 'actions': [
@@ -366,8 +440,224 @@ class ServerRegressionTests(unittest.TestCase):
                 os.environ['DEEPSEEK_API_KEY'] = original_key
 
         self.assertEqual(status, 200, body)
+        self.assertEqual(len(calls), 2)
+        self.assertIn('backendSafetyValidation', calls[1][-1]['content'])
+        self.assertIn('unsupported action type', calls[1][-1]['content'])
         self.assertEqual(body['actions'], [])
         self.assertEqual(len(body['rejectedActions']), 3)
+
+    def test_ai_chat_repairs_rejected_actions_with_followup_prompt(self):
+        token, _ = self.register_user('ai-repair')
+        self.create_task(token, 'task-ai-visible')
+        original_key = os.environ.get('DEEPSEEK_API_KEY')
+        original_call = server.TodoHandler.call_deepseek_chat
+        calls = []
+
+        def fake_call(handler, messages):
+            calls.append(messages)
+            content = messages[-1]['content']
+            if 'rejectedActions' in content:
+                return json.dumps({
+                    'reply': 'Please clarify which visible timeline task should be updated.',
+                    'actions': [],
+                })
+            return json.dumps({
+                'reply': 'I will update it.',
+                'actions': [
+                    {'type': 'update_task', 'targetTaskId': 'missing-task', 'patch': {'note': 'New note'}},
+                ],
+            })
+
+        try:
+            os.environ['DEEPSEEK_API_KEY'] = 'test-key'
+            server.TodoHandler.call_deepseek_chat = fake_call
+            status, body = self.request('POST', '/api/ai/chat', {'message': 'Update that task'}, token=token)
+        finally:
+            server.TodoHandler.call_deepseek_chat = original_call
+            if original_key is None:
+                os.environ.pop('DEEPSEEK_API_KEY', None)
+            else:
+                os.environ['DEEPSEEK_API_KEY'] = original_key
+
+        self.assertEqual(status, 200, body)
+        self.assertEqual(len(calls), 2)
+        self.assertIn('backendSafetyValidation', calls[1][-1]['content'])
+        self.assertIn('target task not found', calls[1][-1]['content'])
+        self.assertEqual(body['reply'], 'Please clarify which visible timeline task should be updated.')
+        self.assertEqual(body['actions'], [])
+        self.assertEqual(body['rejectedActions'], [])
+
+    def test_ai_chat_repairs_missing_subject_with_validation_feedback(self):
+        token, _ = self.register_user('ai-repair-subject')
+        original_key = os.environ.get('DEEPSEEK_API_KEY')
+        original_call = server.TodoHandler.call_deepseek_chat
+        calls = []
+
+        def fake_call(handler, messages):
+            calls.append(messages)
+            content = messages[-1]['content']
+            if 'backendSafetyValidation' in content:
+                context = self.ai_request_context(messages)
+                self.assertTrue(context['backendSafetyValidation']['blocked'])
+                self.assertEqual(context['rejectedActions'][0]['reason'], 'task subject is required')
+                return json.dumps({
+                    'reply': '这个任务属于哪个科目？',
+                    'actions': [],
+                })
+            return json.dumps({
+                'reply': '我会创建这个任务。',
+                'actions': [
+                    {
+                        'type': 'create_task',
+                        'task': {
+                            'title': 'No subject task',
+                            'subject': '',
+                            'dueAt': '',
+                            'priority': 'medium',
+                            'note': '',
+                        },
+                    },
+                ],
+            })
+
+        try:
+            os.environ['DEEPSEEK_API_KEY'] = 'test-key'
+            server.TodoHandler.call_deepseek_chat = fake_call
+            status, body = self.request('POST', '/api/ai/chat', {'message': '帮我创建一个任务：写练习册'}, token=token)
+        finally:
+            server.TodoHandler.call_deepseek_chat = original_call
+            if original_key is None:
+                os.environ.pop('DEEPSEEK_API_KEY', None)
+            else:
+                os.environ['DEEPSEEK_API_KEY'] = original_key
+
+        self.assertEqual(status, 200, body)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(body['reply'], '这个任务属于哪个科目？')
+        self.assertEqual(body['actions'], [])
+        self.assertEqual(body['rejectedActions'], [])
+
+    def test_ai_chat_repair_context_handles_more_than_two_hundred_tasks(self):
+        token, user = self.register_user('ai-repair-truncated')
+        for index in range(server.AI_CONTEXT_TASK_LIMIT + 5):
+            self.insert_task_direct(
+                user['id'],
+                f'bulk-{index:03d}',
+                f'Bulk {index:03d}',
+            )
+        self.insert_task_direct(user['id'], 'completed-extra', 'Completed extra', completed=True)
+        self.insert_task_direct(user['id'], 'schedule-extra', 'Schedule extra', pool='schedule')
+        original_key = os.environ.get('DEEPSEEK_API_KEY')
+        original_call = server.TodoHandler.call_deepseek_chat
+        contexts = []
+
+        def fake_call(handler, messages):
+            context = self.ai_request_context(messages)
+            contexts.append(context)
+            if 'backendSafetyValidation' in context:
+                self.assertTrue(context['taskSelection']['truncated'])
+                self.assertEqual(context['taskSelection']['includedTaskCount'], server.AI_CONTEXT_TASK_LIMIT)
+                self.assertEqual(context['taskSelection']['omittedIncompleteTimelineTaskCount'], 5)
+                self.assertEqual(context['rejectedActions'][0]['reason'], 'target task not found')
+                self.assertNotIn('completed-extra', json.dumps(context, ensure_ascii=False))
+                self.assertNotIn('schedule-extra', json.dumps(context, ensure_ascii=False))
+                return json.dumps({
+                    'reply': '当前未完成时间线任务超过 200 条，请告诉我更精确的任务标题或先缩小范围。',
+                    'actions': [],
+                })
+            self.assertTrue(context['taskSelection']['truncated'])
+            self.assertEqual(context['taskSelection']['totalIncompleteTimelineTaskCount'], server.AI_CONTEXT_TASK_LIMIT + 5)
+            self.assertEqual(len(context['tasks']), server.AI_CONTEXT_TASK_LIMIT)
+            self.assertNotIn('completed-extra', json.dumps(context, ensure_ascii=False))
+            self.assertNotIn('schedule-extra', json.dumps(context, ensure_ascii=False))
+            return json.dumps({
+                'reply': '我会修改这个任务。',
+                'actions': [
+                    {
+                        'type': 'update_task',
+                        'targetTaskId': 'bulk-204',
+                        'patch': {'note': 'This task was outside the visible context'},
+                    },
+                ],
+            })
+
+        try:
+            os.environ['DEEPSEEK_API_KEY'] = 'test-key'
+            server.TodoHandler.call_deepseek_chat = fake_call
+            status, body = self.request('POST', '/api/ai/chat', {'message': '把最后那个任务备注改一下'}, token=token)
+        finally:
+            server.TodoHandler.call_deepseek_chat = original_call
+            if original_key is None:
+                os.environ.pop('DEEPSEEK_API_KEY', None)
+            else:
+                os.environ['DEEPSEEK_API_KEY'] = original_key
+
+        self.assertEqual(status, 200, body)
+        self.assertEqual(len(contexts), 2)
+        self.assertEqual(body['reply'], '当前未完成时间线任务超过 200 条，请告诉我更精确的任务标题或先缩小范围。')
+        self.assertEqual(body['actions'], [])
+        self.assertEqual(body['rejectedActions'], [])
+
+    def test_ai_chat_stream_repairs_missing_subject_with_validation_feedback(self):
+        token, _ = self.register_user('ai-stream-repair-subject')
+        original_key = os.environ.get('DEEPSEEK_API_KEY')
+        original_stream = server.TodoHandler.stream_deepseek_chat
+        original_call = server.TodoHandler.call_deepseek_chat
+        repair_contents = []
+
+        def fake_stream(handler, messages):
+            yield '我会创建这个任务。'
+            yield '\n<AI_ACTIONS_JSON>'
+            yield json.dumps({
+                'actions': [
+                    {
+                        'type': 'create_task',
+                        'task': {
+                            'title': 'No subject task',
+                            'subject': '',
+                            'dueAt': '',
+                            'priority': 'medium',
+                            'note': '',
+                        },
+                    },
+                ],
+            })
+            yield '</AI_ACTIONS_JSON>'
+
+        def fake_call(handler, messages):
+            repair_contents.append(messages[-1]['content'])
+            return json.dumps({
+                'reply': '这个任务属于哪个科目？',
+                'actions': [],
+            })
+
+        try:
+            os.environ['DEEPSEEK_API_KEY'] = 'test-key'
+            server.TodoHandler.stream_deepseek_chat = fake_stream
+            server.TodoHandler.call_deepseek_chat = fake_call
+            status, headers, raw = self.stream_request('/api/ai/chat-stream', {
+                'message': '帮我创建一个任务：写练习册',
+                'clientNow': '2026-06-18T12:00:00.000Z',
+                'timezone': 'Asia/Shanghai',
+            }, token=token)
+        finally:
+            server.TodoHandler.stream_deepseek_chat = original_stream
+            server.TodoHandler.call_deepseek_chat = original_call
+            if original_key is None:
+                os.environ.pop('DEEPSEEK_API_KEY', None)
+            else:
+                os.environ['DEEPSEEK_API_KEY'] = original_key
+
+        self.assertEqual(status, 200, raw)
+        self.assertEqual(headers.get_content_type(), 'text/event-stream')
+        self.assertEqual(len(repair_contents), 1)
+        self.assertIn('backendSafetyValidation', repair_contents[0])
+        self.assertIn('task subject is required', repair_contents[0])
+        events = self.parse_sse(raw)
+        self.assertEqual(events[-1][0], 'done')
+        self.assertEqual(events[-1][1]['reply'], '这个任务属于哪个科目？')
+        self.assertEqual(events[-1][1]['actions'], [])
+        self.assertEqual(events[-1][1]['rejectedActions'], [])
 
     def test_ai_chat_stream_sends_deltas_then_done_actions(self):
         token, _ = self.register_user('ai-stream')

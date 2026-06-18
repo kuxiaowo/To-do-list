@@ -21,7 +21,36 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
+from ai_prompts import AI_CHAT_SYSTEM_PROMPT, AI_REPAIR_SYSTEM_PROMPT, AI_STREAM_SYSTEM_PROMPT
+
 BASE_DIR = Path(__file__).resolve().parent
+
+
+def load_dotenv(path: Path | None = None, *, override: bool = False) -> None:
+    dotenv_path = path or (BASE_DIR / '.env')
+    if not dotenv_path.exists():
+        return
+    for raw_line in dotenv_path.read_text(encoding='utf-8').splitlines():
+        line = raw_line.strip().lstrip('\ufeff')
+        if not line or line.startswith('#'):
+            continue
+        if line.startswith('export '):
+            line = line[len('export '):].strip()
+        if '=' not in line:
+            continue
+        key, value = line.split('=', 1)
+        key = key.strip()
+        if not key:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+            value = value[1:-1]
+        if override or key not in os.environ:
+            os.environ[key] = value
+
+
+load_dotenv()
+
 DATA_DIR = BASE_DIR / 'data'
 DB_PATH = DATA_DIR / 'todo-list.db'
 HOST = os.environ.get('TODO_HOST', '127.0.0.1')
@@ -1439,41 +1468,6 @@ class TodoHandler(SimpleHTTPRequestHandler):
         return history
 
     def build_ai_messages(self, message: str, history: list[dict], tasks: list[dict], client_now: str, timezone_name: str) -> list[dict]:
-        system_prompt = '''
-你是待办清单应用里的任务助手。你必须只输出一个 JSON object，不要输出 Markdown。
-JSON schema 示例：
-{
-  "reply": "给用户看的简短中文回复",
-  "actions": [
-    {
-      "type": "create_task",
-      "task": {
-        "title": "任务标题",
-        "subject": "科目",
-        "dueAt": "2026-06-18T23:00:00",
-        "priority": "medium",
-        "note": "备注"
-      }
-    },
-    {
-      "type": "update_task",
-      "targetTaskId": "必须使用上下文里已有的任务 id",
-      "patch": {
-        "note": "新的备注"
-      }
-    }
-  ]
-}
-规则：
-1. 只能生成 create_task 或 update_task。
-2. 不允许删除任务，不允许标记完成/取消完成，不允许创建或修改每日安排、时间格子、习惯。
-3. create_task 必须包含 title、subject、dueAt、priority、note；没有截止时间时 dueAt 用空字符串。
-4. update_task 只能修改 title、subject、dueAt、priority、note，必须使用上下文里已有的 targetTaskId。
-5. priority 只能是 high、medium、low。
-6. dueAt 必须是空字符串或 YYYY-MM-DDTHH:mm:00。
-7. 如果请求含糊、目标任务不确定、或缺少创建任务必需信息，reply 里追问，actions 返回 []。
-8. 一次最多生成 10 条 action。
-'''.strip()
         _, task_context = ai_context_tasks(tasks)
         context = {
             'clientNow': client_now,
@@ -1482,7 +1476,7 @@ JSON schema 示例：
             **task_context,
         }
         return [
-            {'role': 'system', 'content': system_prompt},
+            {'role': 'system', 'content': AI_CHAT_SYSTEM_PROMPT},
             *history,
             {
                 'role': 'user',
@@ -1492,44 +1486,6 @@ JSON schema 示例：
         ]
 
     def build_ai_stream_messages(self, message: str, history: list[dict], tasks: list[dict], client_now: str, timezone_name: str) -> list[dict]:
-        system_prompt = '''
-你是待办清单应用里的任务助手。输出必须分成两部分：
-第一部分：给用户看的简短中文自然语言回复，可以直接流式输出，不要 Markdown。
-第二部分：最后一行必须输出完整动作 JSON，格式严格如下：
-<AI_ACTIONS_JSON>{"actions":[]}</AI_ACTIONS_JSON>
-动作 JSON schema：
-{
-  "actions": [
-    {
-      "type": "create_task",
-      "task": {
-        "title": "任务标题",
-        "subject": "科目",
-        "dueAt": "2026-06-18T23:00:00",
-        "priority": "medium",
-        "note": "备注"
-      }
-    },
-    {
-      "type": "update_task",
-      "targetTaskId": "必须使用上下文里已有的任务 id",
-      "patch": {
-        "note": "新的备注"
-      }
-    }
-  ]
-}
-规则：
-1. 只能生成 create_task 或 update_task。
-2. 不允许删除任务，不允许标记完成/取消完成，不允许创建或修改每日安排、时间格子、习惯。
-3. create_task 必须包含 title、subject、dueAt、priority、note；没有截止时间时 dueAt 用空字符串。
-4. update_task 只能修改 title、subject、dueAt、priority、note，必须使用上下文里已有的 targetTaskId。
-5. priority 只能是 high、medium、low。
-6. dueAt 必须是空字符串或 YYYY-MM-DDTHH:mm:00。
-7. 如果请求含糊、目标任务不确定、或缺少创建任务必需信息，第一部分追问，actions 返回 []。
-8. 一次最多生成 10 条 action。
-9. 不要在 <AI_ACTIONS_JSON> 后输出任何文字。
-'''.strip()
         _, task_context = ai_context_tasks(tasks)
         context = {
             'clientNow': client_now,
@@ -1538,7 +1494,7 @@ JSON schema 示例：
             **task_context,
         }
         return [
-            {'role': 'system', 'content': system_prompt},
+            {'role': 'system', 'content': AI_STREAM_SYSTEM_PROMPT},
             *history,
             {
                 'role': 'user',
@@ -1583,6 +1539,76 @@ JSON schema 示例：
         except (KeyError, IndexError, TypeError) as error:
             raise RuntimeError('DeepSeek response missing message content') from error
         return str(content or '').strip()
+
+    def build_ai_repair_messages(
+        self,
+        message: str,
+        history: list[dict],
+        tasks: list[dict],
+        client_now: str,
+        timezone_name: str,
+        original_reply: str,
+        raw_actions: object,
+        rejected_actions: list[dict],
+    ) -> list[dict]:
+        _, task_context = ai_context_tasks(tasks)
+        context = {
+            'clientNow': client_now,
+            'timezone': timezone_name,
+            'request': message,
+            **task_context,
+            'originalReply': original_reply,
+            'originalActions': raw_actions if isinstance(raw_actions, list) else [],
+            'rejectedActions': rejected_actions,
+            'backendSafetyValidation': {
+                'blocked': True,
+                'instruction': '这些 actions 已被后端安全校验拒绝。请根据 rejectedActions 的 reason 修正；如果缺少必需信息，就追问用户并返回空 actions。',
+                'rejectedActions': rejected_actions,
+            },
+        }
+        return [
+            {'role': 'system', 'content': AI_REPAIR_SYSTEM_PROMPT},
+            *history,
+            {
+                'role': 'user',
+                'content': '请根据下面 JSON 上下文修正被拦截的 AI 指令。如果不能安全修正，就追问用户：\n'
+                           + json.dumps(context, ensure_ascii=False),
+            },
+        ]
+
+    def repair_ai_response(
+        self,
+        message: str,
+        history: list[dict],
+        tasks: list[dict],
+        client_now: str,
+        timezone_name: str,
+        original_reply: str,
+        raw_actions: object,
+        rejected_actions: list[dict],
+    ) -> tuple[str, list[dict], list[dict]] | None:
+        if not rejected_actions:
+            return None
+        repair_messages = self.build_ai_repair_messages(
+            message,
+            history,
+            tasks,
+            client_now,
+            timezone_name,
+            original_reply,
+            raw_actions,
+            rejected_actions,
+        )
+        content = self.call_deepseek_chat(repair_messages)
+        repair_payload, parse_error = parse_ai_json_content(content)
+        if parse_error:
+            return None
+        visible_tasks, _ = ai_context_tasks(tasks)
+        repair_reply = str(repair_payload.get('reply', '') or '').strip()
+        repair_actions, repair_rejected = normalize_ai_actions(repair_payload.get('actions'), visible_tasks)
+        if not repair_reply:
+            repair_reply = '我还需要更明确的信息。' if not repair_actions else '我修正好了可审批的操作。'
+        return repair_reply[:2000], repair_actions, repair_rejected
 
     def stream_deepseek_chat(self, messages: list[dict]):
         api_key = deepseek_api_key()
@@ -2436,9 +2462,27 @@ JSON schema 示例：
 
         reply = str(ai_payload.get('reply', '') or '').strip()
         visible_tasks, _ = ai_context_tasks(tasks)
-        actions, rejected = normalize_ai_actions(ai_payload.get('actions'), visible_tasks)
+        raw_actions = ai_payload.get('actions')
+        actions, rejected = normalize_ai_actions(raw_actions, visible_tasks)
         if not reply:
             reply = '我整理好了可审批的操作。' if actions else '我还需要更明确的信息。'
+        if rejected:
+            try:
+                repaired = self.repair_ai_response(
+                    message,
+                    history,
+                    tasks,
+                    client_now,
+                    timezone_name,
+                    reply,
+                    raw_actions,
+                    rejected,
+                )
+            except RuntimeError as error:
+                repaired = None
+                rejected.append({'index': 0, 'reason': f'AI correction failed: {error}'})
+            if repaired is not None:
+                reply, actions, rejected = repaired
         return self.write_json({
             'ok': True,
             'reply': reply[:2000],
@@ -2508,6 +2552,23 @@ JSON schema 示例：
                 rejected.append({'index': 0, 'reason': parse_error})
             if not reply:
                 reply = '我整理好了可审批的操作。' if actions else '我还需要更明确的信息。'
+            if rejected:
+                try:
+                    repaired = self.repair_ai_response(
+                        message,
+                        history,
+                        tasks,
+                        client_now,
+                        timezone_name,
+                        reply,
+                        raw_actions,
+                        rejected,
+                    )
+                except RuntimeError as error:
+                    repaired = None
+                    rejected.append({'index': 0, 'reason': f'AI correction failed: {error}'})
+                if repaired is not None:
+                    reply, actions, rejected = repaired
             self.write_sse_event('done', {
                 'reply': reply[:2000],
                 'actions': actions,

@@ -1008,6 +1008,14 @@ createApp({
       if (!donePayload) throw new Error('AI 流式响应没有结束标记');
       return donePayload;
     },
+    aiRejectedSummary(rejected) {
+      const reasons = (Array.isArray(rejected) ? rejected : [])
+        .map(item => String(item.reason || '').trim())
+        .filter(Boolean)
+        .slice(0, 3);
+      if (!reasons.length) return '有些候选操作没有通过校验，未写入任务。';
+      return `有些候选操作没有通过校验，未写入任务。原因：${reasons.join('；')}`;
+    },
     async sendAiMessage() {
       if (!this.currentUser) {
         ElementPlus.ElMessage.warning('请先登录或注册，再使用 AI 助手。');
@@ -1041,7 +1049,7 @@ createApp({
         }
         const rejected = Array.isArray(payload.rejectedActions) ? payload.rejectedActions : [];
         if (!actions.length && rejected.length) {
-          this.aiChatMessages.push({ role: 'assistant', content: '有些候选操作被安全校验拦下了，没有写入任务。' });
+          this.aiChatMessages.push({ role: 'assistant', content: this.aiRejectedSummary(rejected) });
         }
       } catch (error) {
         console.error('AI 助手请求失败：', error);
@@ -1102,19 +1110,17 @@ createApp({
     aiActionStatusLabel(action) {
       const status = this.aiActionStatus(action);
       return {
-        pending: '待审批',
+        pending: '待处理',
         executed: '已执行',
-        skipped: '已跳过',
-        failed: '失败'
-      }[status] || '待审批';
+        canceled: '已取消'
+      }[status] || '待处理';
     },
     aiActionStatusType(action) {
       const status = this.aiActionStatus(action);
       return {
         pending: 'info',
         executed: 'success',
-        skipped: 'warning',
-        failed: 'danger'
+        canceled: 'warning'
       }[status] || 'info';
     },
     aiActionTypeLabel(action) {
@@ -1128,7 +1134,7 @@ createApp({
       }));
     },
     aiActionLocked(action) {
-      return ['executed', 'skipped'].includes(this.aiActionStatus(action));
+      return ['executed', 'canceled'].includes(this.aiActionStatus(action));
     },
     aiActionFieldChanged(action, field) {
       if (!action || action.type !== 'update_task') return false;
@@ -1215,14 +1221,13 @@ createApp({
     },
     aiApprovalProgressText() {
       const counts = this.aiApprovalCounts();
-      return `已执行 ${counts.executed || 0} · 已跳过 ${counts.skipped || 0} · 失败 ${counts.failed || 0} · 待处理 ${counts.pending || 0}`;
+      return `已执行 ${counts.executed || 0} · 已取消 ${counts.canceled || 0} · 待处理 ${counts.pending || 0}`;
     },
     appendAiActionSummary() {
       const counts = this.aiApprovalCounts();
       const parts = [
         `已执行 ${counts.executed || 0} 条`,
-        `已跳过 ${counts.skipped || 0} 条`,
-        `失败 ${counts.failed || 0} 条`,
+        `已取消 ${counts.canceled || 0} 条`,
         `未处理 ${counts.pending || 0} 条`
       ];
       const details = this.aiPendingActions.map((action, index) => {
@@ -1242,8 +1247,12 @@ createApp({
       this.aiCurrentActionIndex = 0;
       this.aiExecutingActionId = '';
     },
+    canCloseAiApproval() {
+      if (this.aiExecutingActionId) return false;
+      return this.aiActionResults.every(result => result.status !== 'pending');
+    },
     closeAiApproval() {
-      if (this.aiExecutingActionId) return;
+      if (!this.canCloseAiApproval()) return;
       this.aiApprovalVisible = false;
       this.appendAiActionSummary();
     },
@@ -1287,15 +1296,15 @@ createApp({
         }
       } catch (error) {
         console.error('AI 指令执行失败：', error);
-        this.markAiAction(action, 'failed', error.message);
+        this.markAiAction(action, 'pending', `执行失败：${error.message}`);
         ElementPlus.ElMessage.error(`AI 指令执行失败：${error.message}`);
       } finally {
         this.aiExecutingActionId = '';
       }
     },
-    skipAiAction(action) {
+    cancelAiAction(action) {
       if (!action || this.aiExecutingActionId) return;
-      this.markAiAction(action, 'skipped', '用户跳过');
+      this.markAiAction(action, 'canceled', '用户取消');
     },
     defaultSubjectTemplate() {
       return JSON.parse(JSON.stringify(DEFAULT_SUBJECT_TEMPLATE));

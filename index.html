@@ -1091,7 +1091,7 @@
                 <ul>
                   <li>只会生成“创建任务”和“修改任务详情”两类指令。</li>
                   <li>不会删除任务、标记完成、修改每日安排、时间格子或习惯。</li>
-                  <li>所有指令必须等本轮输出结束后，在卡片列表里单独批准才会执行。</li>
+                  <li>所有指令必须等本轮输出结束后，在卡片列表里单独选择执行或取消。</li>
                   <li>会读取本轮请求、最近最多 20 条聊天/审批结果、当前时间/时区，以及最多 200 条未完成时间线任务。</li>
                   <li>任务字段包括 id、标题、科目、截止时间、优先级、备注、状态和任务池。</li>
                   <li>未完成时间线任务超过 200 条时，只给前 200 条详情，同时告诉 AI 有截断；看不到目标时应追问。</li>
@@ -1213,14 +1213,14 @@
             <footer class="ai-approval-card-actions">
               <el-button
                 :disabled="aiActionLocked(action) || !!aiExecutingActionId"
-                @click="skipAiAction(action)"
-              >跳过</el-button>
+                @click="cancelAiAction(action)"
+              >取消</el-button>
               <el-button
                 type="primary"
                 :loading="aiExecutingActionId === action.id"
-                :disabled="aiActionStatus(action) === 'executed' || aiActionStatus(action) === 'skipped' || (!!aiExecutingActionId && aiExecutingActionId !== action.id)"
+                :disabled="aiActionLocked(action) || (!!aiExecutingActionId && aiExecutingActionId !== action.id)"
                 @click="approveAiAction(action)"
-              >批准并执行</el-button>
+              >执行</el-button>
             </footer>
           </article>
         </div>
@@ -1230,7 +1230,7 @@
           <div class="left-actions">
           </div>
           <div class="right-actions">
-            <el-button :disabled="!!aiExecutingActionId" @click="closeAiApproval">完成审批</el-button>
+            <el-button :disabled="!canCloseAiApproval()" @click="closeAiApproval">完成审批</el-button>
           </div>
         </div>
       </template>

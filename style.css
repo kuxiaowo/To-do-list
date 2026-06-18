@@ -2091,14 +2091,9 @@ body.is-schedule-touch-dragging * {
   background: rgba(34, 197, 94, 0.06);
 }
 
-.ai-approval-card.status-skipped {
+.ai-approval-card.status-canceled {
   border-left-color: var(--warning);
   background: rgba(245, 158, 11, 0.06);
-}
-
-.ai-approval-card.status-failed {
-  border-left-color: var(--danger);
-  background: rgba(239, 68, 68, 0.06);
 }
 
 .ai-approval-card-header {
