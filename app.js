@@ -251,6 +251,33 @@ createApp({
         topIps: [],
         recentVisits: []
       },
+      adminAiUsageView: '7d',
+      adminAiUsageHoverPoint: null,
+      adminAiUsageUsersTotal: 0,
+      adminAiUsagePage: 1,
+      adminAiUsagePageSize: 50,
+      adminAiGlobalLimitDraft: {
+        windowHours: 24,
+        inputTokenLimit: 200000,
+        outputTokenLimit: 50000
+      },
+      adminAiUserLimitDrafts: {},
+      adminAiUsage: {
+        seriesUnit: 'day',
+        globalLimit: {
+          windowHours: 24,
+          inputTokenLimit: 200000,
+          outputTokenLimit: 50000
+        },
+        totalPromptTokens: 0,
+        totalCompletionTokens: 0,
+        totalCalls: 0,
+        todayPromptTokens: 0,
+        todayCompletionTokens: 0,
+        todayCalls: 0,
+        trendSeries: [],
+        users: []
+      },
       adminLoading: false,
       adminTimelineLoadedUserId: '',
       guideVisible: false,
@@ -436,6 +463,86 @@ createApp({
       return {
         left: `${this.adminTrafficHoverPoint.x}%`,
         top: `${this.adminTrafficHoverPoint.y}%`
+      };
+    },
+    aiUsageMetricCards() {
+      return [
+        { label: '全站输入 token', value: this.formatTokenCount(this.adminAiUsage.totalPromptTokens) },
+        { label: '全站输出 token', value: this.formatTokenCount(this.adminAiUsage.totalCompletionTokens) },
+        { label: '总调用次数', value: this.formatTokenCount(this.adminAiUsage.totalCalls) },
+        { label: '今日输入 / 输出', value: `${this.formatTokenCount(this.adminAiUsage.todayPromptTokens)} / ${this.formatTokenCount(this.adminAiUsage.todayCompletionTokens)}` }
+      ];
+    },
+    aiUsageSeries() {
+      return Array.isArray(this.adminAiUsage.trendSeries) ? this.adminAiUsage.trendSeries : [];
+    },
+    aiUsageChartTitle() {
+      const labels = {
+        '30d': '近 30 天 Token 趋势',
+        '7d': '近 7 天 Token 趋势',
+        '1d': '近 24 小时 Token 趋势',
+        '6h': '近 6 小时 Token 趋势'
+      };
+      return labels[this.adminAiUsageView] || 'Token 趋势';
+    },
+    aiUsageChartPointItems() {
+      const series = this.aiUsageSeries;
+      if (!series.length) return [];
+      const maxTokens = Math.max(
+        1,
+        ...series.map(item => Number(item.promptTokens || 0)),
+        ...series.map(item => Number(item.completionTokens || 0))
+      );
+      return series.map((item, index) => {
+        const promptTokens = Number(item.promptTokens || 0);
+        const completionTokens = Number(item.completionTokens || 0);
+        const x = series.length === 1 ? 50 : (index / (series.length - 1)) * 100;
+        const inputY = 92 - (promptTokens / maxTokens) * 76;
+        const outputY = 92 - (completionTokens / maxTokens) * 76;
+        return {
+          ...item,
+          x,
+          y: Math.min(inputY, outputY),
+          inputY,
+          outputY,
+          promptTokens,
+          completionTokens,
+          totalTokens: Number(item.totalTokens || 0),
+          calls: Number(item.calls || 0)
+        };
+      });
+    },
+    aiUsageInputChartPoints() {
+      if (!this.aiUsageChartPointItems.length) return '';
+      return this.aiUsageChartPointItems.map(point => `${point.x.toFixed(2)},${point.inputY.toFixed(2)}`).join(' ');
+    },
+    aiUsageOutputChartPoints() {
+      if (!this.aiUsageChartPointItems.length) return '';
+      return this.aiUsageChartPointItems.map(point => `${point.x.toFixed(2)},${point.outputY.toFixed(2)}`).join(' ');
+    },
+    aiUsageChartLabels() {
+      const series = this.aiUsageSeries;
+      if (!series.length) return [];
+      if (this.adminAiUsageView === '6h' || this.adminAiUsageView === '7d') return series;
+      const step = this.adminAiUsageView === '1d' ? 3 : 5;
+      const labels = series.filter((item, index) => index % step === 0);
+      const last = series[series.length - 1];
+      if (labels[labels.length - 1] !== last) labels.push(last);
+      return labels;
+    },
+    aiUsageMaxTokens() {
+      const series = this.aiUsageSeries;
+      return Math.max(
+        0,
+        ...series.map(item => Number(item.promptTokens || 0)),
+        ...series.map(item => Number(item.completionTokens || 0))
+      );
+    },
+    aiUsageHoverStyle() {
+      if (!this.adminAiUsageHoverPoint) return {};
+      return {
+        left: `${this.adminAiUsageHoverPoint.x}%`,
+        top: `${this.adminAiUsageHoverPoint.y}%`
       };
     },
     sortedTasks() {
@@ -1000,6 +1107,10 @@ createApp({
           const block = buffer.slice(0, boundaryIndex);
           buffer = buffer.slice(boundaryIndex + 2);
           if (block.trim()) handleBlock(block);
+          if (donePayload) {
+            await reader.cancel().catch(() => {});
+            return donePayload;
+          }
           boundaryIndex = buffer.indexOf('\n\n');
         }
       }
@@ -1426,6 +1537,7 @@ createApp({
       if (this.adminSection === 'timeline') await this.loadAdminTimeline();
       if (this.adminSection === 'feedback') await this.loadAdminFeedback(1);
       if (this.adminSection === 'traffic') await this.loadAdminTraffic();
+      if (this.adminSection === 'aiUsage') await this.loadAdminAiUsage();
       await this.recordVisit('admin');
     },
     async exitAdminMode() {
@@ -1444,6 +1556,7 @@ createApp({
       if (section === 'timeline') await this.loadAdminTimeline();
       if (section === 'feedback') await this.loadAdminFeedback(1);
       if (section === 'traffic') await this.loadAdminTraffic();
+      if (section === 'aiUsage') await this.loadAdminAiUsage();
     },
     async recordVisit(page) {
       try {
@@ -1632,6 +1745,180 @@ createApp({
     hideTrafficPoint() {
       this.adminTrafficHoverPoint = null;
     },
+    normalizeAiLimitDraft(limit) {
+      const windowHours = Number(limit && limit.windowHours);
+      const inputTokenLimit = Number(limit && limit.inputTokenLimit);
+      const outputTokenLimit = Number(limit && limit.outputTokenLimit);
+      if (!Number.isInteger(windowHours) || windowHours < 1 || windowHours > 8760) {
+        throw new Error('窗口小时数必须是 1 到 8760 之间的整数。');
+      }
+      if (!Number.isInteger(inputTokenLimit) || inputTokenLimit < 1 || inputTokenLimit > 10000000000) {
+        throw new Error('输入 token 上限必须是 1 到 10000000000 之间的整数。');
+      }
+      if (!Number.isInteger(outputTokenLimit) || outputTokenLimit < 1 || outputTokenLimit > 10000000000) {
+        throw new Error('输出 token 上限必须是 1 到 10000000000 之间的整数。');
+      }
+      return { windowHours, inputTokenLimit, outputTokenLimit };
+    },
+    aiLimitDraftFromLimit(limit) {
+      return {
+        windowHours: Number(limit && limit.windowHours ? limit.windowHours : 24),
+        inputTokenLimit: Number(limit && limit.inputTokenLimit ? limit.inputTokenLimit : 200000),
+        outputTokenLimit: Number(limit && limit.outputTokenLimit ? limit.outputTokenLimit : 50000)
+      };
+    },
+    async loadAdminAiUsage(page = this.adminAiUsagePage) {
+      if (!this.isAdmin) return;
+      const nextPage = Number(page);
+      const safePage = Number.isFinite(nextPage) && nextPage > 0 ? Math.floor(nextPage) : this.adminAiUsagePage;
+      this.adminLoading = true;
+      try {
+        const url = `${ADMIN_API}/ai-usage/summary?view=${encodeURIComponent(this.adminAiUsageView)}&page=${safePage}&pageSize=${this.adminAiUsagePageSize}`;
+        const payload = await this.apiJson(url, { cache: 'no-store' });
+        const globalLimit = this.aiLimitDraftFromLimit(payload.globalLimit);
+        const users = Array.isArray(payload.users) ? payload.users : [];
+        this.adminAiUsage = {
+          seriesUnit: payload.seriesUnit || 'day',
+          globalLimit,
+          totalPromptTokens: Number(payload.totalPromptTokens || 0),
+          totalCompletionTokens: Number(payload.totalCompletionTokens || 0),
+          totalCalls: Number(payload.totalCalls || 0),
+          todayPromptTokens: Number(payload.todayPromptTokens || 0),
+          todayCompletionTokens: Number(payload.todayCompletionTokens || 0),
+          todayCalls: Number(payload.todayCalls || 0),
+          trendSeries: Array.isArray(payload.trendSeries) ? payload.trendSeries : [],
+          users
+        };
+        this.adminAiGlobalLimitDraft = this.aiLimitDraftFromLimit(globalLimit);
+        this.adminAiUserLimitDrafts = users.reduce((drafts, row) => {
+          const id = row && row.user ? String(row.user.id) : '';
+          if (!id) return drafts;
+          drafts[id] = this.aiLimitDraftFromLimit(row.effectiveLimit || globalLimit);
+          return drafts;
+        }, {});
+        this.adminAiUsageUsersTotal = Number(payload.usersTotal || 0);
+        this.adminAiUsagePage = Number(payload.page || safePage);
+        this.adminAiUsageHoverPoint = null;
+      } catch (error) {
+        ElementPlus.ElMessage.error(`Token 使用情况读取失败：${error.message}`);
+      } finally {
+        this.adminLoading = false;
+      }
+    },
+    async switchAdminAiUsageView(view) {
+      if (view === this.adminAiUsageView) return;
+      this.adminAiUsageView = view;
+      this.adminAiUsageHoverPoint = null;
+      await this.loadAdminAiUsage(this.adminAiUsagePage);
+    },
+    showAiUsagePoint(point) {
+      this.adminAiUsageHoverPoint = point;
+    },
+    hideAiUsagePoint() {
+      this.adminAiUsageHoverPoint = null;
+    },
+    formatTokenCount(value) {
+      const number = Number(value || 0);
+      return new Intl.NumberFormat('zh-CN').format(Number.isFinite(number) ? number : 0);
+    },
+    aiLimitSourceLabel(row) {
+      return row && row.hasOverride ? '个人覆盖' : '全局';
+    },
+    aiLimitSourceType(row) {
+      return row && row.hasOverride ? 'warning' : 'info';
+    },
+    aiLimitText(limit) {
+      const safe = this.aiLimitDraftFromLimit(limit);
+      return `${safe.windowHours} 小时 · 输入 ${this.formatTokenCount(safe.inputTokenLimit)} · 输出 ${this.formatTokenCount(safe.outputTokenLimit)}`;
+    },
+    aiWindowUsageText(usage) {
+      const safe = usage || {};
+      return `输入 ${this.formatTokenCount(safe.promptTokens)} / 输出 ${this.formatTokenCount(safe.completionTokens)}`;
+    },
+    async saveAdminAiGlobalLimit() {
+      if (!this.isAdmin) return;
+      let limit;
+      try {
+        limit = this.normalizeAiLimitDraft(this.adminAiGlobalLimitDraft);
+      } catch (error) {
+        ElementPlus.ElMessage.warning(error.message);
+        return;
+      }
+      this.adminLoading = true;
+      try {
+        await this.apiJson(`${ADMIN_API}/ai-usage/global-limit`, {
+          method: 'PUT',
+          body: JSON.stringify(limit)
+        });
+        ElementPlus.ElMessage.success('全局 Token 限制已保存。');
+        await this.loadAdminAiUsage(this.adminAiUsagePage);
+      } catch (error) {
+        ElementPlus.ElMessage.error(`全局 Token 限制保存失败：${error.message}`);
+      } finally {
+        this.adminLoading = false;
+      }
+    },
+    async saveAdminAiUserLimit(row) {
+      if (!this.isAdmin || !row || !row.user) return;
+      const userId = String(row.user.id);
+      let limit;
+      try {
+        limit = this.normalizeAiLimitDraft(this.adminAiUserLimitDrafts[userId]);
+      } catch (error) {
+        ElementPlus.ElMessage.warning(error.message);
+        return;
+      }
+      this.adminLoading = true;
+      try {
+        await this.apiJson(`${ADMIN_API}/users/${encodeURIComponent(userId)}/ai-token-limit`, {
+          method: 'PUT',
+          body: JSON.stringify(limit)
+        });
+        ElementPlus.ElMessage.success('用户 Token 限制已保存。');
+        await this.loadAdminAiUsage(this.adminAiUsagePage);
+      } catch (error) {
+        ElementPlus.ElMessage.error(`用户 Token 限制保存失败：${error.message}`);
+      } finally {
+        this.adminLoading = false;
+      }
+    },
+    async clearAdminAiUserLimit(row) {
+      if (!this.isAdmin || !row || !row.user) return;
+      const userId = String(row.user.id);
+      this.adminLoading = true;
+      try {
+        await this.apiJson(`${ADMIN_API}/users/${encodeURIComponent(userId)}/ai-token-limit`, { method: 'DELETE' });
+        ElementPlus.ElMessage.success('该用户已恢复全局限制。');
+        await this.loadAdminAiUsage(this.adminAiUsagePage);
+      } catch (error) {
+        ElementPlus.ElMessage.error(`恢复全局限制失败：${error.message}`);
+      } finally {
+        this.adminLoading = false;
+      }
+    },
+    async clearAllAdminAiUserLimits() {
+      if (!this.isAdmin) return;
+      ElementPlus.ElMessageBox.confirm(
+        '确定清除所有用户个人 Token 限制，让所有用户重新使用全局设置？',
+        '统一全局限制',
+        {
+          confirmButtonText: '统一全局',
+          cancelButtonText: '取消',
+          type: 'warning'
+        }
+      ).then(async () => {
+        this.adminLoading = true;
+        try {
+          await this.apiJson(`${ADMIN_API}/ai-usage/clear-user-limits`, { method: 'POST' });
+          ElementPlus.ElMessage.success('所有用户已恢复全局限制。');
+          await this.loadAdminAiUsage(this.adminAiUsagePage);
+        } catch (error) {
+          ElementPlus.ElMessage.error(`统一全局失败：${error.message}`);
+        } finally {
+          this.adminLoading = false;
+        }
+      }).catch(() => {});
+    },
     async saveAdminFeedbackLimit() {
       if (!this.isAdmin) return;
       const feedbackLimitPerUser = Number(this.adminFeedbackLimitDraft);
@@ -1770,7 +2057,11 @@ createApp({
         'admin.feedback.delete': '删除反馈',
         'admin.feedback.limit_update': '修改未回复反馈上限',
         'feedback.delete': '删除反馈',
-        'subject_template.update': '更新科目模板'
+        'subject_template.update': '更新科目模板',
+        'admin.ai_token.global_limit_update': '修改 AI 全局 Token 限制',
+        'admin.ai_token.user_limit_update': '修改用户 AI Token 限制',
+        'admin.ai_token.user_limit_clear': '清除用户 AI Token 覆盖',
+        'admin.ai_token.user_limits_clear_all': '清除全部 AI Token 覆盖'
       };
       return labels[action] || action;
     },
@@ -2293,6 +2584,32 @@ createApp({
         dailySeries: [],
         topIps: [],
         recentVisits: []
+      };
+      this.adminAiUsageView = '7d';
+      this.adminAiUsageHoverPoint = null;
+      this.adminAiUsageUsersTotal = 0;
+      this.adminAiUsagePage = 1;
+      this.adminAiGlobalLimitDraft = {
+        windowHours: 24,
+        inputTokenLimit: 200000,
+        outputTokenLimit: 50000
+      };
+      this.adminAiUserLimitDrafts = {};
+      this.adminAiUsage = {
+        seriesUnit: 'day',
+        globalLimit: {
+          windowHours: 24,
+          inputTokenLimit: 200000,
+          outputTokenLimit: 50000
+        },
+        totalPromptTokens: 0,
+        totalCompletionTokens: 0,
+        totalCalls: 0,
+        todayPromptTokens: 0,
+        todayCompletionTokens: 0,
+        todayCalls: 0,
+        trendSeries: [],
+        users: []
       };
       this.nicknameDialogVisible = false;
       this.nicknameForm.nickname = '';
@@ -3057,9 +3374,65 @@ createApp({
       return `${this.pad(hour)}:${this.pad(minute)}`;
     },
     setDialogTimePart(part, value) {
-      const cleaned = String(value || '').replace(/\D/g, '').slice(0, 2);
+      const raw = String(value || '');
       const [hour = '', minute = ''] = String(this.form.time || '').split(':');
-      this.form.time = part === 'hour' ? `${cleaned}:${minute}` : `${hour}:${cleaned}`;
+      if (raw.includes(':')) {
+        const [rawHour = '', rawMinute = ''] = raw.split(':');
+        const nextHour = rawHour.replace(/\D/g, '').slice(0, 2);
+        const nextMinute = rawMinute.replace(/\D/g, '').slice(0, 2);
+        this.form.time = nextHour || nextMinute ? `${nextHour}:${nextMinute}` : '';
+        if (nextHour.length >= 2) this.focusDialogTimePart('minute');
+        return;
+      }
+
+      const digits = raw.replace(/\D/g, '');
+      if (part === 'hour') {
+        const nextHour = digits.slice(0, 2);
+        const nextMinute = digits.length > 2 ? digits.slice(2, 4) : minute;
+        this.form.time = nextHour || nextMinute ? `${nextHour}:${nextMinute}` : '';
+        if (digits.length >= 2) this.focusDialogTimePart('minute', true);
+        return;
+      }
+
+      const nextMinute = digits.slice(0, 2);
+      this.form.time = hour || nextMinute ? `${hour}:${nextMinute}` : '';
+    },
+    focusDialogTimeContainer(event) {
+      if (event && event.target && event.target.closest && event.target.closest('.el-input')) return;
+      this.focusDialogTimePart(String(this.dueHour || '').length >= 2 ? 'minute' : 'hour', true);
+    },
+    focusDialogTimePart(part, select = false) {
+      const refName = part === 'minute' ? 'dueMinuteInput' : 'dueHourInput';
+      this.$nextTick(() => {
+        const inputRef = this.$refs[refName];
+        if (!inputRef) return;
+        if (inputRef.focus) inputRef.focus();
+        const input = inputRef.input || (inputRef.$el && inputRef.$el.querySelector('input'));
+        if (input && input.focus) input.focus();
+        if (select && input && input.select) input.select();
+      });
+    },
+    selectDialogTimeInput(event) {
+      const input = event && event.target;
+      if (!input || !input.select) return;
+      window.setTimeout(() => {
+        if (document.activeElement === input) input.select();
+      }, 0);
+    },
+    handleDialogTimeKeydown(part, event) {
+      const input = event.target;
+      const value = String(input && input.value ? input.value : '');
+      const selectionStart = input && typeof input.selectionStart === 'number' ? input.selectionStart : value.length;
+      const selectionEnd = input && typeof input.selectionEnd === 'number' ? input.selectionEnd : value.length;
+      if (part === 'hour' && (event.key === ':' || event.key === 'ArrowRight') && selectionStart === value.length && selectionEnd === value.length) {
+        if (event.key === ':') event.preventDefault();
+        this.focusDialogTimePart('minute', true);
+        return;
+      }
+      if (part === 'minute' && (event.key === 'Backspace' || event.key === 'ArrowLeft') && selectionStart === 0 && selectionEnd === 0) {
+        if (event.key === 'Backspace' && value) return;
+        this.focusDialogTimePart('hour');
+      }
     },
     normalizeDialogTimeInput() {
       const [rawHour = '', rawMinute = ''] = String(this.form.time || '').split(':');

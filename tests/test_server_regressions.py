@@ -111,6 +111,29 @@ class ServerRegressionTests(unittest.TestCase):
         self.assertEqual(status, 200, payload)
         return payload['token'], payload['user']
 
+    def make_admin(self, user_id):
+        conn = server.get_db()
+        try:
+            conn.execute("UPDATE users SET role = 'admin' WHERE id = ?", (user_id,))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def ai_usage_rows(self):
+        conn = server.get_db()
+        try:
+            return conn.execute(
+                '''
+                SELECT user_id, model, call_type, prompt_tokens, completion_tokens,
+                       total_tokens, prompt_cache_hit_tokens, prompt_cache_miss_tokens,
+                       reasoning_tokens, created_at
+                FROM ai_usage_logs
+                ORDER BY id ASC
+                '''
+            ).fetchall()
+        finally:
+            conn.close()
+
     def create_task(self, token, task_id='task-test'):
         status, payload = self.request('POST', '/api/tasks', {
             'id': task_id,
@@ -696,6 +719,333 @@ class ServerRegressionTests(unittest.TestCase):
         self.assertEqual(events[-1][1]['actions'][0]['type'], 'create_task')
         self.assertNotIn('AI_ACTIONS_JSON', delta_text)
 
+    def test_ai_chat_records_non_stream_usage(self):
+        token, user = self.register_user('ai-usage-non-stream')
+        original_key = os.environ.get('DEEPSEEK_API_KEY')
+        original_call = server.TodoHandler.call_deepseek_chat
+
+        def fake_call(handler, messages):
+            handler._last_deepseek_usage = {
+                'prompt_tokens': 11,
+                'completion_tokens': 7,
+                'total_tokens': 18,
+                'prompt_cache_hit_tokens': 3,
+                'prompt_cache_miss_tokens': 8,
+                'completion_tokens_details': {'reasoning_tokens': 2},
+            }
+            return json.dumps({'reply': 'ok', 'actions': []})
+
+        try:
+            os.environ['DEEPSEEK_API_KEY'] = 'test-key'
+            server.TodoHandler.call_deepseek_chat = fake_call
+            status, body = self.request('POST', '/api/ai/chat', {'message': 'hello'}, token=token)
+        finally:
+            server.TodoHandler.call_deepseek_chat = original_call
+            if original_key is None:
+                os.environ.pop('DEEPSEEK_API_KEY', None)
+            else:
+                os.environ['DEEPSEEK_API_KEY'] = original_key
+
+        self.assertEqual(status, 200, body)
+        rows = self.ai_usage_rows()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['user_id'], user['id'])
+        self.assertEqual(rows[0]['call_type'], 'chat')
+        self.assertEqual(rows[0]['prompt_tokens'], 11)
+        self.assertEqual(rows[0]['completion_tokens'], 7)
+        self.assertEqual(rows[0]['total_tokens'], 18)
+        self.assertEqual(rows[0]['prompt_cache_hit_tokens'], 3)
+        self.assertEqual(rows[0]['prompt_cache_miss_tokens'], 8)
+        self.assertEqual(rows[0]['reasoning_tokens'], 2)
+
+    def test_ai_chat_stream_records_usage(self):
+        token, user = self.register_user('ai-usage-stream')
+        original_key = os.environ.get('DEEPSEEK_API_KEY')
+        original_stream = server.TodoHandler.stream_deepseek_chat
+
+        def fake_stream(handler, messages):
+            handler._last_deepseek_stream_usage = {
+                'prompt_tokens': 13,
+                'completion_tokens': 5,
+                'total_tokens': 18,
+            }
+            yield 'stream ok'
+            yield '\n<AI_ACTIONS_JSON>{"actions":[]}</AI_ACTIONS_JSON>'
+
+        try:
+            os.environ['DEEPSEEK_API_KEY'] = 'test-key'
+            server.TodoHandler.stream_deepseek_chat = fake_stream
+            status, headers, raw = self.stream_request('/api/ai/chat-stream', {
+                'message': 'hello stream',
+                'clientNow': '2026-06-18T12:00:00.000Z',
+                'timezone': 'Asia/Shanghai',
+            }, token=token)
+        finally:
+            server.TodoHandler.stream_deepseek_chat = original_stream
+            if original_key is None:
+                os.environ.pop('DEEPSEEK_API_KEY', None)
+            else:
+                os.environ['DEEPSEEK_API_KEY'] = original_key
+
+        self.assertEqual(status, 200, raw)
+        self.assertEqual(headers.get_content_type(), 'text/event-stream')
+        rows = self.ai_usage_rows()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['user_id'], user['id'])
+        self.assertEqual(rows[0]['call_type'], 'chat_stream')
+        self.assertEqual(rows[0]['prompt_tokens'], 13)
+        self.assertEqual(rows[0]['completion_tokens'], 5)
+
+    def test_stream_deepseek_chat_requests_usage_chunk(self):
+        original_key = os.environ.get('DEEPSEEK_API_KEY')
+        original_urlopen = urllib.request.urlopen
+        captured = {}
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def __iter__(self):
+                return iter([
+                    b'data: {"choices":[{"delta":{"content":"hi"}}]}\n',
+                    b'data: {"usage":{"prompt_tokens":17,"completion_tokens":4,"total_tokens":21},"choices":[]}\n',
+                    b'data: [DONE]\n',
+                ])
+
+        def fake_urlopen(request, timeout=60):
+            captured['body'] = json.loads(request.data.decode('utf-8'))
+            return FakeResponse()
+
+        class DummyHandler:
+            pass
+
+        try:
+            os.environ['DEEPSEEK_API_KEY'] = 'test-key'
+            urllib.request.urlopen = fake_urlopen
+            dummy = DummyHandler()
+            chunks = list(server.TodoHandler.stream_deepseek_chat(dummy, [{'role': 'user', 'content': 'hi'}]))
+        finally:
+            urllib.request.urlopen = original_urlopen
+            if original_key is None:
+                os.environ.pop('DEEPSEEK_API_KEY', None)
+            else:
+                os.environ['DEEPSEEK_API_KEY'] = original_key
+
+        self.assertEqual(chunks, ['hi'])
+        self.assertEqual(captured['body']['stream_options'], {'include_usage': True})
+        self.assertEqual(dummy._last_deepseek_stream_usage['prompt_tokens'], 17)
+        self.assertEqual(dummy._last_deepseek_stream_usage['completion_tokens'], 4)
+
+    def test_ai_chat_records_repair_usage(self):
+        token, user = self.register_user('ai-usage-repair')
+        original_key = os.environ.get('DEEPSEEK_API_KEY')
+        original_call = server.TodoHandler.call_deepseek_chat
+        calls = []
+
+        def fake_call(handler, messages):
+            calls.append(messages)
+            if 'backendSafetyValidation' in messages[-1]['content']:
+                handler._last_deepseek_usage = {
+                    'prompt_tokens': 19,
+                    'completion_tokens': 6,
+                    'total_tokens': 25,
+                }
+                return json.dumps({'reply': 'need subject', 'actions': []})
+            handler._last_deepseek_usage = {
+                'prompt_tokens': 9,
+                'completion_tokens': 4,
+                'total_tokens': 13,
+            }
+            return json.dumps({
+                'reply': 'creating',
+                'actions': [
+                    {
+                        'type': 'create_task',
+                        'task': {
+                            'title': 'Missing subject',
+                            'subject': '',
+                            'dueAt': '',
+                            'priority': 'medium',
+                            'note': '',
+                        },
+                    },
+                ],
+            })
+
+        try:
+            os.environ['DEEPSEEK_API_KEY'] = 'test-key'
+            server.TodoHandler.call_deepseek_chat = fake_call
+            status, body = self.request('POST', '/api/ai/chat', {'message': 'create'}, token=token)
+        finally:
+            server.TodoHandler.call_deepseek_chat = original_call
+            if original_key is None:
+                os.environ.pop('DEEPSEEK_API_KEY', None)
+            else:
+                os.environ['DEEPSEEK_API_KEY'] = original_key
+
+        self.assertEqual(status, 200, body)
+        self.assertEqual(len(calls), 2)
+        rows = self.ai_usage_rows()
+        self.assertEqual([row['call_type'] for row in rows], ['chat', 'repair'])
+        self.assertEqual([row['prompt_tokens'] for row in rows], [9, 19])
+        self.assertEqual([row['completion_tokens'] for row in rows], [4, 6])
+        self.assertTrue(all(row['user_id'] == user['id'] for row in rows))
+
+    def test_ai_token_limits_global_override_and_clear(self):
+        student_token, student = self.register_user('ai-limit-student')
+        admin_token, admin = self.register_user('ai-limit-admin')
+        self.make_admin(admin['id'])
+        original_key = os.environ.get('DEEPSEEK_API_KEY')
+        original_call = server.TodoHandler.call_deepseek_chat
+        calls = []
+
+        def fake_call(handler, messages):
+            calls.append(messages)
+            handler._last_deepseek_usage = {
+                'prompt_tokens': 2,
+                'completion_tokens': 1,
+                'total_tokens': 3,
+            }
+            return json.dumps({'reply': 'ok', 'actions': []})
+
+        try:
+            os.environ['DEEPSEEK_API_KEY'] = 'test-key'
+            server.TodoHandler.call_deepseek_chat = fake_call
+            status, body = self.request('PUT', '/api/admin/ai-usage/global-limit', {
+                'windowHours': 24,
+                'inputTokenLimit': 5,
+                'outputTokenLimit': 100,
+            }, token=admin_token)
+            self.assertEqual(status, 200, body)
+
+            conn = server.get_db()
+            try:
+                server.record_ai_usage(conn, student['id'], 'deepseek-test', 'seed', {
+                    'prompt_tokens': 5,
+                    'completion_tokens': 0,
+                    'total_tokens': 5,
+                })
+                conn.commit()
+            finally:
+                conn.close()
+
+            status, body = self.request('POST', '/api/ai/chat', {'message': 'blocked'}, token=student_token)
+            self.assertEqual(status, 429, body)
+            self.assertEqual(body.get('dimension'), 'input')
+            self.assertEqual(len(calls), 0)
+
+            status, body = self.request('PUT', f"/api/admin/users/{student['id']}/ai-token-limit", {
+                'windowHours': 24,
+                'inputTokenLimit': 100,
+                'outputTokenLimit': 100,
+            }, token=admin_token)
+            self.assertEqual(status, 200, body)
+
+            status, body = self.request('POST', '/api/ai/chat', {'message': 'allowed'}, token=student_token)
+            self.assertEqual(status, 200, body)
+            self.assertEqual(len(calls), 1)
+
+            status, body = self.request('GET', '/api/admin/ai-usage/summary?view=7d&page=1&pageSize=50', token=admin_token)
+            self.assertEqual(status, 200, body)
+            rows_by_id = {row['user']['id']: row for row in body['users']}
+            self.assertTrue(rows_by_id[student['id']]['hasOverride'])
+            self.assertEqual(rows_by_id[student['id']]['windowUsage']['promptTokens'], 7)
+
+            status, body = self.request('DELETE', f"/api/admin/users/{student['id']}/ai-token-limit", token=admin_token)
+            self.assertEqual(status, 200, body)
+            status, body = self.request('POST', '/api/ai/chat', {'message': 'blocked again'}, token=student_token)
+            self.assertEqual(status, 429, body)
+
+            status, body = self.request('PUT', f"/api/admin/users/{student['id']}/ai-token-limit", {
+                'windowHours': 24,
+                'inputTokenLimit': 100,
+                'outputTokenLimit': 100,
+            }, token=admin_token)
+            self.assertEqual(status, 200, body)
+            status, body = self.request('POST', '/api/admin/ai-usage/clear-user-limits', token=admin_token)
+            self.assertEqual(status, 200, body)
+            status, body = self.request('GET', '/api/admin/ai-usage/summary?view=7d&page=1&pageSize=50', token=admin_token)
+            self.assertEqual(status, 200, body)
+            rows_by_id = {row['user']['id']: row for row in body['users']}
+            self.assertFalse(rows_by_id[student['id']]['hasOverride'])
+
+            conn = server.get_db()
+            try:
+                server.record_ai_usage(conn, admin['id'], 'deepseek-test', 'seed', {
+                    'prompt_tokens': 5,
+                    'completion_tokens': 0,
+                    'total_tokens': 5,
+                })
+                conn.commit()
+            finally:
+                conn.close()
+            status, body = self.request('POST', '/api/ai/chat', {'message': 'admin is limited too'}, token=admin_token)
+            self.assertEqual(status, 429, body)
+        finally:
+            server.TodoHandler.call_deepseek_chat = original_call
+            if original_key is None:
+                os.environ.pop('DEEPSEEK_API_KEY', None)
+            else:
+                os.environ['DEEPSEEK_API_KEY'] = original_key
+
+    def test_ai_token_output_limit_blocks_requests(self):
+        token, user = self.register_user('ai-output-limit')
+        original_key = os.environ.get('DEEPSEEK_API_KEY')
+        original_call = server.TodoHandler.call_deepseek_chat
+        calls = []
+
+        def fake_call(handler, messages):
+            calls.append(messages)
+            return json.dumps({'reply': 'should not run', 'actions': []})
+
+        conn = server.get_db()
+        try:
+            server.set_ai_global_token_limit(conn, {
+                'windowHours': 24,
+                'inputTokenLimit': 100,
+                'outputTokenLimit': 5,
+            })
+            server.record_ai_usage(conn, user['id'], 'deepseek-test', 'seed', {
+                'prompt_tokens': 0,
+                'completion_tokens': 5,
+                'total_tokens': 5,
+            })
+            conn.commit()
+        finally:
+            conn.close()
+
+        try:
+            os.environ['DEEPSEEK_API_KEY'] = 'test-key'
+            server.TodoHandler.call_deepseek_chat = fake_call
+            status, body = self.request('POST', '/api/ai/chat', {'message': 'blocked'}, token=token)
+        finally:
+            server.TodoHandler.call_deepseek_chat = original_call
+            if original_key is None:
+                os.environ.pop('DEEPSEEK_API_KEY', None)
+            else:
+                os.environ['DEEPSEEK_API_KEY'] = original_key
+
+        self.assertEqual(status, 429, body)
+        self.assertEqual(body.get('dimension'), 'output')
+        self.assertEqual(len(calls), 0)
+
+    def test_ai_usage_admin_endpoints_require_admin(self):
+        token, _ = self.register_user('ai-usage-normal-user')
+
+        status, body = self.request('GET', '/api/admin/ai-usage/summary', token=token)
+        self.assertEqual(status, 403, body)
+        status, body = self.request('PUT', '/api/admin/ai-usage/global-limit', {
+            'windowHours': 24,
+            'inputTokenLimit': 100,
+            'outputTokenLimit': 100,
+        }, token=token)
+        self.assertEqual(status, 403, body)
+        status, body = self.request('POST', '/api/admin/ai-usage/clear-user-limits', token=token)
+        self.assertEqual(status, 403, body)
+
     def test_foreign_keys_are_enforced_on_new_connections(self):
         token, user = self.register_user()
         date_key = server.today_key()
@@ -927,6 +1277,23 @@ class ServerRegressionTests(unittest.TestCase):
         self.assertIn('paginatedAdminUsers()', app_js)
         self.assertIn('.admin-user-avatar', style_css)
         self.assertIn('border-radius: 50%;', style_css)
+
+    def test_admin_ai_usage_frontend_scaffold(self):
+        index_html = Path('index.html').read_text(encoding='utf-8')
+        app_js = Path('app.js').read_text(encoding='utf-8')
+        style_css = Path('style.css').read_text(encoding='utf-8')
+
+        self.assertIn("adminSection === 'aiUsage'", index_html)
+        self.assertIn('Token 使用情况', index_html)
+        self.assertIn('saveAdminAiGlobalLimit', index_html)
+        self.assertIn('saveAdminAiUserLimit(row)', index_html)
+        self.assertIn('clearAllAdminAiUserLimits', index_html)
+        self.assertIn('loadAdminAiUsage', app_js)
+        self.assertIn("`${ADMIN_API}/ai-usage/summary", app_js)
+        self.assertIn("`${ADMIN_API}/ai-usage/global-limit`", app_js)
+        self.assertIn("`${ADMIN_API}/ai-usage/clear-user-limits`", app_js)
+        self.assertIn('.ai-usage-output-line', style_css)
+        self.assertIn('.ai-user-limit-editor', style_css)
 
 
 if __name__ == '__main__':

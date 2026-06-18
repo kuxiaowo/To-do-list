@@ -451,6 +451,7 @@
           <button class="admin-nav-button" :class="{ active: adminSection === 'logs' }" type="button" @click="switchAdminSection('logs')">用户日志</button>
           <button class="admin-nav-button" :class="{ active: adminSection === 'feedback' }" type="button" @click="switchAdminSection('feedback')">用户反馈</button>
           <button class="admin-nav-button" :class="{ active: adminSection === 'traffic' }" type="button" @click="switchAdminSection('traffic')">流量统计</button>
+          <button class="admin-nav-button" :class="{ active: adminSection === 'aiUsage' }" type="button" @click="switchAdminSection('aiUsage')">Token 使用情况</button>
           <button class="admin-nav-button" :class="{ active: adminSection === 'timeline' }" type="button" @click="switchAdminSection('timeline')">用户时间表</button>
         </nav>
         <div class="admin-sidebar-footer">
@@ -750,6 +751,221 @@
               :page-size="adminTrafficRecentPageSize"
               :current-page="adminTrafficRecentPage"
               @current-change="loadAdminTraffic"
+            ></el-pagination>
+          </div>
+        </section>
+
+        <section v-else-if="adminSection === 'aiUsage'" class="admin-panel">
+          <div class="admin-panel-header">
+            <div>
+              <h2>Token 使用情况</h2>
+              <p>统计 DeepSeek 调用返回的输入和输出 token，并按滚动窗口限制 AI 使用量。</p>
+            </div>
+            <el-button plain @click="loadAdminAiUsage(adminAiUsagePage)">刷新统计</el-button>
+          </div>
+
+          <div class="traffic-metrics">
+            <article v-for="metric in aiUsageMetricCards" :key="metric.label" class="traffic-metric">
+              <div class="traffic-metric-label">{{ metric.label }}</div>
+              <div class="traffic-metric-value">{{ metric.value }}</div>
+            </article>
+          </div>
+
+          <div class="traffic-grid">
+            <section class="traffic-chart-panel">
+              <div class="traffic-section-title">
+                <span>{{ aiUsageChartTitle }}</span>
+                <div class="traffic-chart-actions">
+                  <div class="traffic-view-switch" aria-label="切换 Token 统计时间范围">
+                    <button
+                      v-for="option in adminTrafficViewOptions"
+                      :key="option.value"
+                      type="button"
+                      :class="{ active: adminAiUsageView === option.value }"
+                      @click="switchAdminAiUsageView(option.value)"
+                    >
+                      {{ option.label }}
+                    </button>
+                  </div>
+                  <span>峰值 {{ formatTokenCount(aiUsageMaxTokens) }}</span>
+                </div>
+              </div>
+              <div v-if="aiUsageInputChartPoints || aiUsageOutputChartPoints" class="traffic-chart" @mouseleave="hideAiUsagePoint">
+                <svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-label="Token 使用趋势折线图">
+                  <polyline class="traffic-chart-line ai-usage-input-line" :points="aiUsageInputChartPoints"></polyline>
+                  <polyline class="traffic-chart-line ai-usage-output-line" :points="aiUsageOutputChartPoints"></polyline>
+                  <g v-for="point in aiUsageChartPointItems" :key="point.date">
+                    <circle
+                      class="traffic-chart-dot ai-usage-input-dot"
+                      :cx="point.x"
+                      :cy="point.inputY"
+                      r="1.1"
+                    ></circle>
+                    <circle
+                      class="traffic-chart-dot ai-usage-output-dot"
+                      :cx="point.x"
+                      :cy="point.outputY"
+                      r="1.1"
+                    ></circle>
+                    <circle
+                      class="traffic-chart-hit"
+                      :cx="point.x"
+                      :cy="point.inputY"
+                      r="5"
+                      @mouseenter="showAiUsagePoint(point)"
+                      @mousemove="showAiUsagePoint(point)"
+                    ></circle>
+                    <circle
+                      class="traffic-chart-hit"
+                      :cx="point.x"
+                      :cy="point.outputY"
+                      r="5"
+                      @mouseenter="showAiUsagePoint(point)"
+                      @mousemove="showAiUsagePoint(point)"
+                    ></circle>
+                  </g>
+                </svg>
+                <div v-if="adminAiUsageHoverPoint" class="traffic-chart-tooltip" :style="aiUsageHoverStyle">
+                  <div class="traffic-tooltip-time">{{ formatTrafficTooltipTime(adminAiUsageHoverPoint.date) }}</div>
+                  <div>输入 {{ formatTokenCount(adminAiUsageHoverPoint.promptTokens) }}</div>
+                  <div>输出 {{ formatTokenCount(adminAiUsageHoverPoint.completionTokens) }}</div>
+                  <div>调用 {{ formatTokenCount(adminAiUsageHoverPoint.calls) }} 次</div>
+                </div>
+                <div class="traffic-chart-labels">
+                  <span v-for="item in aiUsageChartLabels" :key="item.date">{{ formatTrafficDate(item.date) }}</span>
+                </div>
+                <div class="ai-usage-legend">
+                  <span><i class="ai-usage-legend-input"></i>输入 token</span>
+                  <span><i class="ai-usage-legend-output"></i>输出 token</span>
+                </div>
+              </div>
+              <div v-else class="empty-column">暂无 Token 使用趋势。</div>
+            </section>
+
+            <section class="traffic-top-panel ai-limit-panel">
+              <div class="traffic-section-title">
+                <span>全局限制</span>
+                <span>{{ aiLimitText(adminAiUsage.globalLimit) }}</span>
+              </div>
+              <div class="ai-limit-form">
+                <label>
+                  <span>窗口小时数</span>
+                  <el-input-number
+                    v-model="adminAiGlobalLimitDraft.windowHours"
+                    :min="1"
+                    :max="8760"
+                    :step="1"
+                    step-strictly
+                    controls-position="right"
+                  ></el-input-number>
+                </label>
+                <label>
+                  <span>输入 token 上限</span>
+                  <el-input-number
+                    v-model="adminAiGlobalLimitDraft.inputTokenLimit"
+                    :min="1"
+                    :max="10000000000"
+                    :step="1000"
+                    step-strictly
+                    controls-position="right"
+                  ></el-input-number>
+                </label>
+                <label>
+                  <span>输出 token 上限</span>
+                  <el-input-number
+                    v-model="adminAiGlobalLimitDraft.outputTokenLimit"
+                    :min="1"
+                    :max="10000000000"
+                    :step="1000"
+                    step-strictly
+                    controls-position="right"
+                  ></el-input-number>
+                </label>
+              </div>
+              <div class="ai-limit-actions">
+                <el-button type="primary" plain @click="saveAdminAiGlobalLimit">保存全局限制</el-button>
+                <el-button type="warning" plain @click="clearAllAdminAiUserLimits">统一全局</el-button>
+              </div>
+            </section>
+          </div>
+
+          <el-table :data="adminAiUsage.users" style="width: 100%;">
+            <el-table-column label="用户" min-width="180">
+              <template #default="{ row }">
+                {{ row.user ? `${row.user.name}（${row.user.nickname}）` : '—' }}
+              </template>
+            </el-table-column>
+            <el-table-column label="窗口内用量" min-width="180">
+              <template #default="{ row }">
+                <div>{{ aiWindowUsageText(row.windowUsage) }}</div>
+                <div class="traffic-muted">调用 {{ formatTokenCount(row.windowUsage ? row.windowUsage.calls : 0) }} 次</div>
+              </template>
+            </el-table-column>
+            <el-table-column label="有效限制" min-width="220">
+              <template #default="{ row }">{{ aiLimitText(row.effectiveLimit) }}</template>
+            </el-table-column>
+            <el-table-column label="来源" width="110">
+              <template #default="{ row }">
+                <el-tag :type="aiLimitSourceType(row)" effect="plain">{{ aiLimitSourceLabel(row) }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="最近使用" min-width="160">
+              <template #default="{ row }">{{ formatDateTime(row.lastUsedAt) }}</template>
+            </el-table-column>
+            <el-table-column label="单用户限制" min-width="420" fixed="right">
+              <template #default="{ row }">
+                <div
+                  v-if="row.user && adminAiUserLimitDrafts[String(row.user.id)]"
+                  class="ai-user-limit-editor"
+                >
+                  <div class="ai-user-limit-fields">
+                    <el-input-number
+                      v-model="adminAiUserLimitDrafts[String(row.user.id)].windowHours"
+                      size="small"
+                      :min="1"
+                      :max="8760"
+                      :step="1"
+                      step-strictly
+                      controls-position="right"
+                      aria-label="窗口小时数"
+                    ></el-input-number>
+                    <el-input-number
+                      v-model="adminAiUserLimitDrafts[String(row.user.id)].inputTokenLimit"
+                      size="small"
+                      :min="1"
+                      :max="10000000000"
+                      :step="1000"
+                      step-strictly
+                      controls-position="right"
+                      aria-label="输入 token 上限"
+                    ></el-input-number>
+                    <el-input-number
+                      v-model="adminAiUserLimitDrafts[String(row.user.id)].outputTokenLimit"
+                      size="small"
+                      :min="1"
+                      :max="10000000000"
+                      :step="1000"
+                      step-strictly
+                      controls-position="right"
+                      aria-label="输出 token 上限"
+                    ></el-input-number>
+                  </div>
+                  <div class="ai-user-limit-actions">
+                    <el-button size="small" type="primary" plain @click="saveAdminAiUserLimit(row)">保存</el-button>
+                    <el-button size="small" plain :disabled="!row.hasOverride" @click="clearAdminAiUserLimit(row)">使用全局</el-button>
+                  </div>
+                </div>
+              </template>
+            </el-table-column>
+          </el-table>
+          <div class="admin-pagination">
+            <el-pagination
+              background
+              layout="prev, pager, next, total"
+              :total="adminAiUsageUsersTotal"
+              :page-size="adminAiUsagePageSize"
+              :current-page="adminAiUsagePage"
+              @current-change="loadAdminAiUsage"
             ></el-pagination>
           </div>
         </section>
@@ -1564,10 +1780,10 @@
         </el-form-item>
 
         <el-form-item label="截止时间" v-if="!isArrangementDialog && !form.unscheduled">
-          <div class="fixed-time-input">
-            <el-input v-model="dueHour" placeholder="HH" maxlength="2" inputmode="numeric" @blur="normalizeDialogTimeInput"></el-input>
+          <div class="fixed-time-input" @click="focusDialogTimeContainer">
+            <el-input ref="dueHourInput" v-model="dueHour" placeholder="HH" inputmode="numeric" @focus="selectDialogTimeInput" @keydown="handleDialogTimeKeydown('hour', $event)" @blur="normalizeDialogTimeInput"></el-input>
             <span class="fixed-time-colon" aria-hidden="true">:</span>
-            <el-input v-model="dueMinute" placeholder="mm" maxlength="2" inputmode="numeric" @blur="normalizeDialogTimeInput"></el-input>
+            <el-input ref="dueMinuteInput" v-model="dueMinute" placeholder="mm" inputmode="numeric" @focus="selectDialogTimeInput" @keydown="handleDialogTimeKeydown('minute', $event)" @blur="normalizeDialogTimeInput"></el-input>
           </div>
         </el-form-item>
 

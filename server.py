@@ -59,6 +59,10 @@ PASSWORD_ITERATIONS = 260_000
 SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
 DEFAULT_FEEDBACK_LIMIT_PER_USER = 10
 FEEDBACK_LIMIT_SETTING_KEY = 'feedback_limit_per_user'
+AI_TOKEN_LIMIT_SETTING_KEY = 'ai_token_limit_global'
+DEFAULT_AI_TOKEN_WINDOW_HOURS = 24
+DEFAULT_AI_INPUT_TOKEN_LIMIT = 200_000
+DEFAULT_AI_OUTPUT_TOKEN_LIMIT = 50_000
 TRUSTED_PROXY_IPS = {'127.0.0.1', '::1'}
 DEEPSEEK_API_URL = 'https://api.deepseek.com/chat/completions'
 DEFAULT_DEEPSEEK_MODEL = 'deepseek-v4-flash'
@@ -378,10 +382,57 @@ def init_db() -> None:
         conn.execute('CREATE INDEX IF NOT EXISTS idx_visit_logs_page ON visit_logs(page)')
         conn.execute(
             '''
+            CREATE TABLE IF NOT EXISTS ai_usage_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                model TEXT NOT NULL,
+                call_type TEXT NOT NULL,
+                prompt_tokens INTEGER NOT NULL DEFAULT 0,
+                completion_tokens INTEGER NOT NULL DEFAULT 0,
+                total_tokens INTEGER NOT NULL DEFAULT 0,
+                prompt_cache_hit_tokens INTEGER NOT NULL DEFAULT 0,
+                prompt_cache_miss_tokens INTEGER NOT NULL DEFAULT 0,
+                reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            '''
+        )
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_ai_usage_logs_user_created ON ai_usage_logs(user_id, created_at)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_ai_usage_logs_created_at ON ai_usage_logs(created_at)')
+        conn.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS ai_token_limits (
+                user_id INTEGER PRIMARY KEY,
+                window_hours INTEGER NOT NULL,
+                input_token_limit INTEGER NOT NULL,
+                output_token_limit INTEGER NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            '''
+        )
+        conn.execute(
+            '''
             INSERT OR IGNORE INTO app_settings (key, value, updated_at)
             VALUES (?, ?, ?)
             ''',
             (FEEDBACK_LIMIT_SETTING_KEY, str(DEFAULT_FEEDBACK_LIMIT_PER_USER), now_iso()),
+        )
+        conn.execute(
+            '''
+            INSERT OR IGNORE INTO app_settings (key, value, updated_at)
+            VALUES (?, ?, ?)
+            ''',
+            (
+                AI_TOKEN_LIMIT_SETTING_KEY,
+                json.dumps({
+                    'windowHours': DEFAULT_AI_TOKEN_WINDOW_HOURS,
+                    'inputTokenLimit': DEFAULT_AI_INPUT_TOKEN_LIMIT,
+                    'outputTokenLimit': DEFAULT_AI_OUTPUT_TOKEN_LIMIT,
+                }, ensure_ascii=False),
+                now_iso(),
+            ),
         )
         nickname_duplicates = conn.execute(
             '''
@@ -1177,6 +1228,231 @@ def set_feedback_limit(conn: sqlite3.Connection, limit: int) -> None:
     )
 
 
+def default_ai_token_limit() -> dict:
+    return {
+        'windowHours': DEFAULT_AI_TOKEN_WINDOW_HOURS,
+        'inputTokenLimit': DEFAULT_AI_INPUT_TOKEN_LIMIT,
+        'outputTokenLimit': DEFAULT_AI_OUTPUT_TOKEN_LIMIT,
+    }
+
+
+def normalize_ai_token_limit(raw: object) -> tuple[dict | None, str | None]:
+    if not isinstance(raw, dict):
+        return None, 'limit must be an object'
+    try:
+        window_hours = int(raw.get('windowHours'))
+        input_limit = int(raw.get('inputTokenLimit'))
+        output_limit = int(raw.get('outputTokenLimit'))
+    except (TypeError, ValueError):
+        return None, 'windowHours, inputTokenLimit and outputTokenLimit must be integers'
+    if window_hours < 1 or window_hours > 24 * 365:
+        return None, 'windowHours must be between 1 and 8760'
+    if input_limit < 1 or input_limit > 10_000_000_000:
+        return None, 'inputTokenLimit must be between 1 and 10000000000'
+    if output_limit < 1 or output_limit > 10_000_000_000:
+        return None, 'outputTokenLimit must be between 1 and 10000000000'
+    return {
+        'windowHours': window_hours,
+        'inputTokenLimit': input_limit,
+        'outputTokenLimit': output_limit,
+    }, None
+
+
+def get_ai_global_token_limit(conn: sqlite3.Connection) -> dict:
+    row = conn.execute('SELECT value FROM app_settings WHERE key = ?', (AI_TOKEN_LIMIT_SETTING_KEY,)).fetchone()
+    if not row:
+        return default_ai_token_limit()
+    try:
+        payload = json.loads(row['value'])
+    except (TypeError, json.JSONDecodeError):
+        return default_ai_token_limit()
+    limit, error = normalize_ai_token_limit(payload)
+    return default_ai_token_limit() if error else limit
+
+
+def set_ai_global_token_limit(conn: sqlite3.Connection, limit: dict) -> None:
+    conn.execute(
+        '''
+        INSERT INTO app_settings (key, value, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+        ''',
+        (AI_TOKEN_LIMIT_SETTING_KEY, json.dumps(limit, ensure_ascii=False), now_iso()),
+    )
+
+
+def get_ai_user_token_limit(conn: sqlite3.Connection, user_id: int) -> dict | None:
+    row = conn.execute(
+        '''
+        SELECT window_hours, input_token_limit, output_token_limit, updated_at
+        FROM ai_token_limits
+        WHERE user_id = ?
+        ''',
+        (user_id,),
+    ).fetchone()
+    if not row:
+        return None
+    return {
+        'windowHours': int(row['window_hours']),
+        'inputTokenLimit': int(row['input_token_limit']),
+        'outputTokenLimit': int(row['output_token_limit']),
+        'updatedAt': row['updated_at'],
+    }
+
+
+def set_ai_user_token_limit(conn: sqlite3.Connection, user_id: int, limit: dict) -> None:
+    conn.execute(
+        '''
+        INSERT INTO ai_token_limits
+        (user_id, window_hours, input_token_limit, output_token_limit, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET
+            window_hours = excluded.window_hours,
+            input_token_limit = excluded.input_token_limit,
+            output_token_limit = excluded.output_token_limit,
+            updated_at = excluded.updated_at
+        ''',
+        (
+            user_id,
+            limit['windowHours'],
+            limit['inputTokenLimit'],
+            limit['outputTokenLimit'],
+            now_iso(),
+        ),
+    )
+
+
+def effective_ai_token_limit(conn: sqlite3.Connection, user_id: int) -> dict:
+    user_limit = get_ai_user_token_limit(conn, user_id)
+    if user_limit:
+        return {**user_limit, 'source': 'user', 'hasOverride': True}
+    return {**get_ai_global_token_limit(conn), 'source': 'global', 'hasOverride': False}
+
+
+def ai_token_window_start(window_hours: int) -> str:
+    start = datetime.now(timezone.utc) - timedelta(hours=window_hours)
+    return start.strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def ai_usage_totals_since(conn: sqlite3.Connection, user_id: int | None, start_key: str) -> dict:
+    params: list[object] = [start_key]
+    where = 'created_at >= ?'
+    if user_id is not None:
+        where += ' AND user_id = ?'
+        params.append(user_id)
+    row = conn.execute(
+        f'''
+        SELECT
+            COUNT(*) AS calls,
+            COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
+            COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
+            COALESCE(SUM(total_tokens), 0) AS total_tokens
+        FROM ai_usage_logs
+        WHERE {where}
+        ''',
+        tuple(params),
+    ).fetchone()
+    return {
+        'calls': int(row['calls'] or 0),
+        'promptTokens': int(row['prompt_tokens'] or 0),
+        'completionTokens': int(row['completion_tokens'] or 0),
+        'totalTokens': int(row['total_tokens'] or 0),
+    }
+
+
+def normalize_deepseek_usage(usage: object) -> dict:
+    source = usage if isinstance(usage, dict) else {}
+    details = source.get('completion_tokens_details') if isinstance(source.get('completion_tokens_details'), dict) else {}
+
+    def safe_int(key: str, raw_source: dict = source) -> int:
+        try:
+            return max(0, int(raw_source.get(key, 0) or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    return {
+        'promptTokens': safe_int('prompt_tokens'),
+        'completionTokens': safe_int('completion_tokens'),
+        'totalTokens': safe_int('total_tokens'),
+        'promptCacheHitTokens': safe_int('prompt_cache_hit_tokens'),
+        'promptCacheMissTokens': safe_int('prompt_cache_miss_tokens'),
+        'reasoningTokens': safe_int('reasoning_tokens', details),
+    }
+
+
+def record_ai_usage(conn: sqlite3.Connection, user_id: int, model: str, call_type: str, usage: object) -> dict:
+    normalized = normalize_deepseek_usage(usage)
+    conn.execute(
+        '''
+        INSERT INTO ai_usage_logs
+        (user_id, model, call_type, prompt_tokens, completion_tokens, total_tokens,
+         prompt_cache_hit_tokens, prompt_cache_miss_tokens, reasoning_tokens, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''',
+        (
+            user_id,
+            model,
+            call_type,
+            normalized['promptTokens'],
+            normalized['completionTokens'],
+            normalized['totalTokens'],
+            normalized['promptCacheHitTokens'],
+            normalized['promptCacheMissTokens'],
+            normalized['reasoningTokens'],
+            now_iso(),
+        ),
+    )
+    return normalized
+
+
+def ai_token_limit_status(conn: sqlite3.Connection, user_id: int) -> dict:
+    limit = effective_ai_token_limit(conn, user_id)
+    usage = ai_usage_totals_since(conn, user_id, ai_token_window_start(limit['windowHours']))
+    exceeded_dimension = ''
+    if usage['promptTokens'] >= limit['inputTokenLimit']:
+        exceeded_dimension = 'input'
+    elif usage['completionTokens'] >= limit['outputTokenLimit']:
+        exceeded_dimension = 'output'
+    return {
+        'limit': limit,
+        'usage': usage,
+        'exceeded': bool(exceeded_dimension),
+        'dimension': exceeded_dimension,
+    }
+
+
+def ai_token_limit_error(status: dict) -> dict:
+    limit = status['limit']
+    usage = status['usage']
+    dimension = status.get('dimension') or 'input'
+    if dimension == 'output':
+        message = (
+            f"AI 输出 token 额度已达到限制：最近 {limit['windowHours']} 小时已用 "
+            f"{usage['completionTokens']} / {limit['outputTokenLimit']}。"
+        )
+    else:
+        message = (
+            f"AI 输入 token 额度已达到限制：最近 {limit['windowHours']} 小时已用 "
+            f"{usage['promptTokens']} / {limit['inputTokenLimit']}。"
+        )
+    return {
+        'error': 'AI token limit exceeded',
+        'message': message,
+        'dimension': dimension,
+        'windowHours': limit['windowHours'],
+        'inputTokenLimit': limit['inputTokenLimit'],
+        'outputTokenLimit': limit['outputTokenLimit'],
+        'currentInputTokens': usage['promptTokens'],
+        'currentOutputTokens': usage['completionTokens'],
+    }
+
+
+class AiTokenLimitExceeded(Exception):
+    def __init__(self, payload: dict):
+        super().__init__(payload.get('message') or 'AI token limit exceeded')
+        self.payload = payload
+
+
 def normalize_ip(value: str) -> str:
     value = str(value).strip()
     if not value:
@@ -1263,6 +1539,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
         path = urlparse(self.path).path
         if path == '/api/visits':
             return self.handle_create_visit()
+        if path == '/api/admin/ai-usage/clear-user-limits':
+            return self.handle_admin_clear_all_ai_token_limits()
         if path == '/api/auth/register':
             return self.handle_auth_register()
         if path == '/api/auth/login':
@@ -1293,6 +1571,11 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return self.handle_auth_update_password()
         if path == '/api/auth/avatar-color':
             return self.handle_auth_update_avatar_color()
+        if path == '/api/admin/ai-usage/global-limit':
+            return self.handle_admin_update_ai_global_limit()
+        parts = path.strip('/').split('/')
+        if len(parts) == 5 and parts[:3] == ['api', 'admin', 'users'] and parts[4] == 'ai-token-limit':
+            return self.handle_admin_update_user_ai_token_limit(parts[3])
         if path == '/api/admin/feedback-settings':
             return self.handle_admin_update_feedback_settings()
         if path.startswith('/api/admin/feedback/') and path.endswith('/reply'):
@@ -1319,6 +1602,9 @@ class TodoHandler(SimpleHTTPRequestHandler):
         path = urlparse(self.path).path
         if path.startswith('/api/admin/feedback/'):
             return self.handle_admin_delete_feedback(path.rsplit('/', 1)[-1])
+        parts = path.strip('/').split('/')
+        if len(parts) == 5 and parts[:3] == ['api', 'admin', 'users'] and parts[4] == 'ai-token-limit':
+            return self.handle_admin_clear_user_ai_token_limit(parts[3])
         if path.startswith('/api/feedback/'):
             return self.handle_delete_feedback(path.rsplit('/', 1)[-1])
         if path == '/api/auth/avatar':
@@ -1467,6 +1753,24 @@ class TodoHandler(SimpleHTTPRequestHandler):
             history.append({'role': role, 'content': content[:1000]})
         return history
 
+    def ensure_ai_token_available(self, user_id: int) -> None:
+        with get_db() as conn:
+            status = ai_token_limit_status(conn, int(user_id))
+        if status['exceeded']:
+            raise AiTokenLimitExceeded(ai_token_limit_error(status))
+
+    def record_ai_usage_for_user(self, user_id: int, call_type: str, usage: object) -> dict:
+        with get_db() as conn:
+            normalized = record_ai_usage(conn, int(user_id), deepseek_model(), call_type, usage)
+            conn.commit()
+            return normalized
+
+    def call_deepseek_chat_recorded(self, messages: list[dict], user_id: int, call_type: str) -> str:
+        self._last_deepseek_usage = None
+        content = self.call_deepseek_chat(messages)
+        self.record_ai_usage_for_user(user_id, call_type, getattr(self, '_last_deepseek_usage', None))
+        return content
+
     def build_ai_messages(self, message: str, history: list[dict], tasks: list[dict], client_now: str, timezone_name: str) -> list[dict]:
         _, task_context = ai_context_tasks(tasks)
         context = {
@@ -1507,6 +1811,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
         api_key = deepseek_api_key()
         if not api_key:
             raise ValueError('missing api key')
+        self._last_deepseek_usage = None
         body = json.dumps({
             'model': deepseek_model(),
             'messages': messages,
@@ -1538,6 +1843,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
             content = payload['choices'][0]['message']['content']
         except (KeyError, IndexError, TypeError) as error:
             raise RuntimeError('DeepSeek response missing message content') from error
+        self._last_deepseek_usage = payload.get('usage') if isinstance(payload, dict) else None
         return str(content or '').strip()
 
     def build_ai_repair_messages(
@@ -1578,6 +1884,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
 
     def repair_ai_response(
         self,
+        user_id: int,
         message: str,
         history: list[dict],
         tasks: list[dict],
@@ -1599,7 +1906,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
             raw_actions,
             rejected_actions,
         )
-        content = self.call_deepseek_chat(repair_messages)
+        self.ensure_ai_token_available(user_id)
+        content = self.call_deepseek_chat_recorded(repair_messages, user_id, 'repair')
         repair_payload, parse_error = parse_ai_json_content(content)
         if parse_error:
             return None
@@ -1614,10 +1922,12 @@ class TodoHandler(SimpleHTTPRequestHandler):
         api_key = deepseek_api_key()
         if not api_key:
             raise ValueError('missing api key')
+        self._last_deepseek_stream_usage = None
         body = json.dumps({
             'model': deepseek_model(),
             'messages': messages,
             'stream': True,
+            'stream_options': {'include_usage': True},
             'max_tokens': 2000,
         }, ensure_ascii=False).encode('utf-8')
         request = urllib.request.Request(
@@ -1644,6 +1954,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
                         payload = json.loads(data)
                     except json.JSONDecodeError:
                         continue
+                    if isinstance(payload, dict) and payload.get('usage') is not None:
+                        self._last_deepseek_stream_usage = payload.get('usage')
                     try:
                         delta = payload['choices'][0].get('delta', {}).get('content', '')
                     except (KeyError, IndexError, TypeError):
@@ -1738,6 +2050,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return self.handle_admin_feedback_settings()
         if parts == ['api', 'admin', 'traffic', 'summary']:
             return self.handle_admin_traffic_summary()
+        if parts == ['api', 'admin', 'ai-usage', 'summary']:
+            return self.handle_admin_ai_usage_summary()
         if len(parts) == 5 and parts[:3] == ['api', 'admin', 'users']:
             try:
                 target_user_id = int(parts[3])
@@ -1949,6 +2263,256 @@ class TodoHandler(SimpleHTTPRequestHandler):
                 for row in recent_rows
             ],
         })
+
+    def handle_admin_ai_usage_summary(self):
+        query = parse_qs(urlparse(self.path).query)
+        usage_view = str(query.get('view', ['7d'])[0]).strip()
+        if usage_view not in {'30d', '7d', '1d', '6h'}:
+            return self.write_json({'error': 'invalid usage view'}, status=HTTPStatus.BAD_REQUEST)
+        try:
+            page = max(1, int(query.get('page', ['1'])[0]))
+            page_size = min(100, max(1, int(query.get('pageSize', ['50'])[0])))
+        except ValueError:
+            return self.write_json({'error': 'invalid pagination'}, status=HTTPStatus.BAD_REQUEST)
+        offset = (page - 1) * page_size
+
+        now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0, tzinfo=None)
+        today_key = now.date().isoformat()
+        if usage_view == '30d':
+            series_unit = 'day'
+            bucket_count = 30
+            start_dt = datetime.combine(now.date() - timedelta(days=bucket_count - 1), datetime.min.time())
+        elif usage_view == '7d':
+            series_unit = 'day'
+            bucket_count = 7
+            start_dt = datetime.combine(now.date() - timedelta(days=bucket_count - 1), datetime.min.time())
+        elif usage_view == '1d':
+            series_unit = 'hour'
+            bucket_count = 24
+            start_dt = now - timedelta(hours=bucket_count - 1)
+        else:
+            series_unit = 'hour'
+            bucket_count = 6
+            start_dt = now - timedelta(hours=bucket_count - 1)
+        start_key = start_dt.strftime('%Y-%m-%dT%H:%M:%SZ')
+
+        with get_db() as conn:
+            global_limit = get_ai_global_token_limit(conn)
+            total_row = conn.execute(
+                '''
+                SELECT
+                    COUNT(*) AS calls,
+                    COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
+                    COALESCE(SUM(completion_tokens), 0) AS completion_tokens
+                FROM ai_usage_logs
+                '''
+            ).fetchone()
+            today_row = conn.execute(
+                '''
+                SELECT
+                    COUNT(*) AS calls,
+                    COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
+                    COALESCE(SUM(completion_tokens), 0) AS completion_tokens
+                FROM ai_usage_logs
+                WHERE substr(created_at, 1, 10) = ?
+                ''',
+                (today_key,),
+            ).fetchone()
+            trend_rows = conn.execute(
+                '''
+                SELECT created_at, prompt_tokens, completion_tokens, total_tokens
+                FROM ai_usage_logs
+                WHERE created_at >= ?
+                ORDER BY created_at ASC
+                ''',
+                (start_key,),
+            ).fetchall()
+            users_total = conn.execute('SELECT COUNT(*) FROM users').fetchone()[0]
+            user_rows = conn.execute(
+                '''
+                SELECT users.id, users.name, users.nickname, users.role, MAX(ai_usage_logs.created_at) AS last_used_at
+                FROM users
+                LEFT JOIN ai_usage_logs ON ai_usage_logs.user_id = users.id
+                GROUP BY users.id
+                ORDER BY
+                    CASE WHEN MAX(ai_usage_logs.created_at) IS NULL THEN 1 ELSE 0 END ASC,
+                    MAX(ai_usage_logs.created_at) DESC,
+                    users.id ASC
+                LIMIT ? OFFSET ?
+                ''',
+                (page_size, offset),
+            ).fetchall()
+
+            user_payload = []
+            for row in user_rows:
+                limit = effective_ai_token_limit(conn, int(row['id']))
+                usage = ai_usage_totals_since(conn, int(row['id']), ai_token_window_start(limit['windowHours']))
+                user_payload.append({
+                    'user': {
+                        'id': row['id'],
+                        'name': row['name'],
+                        'nickname': row['nickname'],
+                        'role': row['role'],
+                    },
+                    'effectiveLimit': limit,
+                    'hasOverride': bool(limit.get('hasOverride')),
+                    'source': limit.get('source', 'global'),
+                    'windowUsage': usage,
+                    'lastUsedAt': row['last_used_at'],
+                })
+
+        trend_by_bucket = {}
+        for row in trend_rows:
+            try:
+                created_at = datetime.strptime(row['created_at'], '%Y-%m-%dT%H:%M:%SZ')
+            except (TypeError, ValueError):
+                continue
+            if series_unit == 'day':
+                bucket_key = created_at.date().isoformat()
+            else:
+                bucket_key = created_at.replace(minute=0, second=0, microsecond=0).strftime('%Y-%m-%dT%H:00:00Z')
+            bucket = trend_by_bucket.setdefault(bucket_key, {
+                'promptTokens': 0,
+                'completionTokens': 0,
+                'totalTokens': 0,
+                'calls': 0,
+            })
+            bucket['promptTokens'] += int(row['prompt_tokens'] or 0)
+            bucket['completionTokens'] += int(row['completion_tokens'] or 0)
+            bucket['totalTokens'] += int(row['total_tokens'] or 0)
+            bucket['calls'] += 1
+
+        trend_series = []
+        for bucket_offset in range(bucket_count):
+            bucket_dt = start_dt + (timedelta(days=bucket_offset) if series_unit == 'day' else timedelta(hours=bucket_offset))
+            if series_unit == 'day':
+                bucket_key = bucket_dt.date().isoformat()
+            else:
+                bucket_key = bucket_dt.strftime('%Y-%m-%dT%H:00:00Z')
+            item = trend_by_bucket.get(bucket_key, {
+                'promptTokens': 0,
+                'completionTokens': 0,
+                'totalTokens': 0,
+                'calls': 0,
+            })
+            trend_series.append({'date': bucket_key, **item})
+
+        return self.write_json({
+            'usageView': usage_view,
+            'seriesUnit': series_unit,
+            'globalLimit': global_limit,
+            'totalPromptTokens': int(total_row['prompt_tokens'] or 0),
+            'totalCompletionTokens': int(total_row['completion_tokens'] or 0),
+            'totalCalls': int(total_row['calls'] or 0),
+            'todayPromptTokens': int(today_row['prompt_tokens'] or 0),
+            'todayCompletionTokens': int(today_row['completion_tokens'] or 0),
+            'todayCalls': int(today_row['calls'] or 0),
+            'trendSeries': trend_series,
+            'users': user_payload,
+            'usersTotal': users_total,
+            'page': page,
+            'pageSize': page_size,
+        })
+
+    def handle_admin_update_ai_global_limit(self):
+        admin = self.require_admin()
+        if not admin:
+            return
+        payload = self.read_json_body()
+        if payload is None:
+            return
+        limit, error = normalize_ai_token_limit(payload)
+        if error:
+            return self.write_json({'error': error}, status=HTTPStatus.BAD_REQUEST)
+        with get_db() as conn:
+            set_ai_global_token_limit(conn, limit)
+            self.log_operation(
+                conn,
+                int(admin['id']),
+                int(admin['id']),
+                'admin.ai_token.global_limit_update',
+                'ai_token_limit',
+                'global',
+                {'limit': limit},
+            )
+            conn.commit()
+        return self.write_json({'ok': True, 'globalLimit': limit})
+
+    def handle_admin_update_user_ai_token_limit(self, user_id_text: str):
+        admin = self.require_admin()
+        if not admin:
+            return
+        try:
+            user_id = int(user_id_text)
+        except ValueError:
+            return self.write_json({'error': 'invalid user id'}, status=HTTPStatus.BAD_REQUEST)
+        payload = self.read_json_body()
+        if payload is None:
+            return
+        limit, error = normalize_ai_token_limit(payload)
+        if error:
+            return self.write_json({'error': error}, status=HTTPStatus.BAD_REQUEST)
+        with get_db() as conn:
+            user_row = self.ensure_user_exists(conn, user_id)
+            if not user_row:
+                return self.write_json({'error': 'user not found'}, status=HTTPStatus.NOT_FOUND)
+            set_ai_user_token_limit(conn, user_id, limit)
+            effective_limit = effective_ai_token_limit(conn, user_id)
+            self.log_operation(
+                conn,
+                int(admin['id']),
+                user_id,
+                'admin.ai_token.user_limit_update',
+                'ai_token_limit',
+                str(user_id),
+                {'limit': limit},
+            )
+            conn.commit()
+        return self.write_json({'ok': True, 'userId': user_id, 'effectiveLimit': effective_limit})
+
+    def handle_admin_clear_user_ai_token_limit(self, user_id_text: str):
+        admin = self.require_admin()
+        if not admin:
+            return
+        try:
+            user_id = int(user_id_text)
+        except ValueError:
+            return self.write_json({'error': 'invalid user id'}, status=HTTPStatus.BAD_REQUEST)
+        with get_db() as conn:
+            user_row = self.ensure_user_exists(conn, user_id)
+            if not user_row:
+                return self.write_json({'error': 'user not found'}, status=HTTPStatus.NOT_FOUND)
+            conn.execute('DELETE FROM ai_token_limits WHERE user_id = ?', (user_id,))
+            effective_limit = effective_ai_token_limit(conn, user_id)
+            self.log_operation(
+                conn,
+                int(admin['id']),
+                user_id,
+                'admin.ai_token.user_limit_clear',
+                'ai_token_limit',
+                str(user_id),
+                {},
+            )
+            conn.commit()
+        return self.write_json({'ok': True, 'userId': user_id, 'effectiveLimit': effective_limit})
+
+    def handle_admin_clear_all_ai_token_limits(self):
+        admin = self.require_admin()
+        if not admin:
+            return
+        with get_db() as conn:
+            deleted = conn.execute('DELETE FROM ai_token_limits').rowcount
+            self.log_operation(
+                conn,
+                int(admin['id']),
+                int(admin['id']),
+                'admin.ai_token.user_limits_clear_all',
+                'ai_token_limit',
+                'all',
+                {'deleted': int(deleted or 0)},
+            )
+            conn.commit()
+        return self.write_json({'ok': True, 'deleted': int(deleted or 0)})
 
     def handle_admin_users(self):
         with get_db() as conn:
@@ -2430,6 +2994,10 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return self.write_json({'error': 'message is required'}, status=HTTPStatus.BAD_REQUEST)
         if len(message) > 2000:
             return self.write_json({'error': 'message is too long'}, status=HTTPStatus.BAD_REQUEST)
+        try:
+            self.ensure_ai_token_available(int(user['id']))
+        except AiTokenLimitExceeded as error:
+            return self.write_json(error.payload, status=HTTPStatus.TOO_MANY_REQUESTS)
 
         client_now = str(payload.get('clientNow', '') or '').strip()[:40]
         timezone_name = str(payload.get('timezone', 'Asia/Shanghai') or 'Asia/Shanghai').strip()[:64]
@@ -2439,12 +3007,14 @@ class TodoHandler(SimpleHTTPRequestHandler):
 
         messages = self.build_ai_messages(message, history, tasks, client_now, timezone_name)
         try:
-            content = self.call_deepseek_chat(messages)
+            content = self.call_deepseek_chat_recorded(messages, int(user['id']), 'chat')
         except ValueError:
             return self.write_json(
                 {'error': 'DeepSeek API key is not configured'},
                 status=HTTPStatus.SERVICE_UNAVAILABLE,
             )
+        except AiTokenLimitExceeded as error:
+            return self.write_json(error.payload, status=HTTPStatus.TOO_MANY_REQUESTS)
         except RuntimeError as error:
             return self.write_json(
                 {'error': 'DeepSeek request failed', 'message': str(error)},
@@ -2469,6 +3039,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
         if rejected:
             try:
                 repaired = self.repair_ai_response(
+                    int(user['id']),
                     message,
                     history,
                     tasks,
@@ -2481,6 +3052,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
             except RuntimeError as error:
                 repaired = None
                 rejected.append({'index': 0, 'reason': f'AI correction failed: {error}'})
+            except AiTokenLimitExceeded as error:
+                return self.write_json(error.payload, status=HTTPStatus.TOO_MANY_REQUESTS)
             if repaired is not None:
                 reply, actions, rejected = repaired
         return self.write_json({
@@ -2507,6 +3080,10 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return self.write_json({'error': 'message is required'}, status=HTTPStatus.BAD_REQUEST)
         if len(message) > 2000:
             return self.write_json({'error': 'message is too long'}, status=HTTPStatus.BAD_REQUEST)
+        try:
+            self.ensure_ai_token_available(int(user['id']))
+        except AiTokenLimitExceeded as error:
+            return self.write_json(error.payload, status=HTTPStatus.TOO_MANY_REQUESTS)
 
         client_now = str(payload.get('clientNow', '') or '').strip()[:40]
         timezone_name = str(payload.get('timezone', 'Asia/Shanghai') or 'Asia/Shanghai').strip()[:64]
@@ -2545,6 +3122,11 @@ class TodoHandler(SimpleHTTPRequestHandler):
             if visible_buffer and not hidden_actions:
                 self.write_sse_event('delta', {'text': visible_buffer})
 
+            self.record_ai_usage_for_user(
+                int(user['id']),
+                'chat_stream',
+                getattr(self, '_last_deepseek_stream_usage', None),
+            )
             reply, raw_actions, parse_error = parse_ai_stream_content(full_content)
             visible_tasks, _ = ai_context_tasks(tasks)
             actions, rejected = normalize_ai_actions(raw_actions, visible_tasks)
@@ -2555,6 +3137,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
             if rejected:
                 try:
                     repaired = self.repair_ai_response(
+                        int(user['id']),
                         message,
                         history,
                         tasks,
@@ -2567,6 +3150,9 @@ class TodoHandler(SimpleHTTPRequestHandler):
                 except RuntimeError as error:
                     repaired = None
                     rejected.append({'index': 0, 'reason': f'AI correction failed: {error}'})
+                except AiTokenLimitExceeded as error:
+                    self.write_sse_event('error', error.payload)
+                    return
                 if repaired is not None:
                     reply, actions, rejected = repaired
             self.write_sse_event('done', {
