@@ -56,13 +56,19 @@ python server.py
 默认监听：
 
 ```text
-http://0.0.0.0:8092
+http://127.0.0.1:8092
 ```
 
-可通过环境变量修改监听地址和端口：
+可通过 `.env` 或环境变量修改监听地址、端口和 AI 配置。项目启动时会自动读取根目录下的 `.env`，且不会覆盖已经存在的系统环境变量。
 
-```bash
-TODO_HOST=127.0.0.1 TODO_PORT=9000 python server.py
+`.env` 示例：
+
+```env
+TODO_HOST=127.0.0.1
+TODO_PORT=8092
+DEEPSEEK_API_KEY=your-deepseek-api-key
+DEEPSEEK_MODEL=deepseek-v4-flash
+DEEPSEEK_TIMEOUT_SECONDS=60
 ```
 
 本机访问通常使用：
@@ -71,7 +77,7 @@ TODO_HOST=127.0.0.1 TODO_PORT=9000 python server.py
 http://localhost:8092
 ```
 
-服务启动时会自动创建 `data/todo-list.db`，并初始化 `users`、`sessions`、`tasks`、`schedule_items`、`schedule_template_versions`、`schedule_day_overrides` 表。
+服务启动时会自动创建 `data/todo-list.db`，并补齐所需 SQLite 表和默认设置。旧数据库可以直接随新版启动，新增表会自动创建；历史 AI token 用量不会回填。
 
 ## 首次使用
 
@@ -83,6 +89,25 @@ http://localhost:8092
 未登录时页面可以打开，但任务列表和每日安排是只读空数据状态，不能保存修改。
 
 ## Linux 部署
+
+建议先在项目根目录创建 `.env`：
+
+```bash
+cd /root/To-do-list
+nano .env
+```
+
+示例内容：
+
+```env
+TODO_HOST=127.0.0.1
+TODO_PORT=8092
+DEEPSEEK_API_KEY=your-deepseek-api-key
+DEEPSEEK_MODEL=deepseek-v4-flash
+DEEPSEEK_TIMEOUT_SECONDS=60
+```
+
+如果已经用 Caddy 或 Nginx 反代，`TODO_HOST` 建议保持 `127.0.0.1`，不要开放 Python 服务到公网。
 
 项目提供首次部署脚本：
 
@@ -97,6 +122,7 @@ chmod +x deploy-first-run.sh
 - 创建 `data/` 目录。
 - 初始化 SQLite 数据库。
 - 默认创建并启动 systemd 用户服务 `todo-list.service`。
+- 不会创建 `.env`，也不会向 systemd service 写入 `TODO_PORT`、`DEEPSEEK_API_KEY` 等运行环境变量。
 
 只初始化数据库、不创建 systemd 服务：
 
@@ -119,10 +145,57 @@ TODO_ADMIN_PASSWORD='change-this-password' \
 ./deploy-first-run.sh
 ```
 
+这些管理员环境变量需要在运行脚本前提供；再次运行脚本时，如果昵称已存在，会把该账号更新为管理员并重设密码。
+
 其他环境变量：
 
 - `TODO_SERVICE_NAME`：systemd 用户服务名，默认 `todo-list.service`。
-- `TODO_PORT`：服务监听端口，默认 `8092`。
+- `TODO_PORT`：只用于脚本最后输出访问地址提示；实际监听端口由 `.env`、外部环境变量或程序默认值决定。
+
+脚本生成的用户服务默认位置：
+
+```bash
+~/.config/systemd/user/todo-list.service
+```
+
+生成后的 service 大致如下：
+
+```ini
+[Unit]
+Description=Todo List Web App
+After=network.target
+
+[Service]
+WorkingDirectory=/root/To-do-list
+ExecStart=/usr/bin/env python3 /root/To-do-list/server.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
+```
+
+修改 `.env` 或 service 后，重载并重启：
+
+```bash
+systemctl --user daemon-reload
+systemctl --user restart todo-list.service
+systemctl --user status todo-list.service
+```
+
+本机检查：
+
+```bash
+curl http://127.0.0.1:8092/api/health
+```
+
+如果使用 Caddy 反代，示例配置：
+
+```caddyfile
+your-domain.com {
+    reverse_proxy 127.0.0.1:8092
+}
+```
 
 ## API 文档
 

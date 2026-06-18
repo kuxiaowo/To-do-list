@@ -24,7 +24,7 @@ Todo List 第一次部署脚本
   TODO_ADMIN_NAME       预创建管理员姓名，默认同昵称
   TODO_ADMIN_PASSWORD   预创建管理员密码；为空则不创建管理员
   TODO_SERVICE_NAME     systemd 服务名，默认 todo-list.service
-  TODO_PORT             服务监听端口，默认 8092
+  TODO_PORT             仅用于脚本输出提示；实际监听端口由 .env、外部环境变量或程序默认值决定
 
 示例：
   chmod +x deploy-first-run.sh
@@ -144,7 +144,6 @@ After=network.target
 
 [Service]
 WorkingDirectory=$APP_DIR
-Environment=TODO_PORT=$PORT
 ExecStart=/usr/bin/env python3 $APP_DIR/server.py
 Restart=always
 RestartSec=3
