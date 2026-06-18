@@ -1,4 +1,4 @@
-# To-Do List Timeline
+# 待办清单时间线
 
 一个面向学习任务管理的待办清单 Web 应用。项目使用静态前端、Python 标准库 HTTP 服务和 SQLite 数据库存储，不需要 Node.js 构建流程，也不依赖第三方 Python 包。
 
@@ -35,7 +35,7 @@
 ├── managebac-sync-helper/ # ManageBac 本地 Helper
 ├── deploy-first-run.sh  # Linux 首次部署脚本
 ├── API.md               # API 接口文档
-├── LICENSE              # MIT License
+├── LICENSE              # MIT 许可证
 ├── .gitignore           # 忽略 data/ 运行时数据目录
 └── README.md
 ```
