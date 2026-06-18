@@ -14,6 +14,7 @@
 - 支持一周时间格子模板和单日时间格子覆盖。
 - 时间段容量校验，避免安排时长超过可用时间。
 - 浅色/深色主题切换。
+- 支持通过本地 ManageBac Helper 预览导入 ManageBac DDL 任务。
 
 ## 技术栈
 
@@ -31,6 +32,7 @@
 ├── app.js               # Vue 应用逻辑
 ├── vendor/              # Vue 和 Element Plus 本地依赖
 ├── server.py            # 静态文件服务、API 服务和 SQLite 初始化
+├── managebac-sync-helper/ # ManageBac 本地 Helper
 ├── deploy-first-run.sh  # Linux 首次部署脚本
 ├── API.md               # API 接口文档
 ├── LICENSE              # MIT License
@@ -202,6 +204,8 @@ your-domain.com {
 完整接口说明见 [API.md](./API.md)。
 
 面向普通用户和管理员的功能说明见 [用户功能手册](./docs/USER_GUIDE.md)。
+
+ManageBac 本地 Helper 的唤起和本地 API 说明见 [ManageBac 同步接入说明](./docs/MANAGEBAC_SYNC.md)。
 
 需要登录的接口通过请求头传入 token：
 

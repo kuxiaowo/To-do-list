@@ -10,6 +10,10 @@ const ADMIN_API = '/api/admin';
 const FEEDBACK_API = '/api/feedback';
 const VISITS_API = '/api/visits';
 const AI_CHAT_STREAM_API = '/api/ai/chat-stream';
+const MANAGEBAC_HELPER_BASE = 'http://127.0.0.1:27654';
+const MANAGEBAC_WAKE_URL = 'managebac-sync://wake';
+const MANAGEBAC_CONNECT_TIMEOUT_MS = 20000;
+const MANAGEBAC_REQUEST_TIMEOUT_MS = 15000;
 const AUTH_TOKEN_KEY = 'todo-list-auth-token-v1';
 const THEME_STORAGE_KEY = 'todo-list-theme-v1';
 const GUIDE_STORAGE_KEY = 'todo-list-guide-v1';
@@ -60,6 +64,23 @@ const DEFAULT_SUBJECT_TEMPLATE = [
   'Biology',
   'Computer Science'
 ].map(name => ({ name, preset: true, enabled: true }));
+const MANAGEBAC_SUBJECT_ALIASES = [
+  ['computer science', 'Computer Science'],
+  ['computer', 'Computer Science'],
+  ['mathematics', 'Mathematics'],
+  ['math', 'Mathematics'],
+  ['english b', 'English B'],
+  ['english', 'English B'],
+  ['ielts', 'IELTS'],
+  ['physics', 'Physics'],
+  ['economics', 'Economics'],
+  ['chemistry', 'Chemistry'],
+  ['psychology', 'Psychology'],
+  ['biology', 'Biology'],
+  ['chinese', 'Chinese'],
+  ['tok', 'TOK'],
+  ['cas', 'CAS']
+];
 const DEFAULT_WEEK_SLOTS = {
   0: [
     { keyBase: '0-09:00', label: '上午', start: '09:00', end: '10:00' },
@@ -232,6 +253,16 @@ createApp({
       feedbackItems: [],
       feedbackLimitPerUser: 10,
       feedbackLoading: false,
+      manageBacDialogVisible: false,
+      manageBacLoading: false,
+      manageBacImporting: false,
+      manageBacClientToken: '',
+      manageBacNonce: '',
+      manageBacStatus: 'idle',
+      manageBacStatusMessage: '',
+      manageBacTasks: [],
+      manageBacSelectedIds: [],
+      manageBacLastMeta: null,
       adminMode: false,
       adminSection: 'users',
       adminUsers: [],
@@ -684,6 +715,38 @@ createApp({
     pendingFeedbackCount() {
       return this.feedbackItems.filter(item => item.status !== 'replied').length;
     },
+    manageBacSelectedCount() {
+      return this.manageBacSelectedIds.length;
+    },
+    manageBacSelectableTasks() {
+      return this.manageBacTasks.filter(task => !this.isManageBacDuplicateTask(task));
+    },
+    manageBacAllSelected() {
+      return !!this.manageBacSelectableTasks.length &&
+        this.manageBacSelectableTasks.every(task => this.manageBacSelectedIds.includes(this.manageBacTaskKey(task)));
+    },
+    manageBacStatusText() {
+      const labels = {
+        idle: '未连接',
+        connecting: '正在连接 Helper',
+        starting: '正在唤起 Helper',
+        connected: 'Helper 已连接',
+        needsLogin: '需要登录 ManageBac',
+        waitingLogin: '等待网页登录',
+        fetching: '正在抓取并解析',
+        ready: '解析完成',
+        importing: '正在导入',
+        imported: '导入完成',
+        error: '出现问题'
+      };
+      return labels[this.manageBacStatus] || this.manageBacStatus;
+    },
+    showManageBacLoginButton() {
+      return ['needsLogin', 'waitingLogin'].includes(this.manageBacStatus);
+    },
+    manageBacLoginButtonText() {
+      return this.manageBacStatus === 'waitingLogin' ? '重新打开登录窗口' : '打开登录窗口';
+    },
     quickJumpMarkedDateKeys() {
       const keys = new Set();
       if (this.activePage === 'daily') {
@@ -1055,6 +1118,277 @@ createApp({
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.message || payload.error || '请求失败');
       return payload;
+    },
+    sleep(ms) {
+      return new Promise(resolve => window.setTimeout(resolve, ms));
+    },
+    createManageBacNonce() {
+      if (window.crypto && window.crypto.randomUUID) return window.crypto.randomUUID();
+      return `mb-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    },
+    manageBacHeaders(hasBody = false) {
+      return {
+        ...(hasBody ? { 'Content-Type': 'application/json' } : {}),
+        ...(this.manageBacClientToken ? { 'X-ManageBac-Client-Token': this.manageBacClientToken } : {})
+      };
+    },
+    async manageBacHelperFetch(path, options = {}) {
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), options.timeoutMs || MANAGEBAC_REQUEST_TIMEOUT_MS);
+      try {
+        const body = options.body ? JSON.stringify(options.body) : undefined;
+        const response = await fetch(`${MANAGEBAC_HELPER_BASE}${path}`, {
+          method: options.method || 'GET',
+          mode: 'cors',
+          cache: 'no-store',
+          body,
+          headers: {
+            ...this.manageBacHeaders(Boolean(body) || options.method === 'POST'),
+            ...(options.headers || {})
+          },
+          signal: controller.signal
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          const error = new Error(payload.message || payload.error || 'Helper 请求失败');
+          error.code = payload.error || response.status;
+          error.payload = payload;
+          throw error;
+        }
+        return payload;
+      } catch (error) {
+        if (error.name === 'AbortError') throw new Error('连接 Helper 超时。');
+        throw error;
+      } finally {
+        window.clearTimeout(timeout);
+      }
+    },
+    async checkManageBacHealth() {
+      return this.manageBacHelperFetch('/v1/health', { timeoutMs: 2500 });
+    },
+    wakeManageBacHelper() {
+      const nonce = this.manageBacNonce || this.createManageBacNonce();
+      this.manageBacNonce = nonce;
+      window.location.href = `${MANAGEBAC_WAKE_URL}?nonce=${encodeURIComponent(nonce)}`;
+    },
+    async waitForManageBacHelper() {
+      const startedAt = Date.now();
+      let lastError = null;
+      while (Date.now() - startedAt < MANAGEBAC_CONNECT_TIMEOUT_MS) {
+        try {
+          return await this.checkManageBacHealth();
+        } catch (error) {
+          lastError = error;
+          await this.sleep(700);
+        }
+      }
+      throw lastError || new Error('Helper 没有响应。');
+    },
+    async connectManageBacHelper({ wake = true } = {}) {
+      this.manageBacLoading = true;
+      this.manageBacStatus = 'connecting';
+      this.manageBacStatusMessage = '正在检查本机 Helper。';
+      if (!this.manageBacNonce) this.manageBacNonce = this.createManageBacNonce();
+      try {
+        try {
+          await this.checkManageBacHealth();
+        } catch (error) {
+          if (!wake) throw error;
+          this.manageBacStatus = 'starting';
+          this.manageBacStatusMessage = 'Helper 未运行，正在请求浏览器唤起本地程序。';
+          this.wakeManageBacHelper();
+          await this.waitForManageBacHelper();
+        }
+        const session = await this.manageBacHelperFetch('/v1/session/start', {
+          method: 'POST',
+          body: { nonce: this.manageBacNonce }
+        });
+        this.manageBacClientToken = session.clientToken || '';
+        this.manageBacStatus = 'connected';
+        this.manageBacStatusMessage = 'Helper 已连接。';
+        await this.refreshManageBacSession();
+      } catch (error) {
+        this.manageBacStatus = 'error';
+        this.manageBacStatusMessage = this.manageBacErrorMessage(error);
+        throw error;
+      } finally {
+        this.manageBacLoading = false;
+      }
+    },
+    manageBacErrorMessage(error) {
+      const code = error && error.code;
+      if (code === 'origin_not_allowed') return 'Helper 未允许当前网站来源，请检查 Helper 的 MANAGEBAC_ALLOWED_ORIGINS 配置。';
+      if (code === 'login_required') return 'ManageBac 登录已失效，需要重新登录。';
+      if (String(error && error.message || '').includes('Failed to fetch')) return '无法连接本机 Helper，可能尚未安装或未允许浏览器唤起。';
+      return (error && error.message) || '未知错误';
+    },
+    async refreshManageBacSession() {
+      const status = await this.manageBacHelperFetch('/v1/session');
+      if (status.loggedIn || status.hasManageBacSession) {
+        this.manageBacStatus = 'connected';
+        this.manageBacStatusMessage = `已检测到 ManageBac 登录态，Cookie 数量：${status.cookieCount || 0}。`;
+      } else {
+        this.manageBacStatus = 'needsLogin';
+        this.manageBacStatusMessage = '需要在 Helper 弹出的 ManageBac 窗口中登录。';
+      }
+      return status;
+    },
+    async openManageBacSyncDialog() {
+      if (!this.currentUser) {
+        ElementPlus.ElMessage.warning('请先登录或注册，再同步 ManageBac。');
+        return;
+      }
+      this.manageBacDialogVisible = true;
+      this.manageBacTasks = [];
+      this.manageBacSelectedIds = [];
+      this.manageBacLastMeta = null;
+      try {
+        await this.connectManageBacHelper();
+      } catch (error) {
+        console.error('连接 ManageBac Helper 失败：', error);
+      }
+    },
+    async openManageBacLogin() {
+      try {
+        if (!this.manageBacClientToken) await this.connectManageBacHelper();
+        await this.manageBacHelperFetch('/v1/login/open', { method: 'POST' });
+        this.manageBacStatus = 'waitingLogin';
+        this.manageBacStatusMessage = '请在弹出的 ManageBac 窗口完成登录，完成后回到这里获取任务。';
+      } catch (error) {
+        this.manageBacStatus = 'error';
+        this.manageBacStatusMessage = this.manageBacErrorMessage(error);
+        ElementPlus.ElMessage.error(this.manageBacStatusMessage);
+      }
+    },
+    async previewManageBacTasks() {
+      try {
+        if (!this.manageBacClientToken) await this.connectManageBacHelper();
+        this.manageBacLoading = true;
+        this.manageBacStatus = 'fetching';
+        this.manageBacStatusMessage = '正在抓取 ManageBac 任务并解析。';
+        const payload = await this.manageBacHelperFetch('/v1/tasks/preview', { method: 'POST', timeoutMs: 30000 });
+        const tasks = Array.isArray(payload.tasks) ? payload.tasks : [];
+        this.manageBacTasks = tasks.map(task => this.normalizeManageBacPreviewTask(task));
+        this.manageBacSelectedIds = this.manageBacTasks
+          .filter(task => task.subject && task.dueAt && !this.isManageBacDuplicateTask(task))
+          .map(task => this.manageBacTaskKey(task));
+        this.manageBacLastMeta = payload.meta || null;
+        this.manageBacStatus = 'ready';
+        this.manageBacStatusMessage = `已解析 ${this.manageBacTasks.length} 个任务。`;
+      } catch (error) {
+        if (error.code === 'login_required') {
+          this.manageBacStatus = 'needsLogin';
+          this.manageBacStatusMessage = this.manageBacErrorMessage(error);
+          return;
+        }
+        this.manageBacStatus = 'error';
+        this.manageBacStatusMessage = this.manageBacErrorMessage(error);
+        ElementPlus.ElMessage.error(this.manageBacStatusMessage);
+      } finally {
+        this.manageBacLoading = false;
+      }
+    },
+    manageBacTaskKey(task) {
+      return task.sourceId || task.sourceUrl || `${task.title}-${task.dueAt}`;
+    },
+    normalizeManageBacPreviewTask(task) {
+      const rawCourseName = String(task.rawCourseName || task.className || task.courseName || '').trim();
+      const subject = String(task.subject || '').trim() || this.inferManageBacSubject(rawCourseName);
+      return {
+        ...task,
+        className: rawCourseName,
+        rawCourseName,
+        subject
+      };
+    },
+    inferManageBacSubject(rawCourseName) {
+      const normalized = String(rawCourseName || '').toLocaleLowerCase();
+      if (!normalized) return '';
+      const direct = this.enabledSubjectOptions.find(subject => normalized.includes(subject.toLocaleLowerCase()));
+      if (direct) return direct;
+      const alias = MANAGEBAC_SUBJECT_ALIASES.find(([needle]) => normalized.includes(needle));
+      if (!alias) return '';
+      return this.enabledSubjectOptions.find(subject => subject.toLocaleLowerCase() === alias[1].toLocaleLowerCase()) || alias[1];
+    },
+    isManageBacTaskSelected(task) {
+      return this.manageBacSelectedIds.includes(this.manageBacTaskKey(task));
+    },
+    setManageBacTaskSelected(task, selected) {
+      const key = this.manageBacTaskKey(task);
+      if (selected) {
+        if (!this.manageBacSelectedIds.includes(key)) this.manageBacSelectedIds = [...this.manageBacSelectedIds, key];
+        return;
+      }
+      this.manageBacSelectedIds = this.manageBacSelectedIds.filter(item => item !== key);
+    },
+    toggleAllManageBacTasks(selected) {
+      this.manageBacSelectedIds = selected ? this.manageBacSelectableTasks.map(task => this.manageBacTaskKey(task)) : [];
+    },
+    isManageBacDuplicateTask(task) {
+      const sourceId = String(task.sourceId || '');
+      return this.tasks.some(existing => {
+        if (sourceId && String(existing.note || '').includes(sourceId)) return true;
+        return String(existing.title || '').trim() === String(task.title || '').trim() &&
+          String(existing.dueAt || '') === String(task.dueAt || '') &&
+          String(existing.subject || '').trim() === String(task.subject || '').trim();
+      });
+    },
+    manageBacImportNote(task) {
+      const lines = [task.note || `ManageBac: ${task.sourceId || ''}`];
+      if (task.rawCourseName) lines.push(`ManageBac 课程：${task.rawCourseName}`);
+      if (task.sourceUrl) lines.push(`ManageBac 链接：${task.sourceUrl}`);
+      return lines.filter(Boolean).join('\n');
+    },
+    async importManageBacTasks() {
+      if (!this.currentUser) {
+        ElementPlus.ElMessage.warning('请先登录或注册，再导入任务。');
+        return;
+      }
+      const selected = this.manageBacTasks.filter(task => this.manageBacSelectedIds.includes(this.manageBacTaskKey(task)));
+      if (!selected.length) {
+        ElementPlus.ElMessage.warning('请先选择要导入的任务。');
+        return;
+      }
+      const invalid = selected.find(task => !String(task.subject || '').trim() || !String(task.title || '').trim() || !String(task.dueAt || '').trim());
+      if (invalid) {
+        ElementPlus.ElMessage.warning('请先补全所选任务的标题、科目和截止时间。');
+        return;
+      }
+      this.manageBacImporting = true;
+      this.manageBacStatus = 'importing';
+      this.manageBacStatusMessage = '正在写入任务库。';
+      try {
+        const imported = [];
+        for (const task of selected) {
+          if (this.isManageBacDuplicateTask(task)) continue;
+          const payload = {
+            id: this.createTaskId(),
+            createdAt: new Date().toISOString(),
+            title: String(task.title || '').trim(),
+            subject: String(task.subject || '').trim(),
+            dueAt: String(task.dueAt || '').trim(),
+            pool: 'todo',
+            priority: ['high', 'medium', 'low'].includes(task.priority) ? task.priority : 'medium',
+            note: this.manageBacImportNote(task),
+            completed: false
+          };
+          const savedTask = await this.createTaskOnServer(payload);
+          imported.push(savedTask || payload);
+        }
+        if (imported.length) {
+          this.tasks = [...this.tasks, ...imported.map(task => this.normalizeTaskPool(task))];
+        }
+        this.manageBacSelectedIds = [];
+        this.manageBacStatus = 'imported';
+        this.manageBacStatusMessage = `已导入 ${imported.length} 个任务。`;
+        ElementPlus.ElMessage.success(`已导入 ${imported.length} 个任务。`);
+      } catch (error) {
+        this.manageBacStatus = 'error';
+        this.manageBacStatusMessage = error.message || String(error);
+        ElementPlus.ElMessage.error(`导入失败：${this.manageBacStatusMessage}`);
+      } finally {
+        this.manageBacImporting = false;
+      }
     },
     toggleAiChat() {
       if (this.adminMode) return;

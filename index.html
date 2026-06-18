@@ -164,6 +164,7 @@
 
             <div class="feedback-quick-action">
               <el-button plain @click="openSettingsDialog">设置</el-button>
+              <el-button plain :disabled="!currentUser" @click="openManageBacSyncDialog">同步 ManageBac</el-button>
               <el-button type="primary" plain :disabled="!currentUser" @click="openFeedbackDialog" data-guide="feedback">反馈</el-button>
               <el-button plain @click="startGuide">帮助</el-button>
             </div>
@@ -1354,6 +1355,116 @@
         </footer>
       </section>
     </div>
+
+    <el-dialog
+      v-model="manageBacDialogVisible"
+      title="同步 ManageBac"
+      width="min(96vw, 980px)"
+      class="managebac-dialog"
+    >
+      <div class="managebac-sync">
+        <section class="managebac-status-panel">
+          <div>
+            <div class="managebac-status-label">{{ manageBacStatusText }}</div>
+            <div class="managebac-status-message">{{ manageBacStatusMessage || '连接 Helper 后，如果未登录会显示登录按钮。' }}</div>
+          </div>
+          <div class="managebac-actions">
+            <el-button plain :loading="manageBacLoading" @click="connectManageBacHelper">重新连接</el-button>
+            <el-button
+              v-if="showManageBacLoginButton"
+              plain
+              :disabled="!manageBacClientToken"
+              @click="openManageBacLogin"
+            >{{ manageBacLoginButtonText }}</el-button>
+            <el-button type="primary" :loading="manageBacLoading" @click="previewManageBacTasks">获取任务</el-button>
+          </div>
+        </section>
+
+        <section v-if="manageBacLastMeta" class="managebac-meta">
+          <span>抓取时间：{{ formatDateTime(manageBacLastMeta.fetchedAt) }}</span>
+          <span>状态：{{ manageBacLastMeta.status }}</span>
+          <span>HTML：{{ manageBacLastMeta.byteLength }} bytes</span>
+        </section>
+
+        <section v-if="manageBacTasks.length" class="managebac-preview">
+          <div class="managebac-preview-toolbar">
+            <el-checkbox
+              :model-value="manageBacAllSelected"
+              :indeterminate="manageBacSelectedCount > 0 && !manageBacAllSelected"
+              @change="toggleAllManageBacTasks"
+            >全选可导入任务</el-checkbox>
+            <span class="day-subtitle">已选 {{ manageBacSelectedCount }} / {{ manageBacTasks.length }}</span>
+          </div>
+
+          <div class="managebac-preview-list">
+            <article
+              v-for="task in manageBacTasks"
+              :key="manageBacTaskKey(task)"
+              class="managebac-preview-row"
+              :class="{ 'is-duplicate': isManageBacDuplicateTask(task), 'is-missing-subject': !task.subject }"
+            >
+              <el-checkbox
+                :model-value="isManageBacTaskSelected(task)"
+                :disabled="isManageBacDuplicateTask(task)"
+                @change="value => setManageBacTaskSelected(task, value)"
+              ></el-checkbox>
+              <div class="managebac-preview-fields">
+                <div class="managebac-preview-main">
+                  <el-input v-model="task.title" maxlength="80" placeholder="任务标题"></el-input>
+                  <el-select
+                    v-model="task.subject"
+                    filterable
+                    allow-create
+                    default-first-option
+                    placeholder="科目"
+                    class="managebac-subject-select"
+                  >
+                    <el-option
+                      v-for="subject in enabledSubjectOptions"
+                      :key="subject"
+                      :label="subject"
+                      :value="subject"
+                    ></el-option>
+                  </el-select>
+                  <el-date-picker
+                    v-model="task.dueAt"
+                    type="datetime"
+                    value-format="YYYY-MM-DDTHH:mm:ss"
+                    placeholder="截止时间"
+                    class="managebac-due-picker"
+                  ></el-date-picker>
+                </div>
+                <div class="managebac-preview-sub">
+                  <span>{{ task.rawCourseName || '未识别课程' }}</span>
+                  <span>{{ task.sourceId }}</span>
+                  <el-tag v-if="isManageBacDuplicateTask(task)" type="info" effect="plain">已存在</el-tag>
+                  <el-tag v-else-if="!task.subject" type="warning" effect="plain">需补科目</el-tag>
+                </div>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <div v-else class="managebac-empty">
+          还没有解析结果。
+        </div>
+      </div>
+
+      <template #footer>
+        <div class="dialog-footer">
+          <div></div>
+          <div class="right-actions">
+            <el-button @click="manageBacDialogVisible = false">关闭</el-button>
+            <el-button
+              type="primary"
+              :disabled="!manageBacSelectedCount"
+              :loading="manageBacImporting"
+              @click="importManageBacTasks"
+            >导入所选</el-button>
+          </div>
+        </div>
+      </template>
+    </el-dialog>
 
     <el-dialog
       v-model="settingsDialogVisible"
