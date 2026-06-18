@@ -1,6 +1,3 @@
 /data/
 .env
-/临时/
 /managebac-sync-helper/node_modules/
-/managebac-sync-helper/out/
-/managebac-sync-helper/dist/
