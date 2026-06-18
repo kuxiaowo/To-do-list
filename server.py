@@ -586,6 +586,12 @@ def ai_context_tasks(tasks: list[dict]) -> tuple[list[dict], dict]:
             'limit': AI_CONTEXT_TASK_LIMIT,
             'policy': 'Only included incomplete timeline tasks with pool=todo may be used as update targets. Daily schedule items, habits, arrangement-pool tasks, and completed tasks are not visible. If truncated and the target is not visible, ask the user to narrow the request.',
         },
+        'taskPlacement': {
+            'ddlTimeline': 'pool=todo 且 dueAt 非空的任务显示在 DDL 时间线/日历。',
+            'unscheduledDdl': 'pool=todo 且 dueAt 为空字符串的任务显示在“待安排DDL”。如果用户要求没有截止日期、先待安排或放入待安排DDL，create_task 应把 dueAt 设为空字符串。',
+            'dailyArrangementPool': 'pool=arrangement 是每日安排页的“临时任务池”，当前 AI 不可创建或修改。',
+            'createTaskPoolPolicy': 'create_task 不接收 pool 字段；后端/前端会按普通 DDL 任务写入 pool=todo。',
+        },
         'tasks': [compact_task_for_ai(task) for task in included_tasks],
     }
 
@@ -654,7 +660,7 @@ def ai_priority_label(priority: str) -> str:
 
 
 def ai_due_label(value: str) -> str:
-    return value.replace('T', ' ')[:16] if value else '无截止时间'
+    return value.replace('T', ' ')[:16] if value else '待安排DDL'
 
 
 def ai_task_summary(task: dict) -> str:

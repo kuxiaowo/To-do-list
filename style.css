@@ -317,6 +317,36 @@ body {
   box-shadow: var(--shadow);
 }
 
+.settings-list {
+  display: grid;
+  gap: 10px;
+}
+
+.settings-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: center;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.settings-row:last-child {
+  border-bottom: 0;
+}
+
+.settings-row-title {
+  color: var(--text-strong);
+  font-weight: 900;
+}
+
+.settings-row-desc {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 0.86rem;
+  line-height: 1.45;
+}
+
 .auth-title-row {
   display: flex;
   justify-content: space-between;

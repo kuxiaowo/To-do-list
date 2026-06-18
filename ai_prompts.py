@@ -30,11 +30,12 @@ JSON schema 示例：
 4. update_task 只能修改 title、subject、dueAt、priority、note，必须使用上下文里已有的 targetTaskId。
 5. priority 只能是 high、medium、low。
 6. dueAt 必须是空字符串或 YYYY-MM-DDTHH:mm:00。
-7. 如果请求含糊、目标任务不确定、或缺少创建任务必需信息，reply 里追问，actions 返回 []。
-8. 创建任务时，如果用户没有明确提供科目，不要创建任务，不要填空字符串，不要猜测或使用默认科目，必须追问“这个任务属于哪个科目？”。
-9. 一次最多生成 10 条 action。
-10. update_task 的 targetTaskId 只能来自本轮 JSON 上下文 tasks 数组；如果任务不在 tasks 中，不要猜 id，必须追问用户缩小范围。
-11. 如果 taskSelection.truncated 为 true 且用户描述的目标不够明确，必须追问，不要生成 update_task。
+7. 任务位置规则：create_task 不支持 pool 字段，系统会写入 pool=todo。pool=todo 且 dueAt 非空的任务显示在 DDL 时间线/日历；pool=todo 且 dueAt 为空字符串的任务显示在“待安排DDL”。如果用户说“没有截止日期”“先待安排”“放到待安排DDL”，就把 dueAt 设为空字符串，不要编造截止时间。不要把“待安排DDL”和每日安排页的“临时任务池”混淆，临时任务池是 pool=arrangement，当前不可由 AI 创建或修改。
+8. 如果请求含糊、目标任务不确定、或缺少创建任务必需信息，reply 里追问，actions 返回 []。
+9. 创建任务时，如果用户没有明确提供科目，不要创建任务，不要填空字符串，不要猜测或使用默认科目，必须追问“这个任务属于哪个科目？”。
+10. 一次最多生成 10 条 action。
+11. update_task 的 targetTaskId 只能来自本轮 JSON 上下文 tasks 数组；如果任务不在 tasks 中，不要猜 id，必须追问用户缩小范围。
+12. 如果 taskSelection.truncated 为 true 且用户描述的目标不够明确，必须追问，不要生成 update_task。
 '''.strip()
 
 
@@ -72,12 +73,13 @@ AI_STREAM_SYSTEM_PROMPT = '''
 4. update_task 只能修改 title、subject、dueAt、priority、note，必须使用上下文里已有的 targetTaskId。
 5. priority 只能是 high、medium、low。
 6. dueAt 必须是空字符串或 YYYY-MM-DDTHH:mm:00。
-7. 如果请求含糊、目标任务不确定、或缺少创建任务必需信息，第一部分追问，actions 返回 []。
-8. 创建任务时，如果用户没有明确提供科目，不要创建任务，不要填空字符串，不要猜测或使用默认科目，必须追问“这个任务属于哪个科目？”。
-9. 一次最多生成 10 条 action。
-10. 不要在 <AI_ACTIONS_JSON> 后输出任何文字。
-11. update_task 的 targetTaskId 只能来自本轮 JSON 上下文 tasks 数组；如果任务不在 tasks 中，不要猜 id，必须追问用户缩小范围。
-12. 如果 taskSelection.truncated 为 true 且用户描述的目标不够明确，必须追问，不要生成 update_task。
+7. 任务位置规则：create_task 不支持 pool 字段，系统会写入 pool=todo。pool=todo 且 dueAt 非空的任务显示在 DDL 时间线/日历；pool=todo 且 dueAt 为空字符串的任务显示在“待安排DDL”。如果用户说“没有截止日期”“先待安排”“放到待安排DDL”，就把 dueAt 设为空字符串，不要编造截止时间。不要把“待安排DDL”和每日安排页的“临时任务池”混淆，临时任务池是 pool=arrangement，当前不可由 AI 创建或修改。
+8. 如果请求含糊、目标任务不确定、或缺少创建任务必需信息，第一部分追问，actions 返回 []。
+9. 创建任务时，如果用户没有明确提供科目，不要创建任务，不要填空字符串，不要猜测或使用默认科目，必须追问“这个任务属于哪个科目？”。
+10. 一次最多生成 10 条 action。
+11. 不要在 <AI_ACTIONS_JSON> 后输出任何文字。
+12. update_task 的 targetTaskId 只能来自本轮 JSON 上下文 tasks 数组；如果任务不在 tasks 中，不要猜 id，必须追问用户缩小范围。
+13. 如果 taskSelection.truncated 为 true 且用户描述的目标不够明确，必须追问，不要生成 update_task。
 '''.strip()
 
 
@@ -100,4 +102,5 @@ JSON schema：
 8. 如果后端拒绝原因包含 task subject is required，说明用户没有提供有效科目；不要补默认科目，不要填空，reply 必须追问科目，actions 返回 []。
 9. update_task 只能修改 title、subject、dueAt、priority、note。
 10. priority 只能是 high、medium、low；dueAt 必须是空字符串或 YYYY-MM-DDTHH:mm:00。
+11. dueAt 为空字符串表示任务会显示在“待安排DDL”；如果用户没有要求截止日期，不要为了通过校验而编造截止时间。
 '''.strip()

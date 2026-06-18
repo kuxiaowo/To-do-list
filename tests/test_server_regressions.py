@@ -259,6 +259,20 @@ class ServerRegressionTests(unittest.TestCase):
         self.assertNotIn('task-schedule', context_json)
         self.assertNotIn('task-habit', context_json)
         self.assertNotIn('task-arrangement', context_json)
+        self.assertIn('taskPlacement', context)
+        self.assertIn('待安排DDL', context_json)
+        self.assertIn('dueAt 为空字符串', context_json)
+
+    def test_ai_prompts_explain_unscheduled_ddl_placement(self):
+        prompts = [
+            server.AI_CHAT_SYSTEM_PROMPT,
+            server.AI_STREAM_SYSTEM_PROMPT,
+            server.AI_REPAIR_SYSTEM_PROMPT,
+        ]
+        for prompt in prompts:
+            self.assertIn('待安排DDL', prompt)
+            self.assertIn('dueAt', prompt)
+            self.assertIn('空字符串', prompt)
 
     def test_dotenv_loader_sets_missing_values_without_overriding_existing_env(self):
         keys = ['DOTENV_TEST_KEY', 'DOTENV_EXISTING_KEY', 'DOTENV_QUOTED_KEY']
@@ -1255,6 +1269,44 @@ class ServerRegressionTests(unittest.TestCase):
             "this.filteredTasks.filter(task => task.dueAt && this.taskPool(task) === 'todo' && task.dueAt.startsWith(key))",
             app_js,
         )
+
+    def test_ai_frontend_explains_unscheduled_ddl_placement(self):
+        index_html = Path('index.html').read_text(encoding='utf-8')
+        app_js = Path('app.js').read_text(encoding='utf-8')
+
+        self.assertIn('没有截止时间时会显示在“待安排DDL”', index_html)
+        self.assertIn('留空则放入待安排DDL', index_html)
+        self.assertIn(": '待安排DDL'", app_js)
+
+    def test_ai_frontend_entry_only_renders_on_ddl_page(self):
+        index_html = Path('index.html').read_text(encoding='utf-8')
+        app_js = Path('app.js').read_text(encoding='utf-8')
+
+        self.assertIn('v-if="showAiAssistant"', index_html)
+        self.assertIn("return !this.adminMode && this.activePage === 'ddl' && this.appSettings.aiEnabled;", app_js)
+        self.assertIn("if (this.activePage !== 'ddl' || !this.appSettings.aiEnabled) return;", app_js)
+        self.assertIn("if (page !== 'ddl') this.aiChatOpen = false;", app_js)
+
+    def test_frontend_settings_control_ai_and_pool_visibility(self):
+        index_html = Path('index.html').read_text(encoding='utf-8')
+        app_js = Path('app.js').read_text(encoding='utf-8')
+        style_css = Path('style.css').read_text(encoding='utf-8')
+
+        self.assertIn('APP_SETTINGS_STORAGE_KEY', app_js)
+        self.assertIn('todo-list-app-settings-v1', app_js)
+        self.assertIn('appSettings: loadAppSettings()', app_js)
+        self.assertIn('settingsDialogVisible', app_js)
+        self.assertIn('saveAppSettings()', app_js)
+        self.assertIn('showTaskPoolSection()', app_js)
+        self.assertIn('showHabitPoolSection()', app_js)
+        self.assertIn('@click="openSettingsDialog"', index_html)
+        self.assertIn('v-if="showTaskPoolSection"', index_html)
+        self.assertIn('v-if="showHabitPoolSection"', index_html)
+        self.assertIn('v-model="appSettings.showUnscheduledDdl"', index_html)
+        self.assertIn('v-model="appSettings.showArrangementPool"', index_html)
+        self.assertIn('v-model="appSettings.showHabitPool"', index_html)
+        self.assertIn('v-model="appSettings.aiEnabled"', index_html)
+        self.assertIn('.settings-row', style_css)
 
     def test_admin_user_list_renders_avatar_column(self):
         index_html = Path('index.html').read_text(encoding='utf-8')

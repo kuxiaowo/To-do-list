@@ -13,6 +13,7 @@ const AI_CHAT_STREAM_API = '/api/ai/chat-stream';
 const AUTH_TOKEN_KEY = 'todo-list-auth-token-v1';
 const THEME_STORAGE_KEY = 'todo-list-theme-v1';
 const GUIDE_STORAGE_KEY = 'todo-list-guide-v1';
+const APP_SETTINGS_STORAGE_KEY = 'todo-list-app-settings-v1';
 const SIDEBAR_AUTO_COLLAPSE_WIDTH = 1100;
 const DATE_RANGE_EXPAND_MARGIN = 21;
 const HABIT_SYNC_FUTURE_DAYS = 90;
@@ -38,6 +39,12 @@ const TIMELINE_START_MONTH = 4;
 const TIMELINE_START_DAY = 1;
 const PRIORITY_ORDER = { high: 0, medium: 1, low: 2 };
 const PRIORITY_LABELS = { high: '高优先级', medium: '中优先级', low: '低优先级' };
+const DEFAULT_APP_SETTINGS = {
+  aiEnabled: true,
+  showHabitPool: true,
+  showArrangementPool: true,
+  showUnscheduledDdl: true,
+};
 const WEEKDAY_TEXT = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
 const SUBJECT_TEMPLATE_API = '/api/subject-template';
 const SUBJECT_TEMPLATE_EDIT_VALUE = '__edit_subject_template__';
@@ -108,6 +115,20 @@ const DEFAULT_WEEK_SLOTS = {
   ],
 };
 
+function loadAppSettings() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(APP_SETTINGS_STORAGE_KEY) || '{}');
+    return {
+      aiEnabled: saved.aiEnabled !== false,
+      showHabitPool: saved.showHabitPool !== false,
+      showArrangementPool: saved.showArrangementPool !== false,
+      showUnscheduledDdl: saved.showUnscheduledDdl !== false,
+    };
+  } catch (error) {
+    return { ...DEFAULT_APP_SETTINGS };
+  }
+}
+
 createApp({
   data() {
     return {
@@ -123,6 +144,8 @@ createApp({
       aiApprovalVisible: false,
       aiCurrentActionIndex: 0,
       aiExecutingActionId: '',
+      settingsDialogVisible: false,
+      appSettings: loadAppSettings(),
       defaultWeekSlots: JSON.parse(JSON.stringify(DEFAULT_WEEK_SLOTS)),
       scheduleTemplateVersions: [],
       scheduleDayOverrides: {},
@@ -545,6 +568,17 @@ createApp({
         top: `${this.adminAiUsageHoverPoint.y}%`
       };
     },
+    showAiAssistant() {
+      return !this.adminMode && this.activePage === 'ddl' && this.appSettings.aiEnabled;
+    },
+    showTaskPoolSection() {
+      return this.activePage === 'daily'
+        ? this.appSettings.showArrangementPool
+        : this.appSettings.showUnscheduledDdl;
+    },
+    showHabitPoolSection() {
+      return this.activePage === 'daily' && this.appSettings.showHabitPool;
+    },
     sortedTasks() {
       return [...this.tasks].sort((a, b) => this.compareTasks(a, b));
     },
@@ -850,6 +884,14 @@ createApp({
       document.documentElement.dataset.theme = theme;
       localStorage.setItem(THEME_STORAGE_KEY, theme);
     },
+    openSettingsDialog() {
+      this.settingsDialogVisible = true;
+    },
+    saveAppSettings() {
+      localStorage.setItem(APP_SETTINGS_STORAGE_KEY, JSON.stringify(this.appSettings));
+      if (!this.appSettings.aiEnabled) this.aiChatOpen = false;
+      this.$nextTick(() => this.updateGuideTarget());
+    },
     setTheme(value) {
       this.isDarkMode = !!value;
       this.applyTheme();
@@ -1016,6 +1058,7 @@ createApp({
     },
     toggleAiChat() {
       if (this.adminMode) return;
+      if (this.activePage !== 'ddl' || !this.appSettings.aiEnabled) return;
       if (!this.currentUser) {
         ElementPlus.ElMessage.warning('请先登录或注册，再使用 AI 助手。');
         return;
@@ -1128,6 +1171,10 @@ createApp({
       return `有些候选操作没有通过校验，未写入任务。原因：${reasons.join('；')}`;
     },
     async sendAiMessage() {
+      if (!this.appSettings.aiEnabled) {
+        ElementPlus.ElMessage.warning('AI 功能已关闭。');
+        return;
+      }
       if (!this.currentUser) {
         ElementPlus.ElMessage.warning('请先登录或注册，再使用 AI 助手。');
         return;
@@ -1264,7 +1311,7 @@ createApp({
     },
     aiFormatFieldValue(field, value) {
       if (field === 'priority') return this.priorityLabel(value || 'medium');
-      if (field === 'dueAt') return value ? String(value).replace('T', ' ').slice(0, 16) : '无截止时间';
+      if (field === 'dueAt') return value ? String(value).replace('T', ' ').slice(0, 16) : '待安排DDL';
       return value === '' || value === null || value === undefined ? '空' : String(value);
     },
     aiActionPreviewFields(action) {
@@ -4010,6 +4057,7 @@ createApp({
       if (page === this.activePage) return;
       this.rememberCurrentViewDate(this.activePage);
       this.activePage = page;
+      if (page !== 'ddl') this.aiChatOpen = false;
       const key = this.pageViewDateKeys[page] || this.currentViewDateKey || this.formatDateKey(new Date());
       this.$nextTick(() => {
         if (page === 'ddl') this.setDdlCalendarMonth(key);

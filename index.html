@@ -28,8 +28,8 @@
         </div>
         <button class="sidebar-peek-button" :class="{ 'is-expanded-control': !sidebarCollapsed }" type="button" :title="sidebarCollapsed ? '展开侧栏' : '收起侧栏'" @click="sidebarCollapsed = !sidebarCollapsed">
           <span class="sidebar-peek-icon">{{ sidebarCollapsed ? '›' : '‹' }}</span>
-          <span v-if="sidebarCollapsed" class="sidebar-peek-text">{{ activePage === 'daily' ? '任务池' : '待安排' }}</span>
-          <span v-if="sidebarCollapsed" class="sidebar-peek-count">{{ unscheduledCount }}</span>
+          <span v-if="sidebarCollapsed" class="sidebar-peek-text">{{ showTaskPoolSection ? (activePage === 'daily' ? '任务池' : '待安排') : '侧栏' }}</span>
+          <span v-if="sidebarCollapsed && showTaskPoolSection" class="sidebar-peek-count">{{ unscheduledCount }}</span>
         </button>
         <div class="summary-panel-content">
         <div class="summary-header">
@@ -61,7 +61,7 @@
           </div>
         </div>
 
-        <section class="summary-section">
+        <section v-if="showTaskPoolSection" class="summary-section">
           <h3>
             <span>{{ activePage === 'daily' ? '临时任务池' : '待安排DDL' }}</span>
             <span class="day-subtitle">{{ unscheduledCount }} 项</span>
@@ -112,7 +112,7 @@
           </div>
         </section>
 
-        <section v-if="activePage === 'daily'" class="summary-section habit-pool-section">
+        <section v-if="showHabitPoolSection" class="summary-section habit-pool-section">
           <h3>
             <span>习惯池</span>
             <span class="day-subtitle">{{ habitCount }} 项</span>
@@ -163,6 +163,7 @@
             </div>
 
             <div class="feedback-quick-action">
+              <el-button plain @click="openSettingsDialog">设置</el-button>
               <el-button type="primary" plain :disabled="!currentUser" @click="openFeedbackDialog" data-guide="feedback">反馈</el-button>
               <el-button plain @click="startGuide">帮助</el-button>
             </div>
@@ -1015,7 +1016,7 @@
                   ></el-date-picker>
                 </div>
               </div>
-              <section class="summary-section">
+              <section v-if="showTaskPoolSection" class="summary-section">
                 <h3>
                   <span>{{ activePage === 'daily' ? '临时任务池' : '待安排DDL' }}</span>
                   <span class="day-subtitle">{{ unscheduledCount }} 项</span>
@@ -1047,7 +1048,7 @@
                   </div>
                 </div>
               </section>
-              <section v-if="activePage === 'daily'" class="summary-section habit-pool-section">
+              <section v-if="showHabitPoolSection" class="summary-section habit-pool-section">
                 <h3>
                   <span>习惯池</span>
                   <span class="day-subtitle">{{ habitCount }} 项</span>
@@ -1275,7 +1276,7 @@
       <span v-if="scheduleDragPreview.completed" class="schedule-check">✓</span>
     </div>
 
-    <div v-if="!adminMode" class="ai-assistant">
+    <div v-if="showAiAssistant" class="ai-assistant">
       <button
         class="ai-fab"
         :class="{ 'is-open': aiChatOpen }"
@@ -1290,7 +1291,7 @@
         <header class="ai-chat-header">
           <div class="ai-chat-heading">
             <div class="ai-chat-title">AI 助手</div>
-            <div class="ai-chat-subtitle">生成任务指令后需要你逐条批准</div>
+            <div class="ai-chat-subtitle">生成任务指令后需要你逐条批准，请包含完整信息</div>
           </div>
           <div class="ai-chat-header-actions">
             <el-popover
@@ -1310,6 +1311,7 @@
                   <li>所有指令必须等本轮输出结束后，在卡片列表里单独选择执行或取消。</li>
                   <li>会读取本轮请求、最近最多 20 条聊天/审批结果、当前时间/时区，以及最多 200 条未完成时间线任务。</li>
                   <li>任务字段包括 id、标题、科目、截止时间、优先级、备注、状态和任务池。</li>
+                  <li>普通 DDL 任务没有截止时间时会显示在“待安排DDL”；AI 创建这类任务会把截止时间留空。</li>
                   <li>未完成时间线任务超过 200 条时，只给前 200 条详情，同时告诉 AI 有截断；看不到目标时应追问。</li>
                   <li>不会发送 API Key、登录 token、密码、后台日志或其他用户数据。</li>
                 </ul>
@@ -1352,6 +1354,50 @@
         </footer>
       </section>
     </div>
+
+    <el-dialog
+      v-model="settingsDialogVisible"
+      title="设置"
+      width="min(92vw, 520px)"
+      class="settings-dialog"
+    >
+      <div class="settings-list">
+        <div class="settings-row">
+          <div>
+            <div class="settings-row-title">AI 功能</div>
+            <div class="settings-row-desc">控制 DDL 页面右下角 AI 助手入口。</div>
+          </div>
+          <el-switch v-model="appSettings.aiEnabled" @change="saveAppSettings"></el-switch>
+        </div>
+        <div class="settings-row">
+          <div>
+            <div class="settings-row-title">待安排DDL</div>
+            <div class="settings-row-desc">控制左侧待安排 DDL 区域显示。</div>
+          </div>
+          <el-switch v-model="appSettings.showUnscheduledDdl" @change="saveAppSettings"></el-switch>
+        </div>
+        <div class="settings-row">
+          <div>
+            <div class="settings-row-title">临时任务池</div>
+            <div class="settings-row-desc">控制每日安排页左侧临时任务池显示。</div>
+          </div>
+          <el-switch v-model="appSettings.showArrangementPool" @change="saveAppSettings"></el-switch>
+        </div>
+        <div class="settings-row">
+          <div>
+            <div class="settings-row-title">习惯池</div>
+            <div class="settings-row-desc">控制每日安排页左侧习惯池显示。</div>
+          </div>
+          <el-switch v-model="appSettings.showHabitPool" @change="saveAppSettings"></el-switch>
+        </div>
+      </div>
+      <template #footer>
+        <div class="dialog-footer">
+          <div class="day-subtitle">设置保存在当前浏览器。</div>
+          <el-button type="primary" @click="settingsDialogVisible = false">完成</el-button>
+        </div>
+      </template>
+    </el-dialog>
 
     <el-dialog
       v-model="aiApprovalVisible"
@@ -1413,7 +1459,7 @@
                     :disabled="aiActionLocked(action)"
                     :maxlength="field.field === 'title' ? 80 : (field.field === 'subject' ? 40 : undefined)"
                     :show-word-limit="field.field === 'title' || field.field === 'subject'"
-                    :placeholder="field.field === 'dueAt' ? '留空，或 YYYY-MM-DDTHH:mm:00' : field.label"
+                    :placeholder="field.field === 'dueAt' ? '留空则放入待安排DDL，或 YYYY-MM-DDTHH:mm:00' : field.label"
                   ></el-input>
                 </template>
                 <div v-if="action.type === 'update_task'" class="ai-field-before">
