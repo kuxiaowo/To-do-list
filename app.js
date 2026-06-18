@@ -9,9 +9,11 @@ const HABITS_API = '/api/habits';
 const ADMIN_API = '/api/admin';
 const FEEDBACK_API = '/api/feedback';
 const VISITS_API = '/api/visits';
+const AI_CHAT_STREAM_API = '/api/ai/chat-stream';
 const AUTH_TOKEN_KEY = 'todo-list-auth-token-v1';
 const THEME_STORAGE_KEY = 'todo-list-theme-v1';
 const GUIDE_STORAGE_KEY = 'todo-list-guide-v1';
+const APP_SETTINGS_STORAGE_KEY = 'todo-list-app-settings-v1';
 const SIDEBAR_AUTO_COLLAPSE_WIDTH = 1100;
 const DATE_RANGE_EXPAND_MARGIN = 21;
 const HABIT_SYNC_FUTURE_DAYS = 90;
@@ -37,6 +39,12 @@ const TIMELINE_START_MONTH = 4;
 const TIMELINE_START_DAY = 1;
 const PRIORITY_ORDER = { high: 0, medium: 1, low: 2 };
 const PRIORITY_LABELS = { high: '高优先级', medium: '中优先级', low: '低优先级' };
+const DEFAULT_APP_SETTINGS = {
+  aiEnabled: true,
+  showHabitPool: true,
+  showArrangementPool: true,
+  showUnscheduledDdl: true,
+};
 const WEEKDAY_TEXT = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
 const SUBJECT_TEMPLATE_API = '/api/subject-template';
 const SUBJECT_TEMPLATE_EDIT_VALUE = '__edit_subject_template__';
@@ -107,12 +115,37 @@ const DEFAULT_WEEK_SLOTS = {
   ],
 };
 
+function loadAppSettings() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(APP_SETTINGS_STORAGE_KEY) || '{}');
+    return {
+      aiEnabled: saved.aiEnabled !== false,
+      showHabitPool: saved.showHabitPool !== false,
+      showArrangementPool: saved.showArrangementPool !== false,
+      showUnscheduledDdl: saved.showUnscheduledDdl !== false,
+    };
+  } catch (error) {
+    return { ...DEFAULT_APP_SETTINGS };
+  }
+}
+
 createApp({
   data() {
     return {
       tasks: [],
       scheduleItems: [],
       habits: [],
+      aiChatOpen: false,
+      aiChatMessages: [],
+      aiChatInput: '',
+      aiChatLoading: false,
+      aiPendingActions: [],
+      aiActionResults: [],
+      aiApprovalVisible: false,
+      aiCurrentActionIndex: 0,
+      aiExecutingActionId: '',
+      settingsDialogVisible: false,
+      appSettings: loadAppSettings(),
       defaultWeekSlots: JSON.parse(JSON.stringify(DEFAULT_WEEK_SLOTS)),
       scheduleTemplateVersions: [],
       scheduleDayOverrides: {},
@@ -240,6 +273,33 @@ createApp({
         dailySeries: [],
         topIps: [],
         recentVisits: []
+      },
+      adminAiUsageView: '7d',
+      adminAiUsageHoverPoint: null,
+      adminAiUsageUsersTotal: 0,
+      adminAiUsagePage: 1,
+      adminAiUsagePageSize: 50,
+      adminAiGlobalLimitDraft: {
+        windowHours: 24,
+        inputTokenLimit: 200000,
+        outputTokenLimit: 50000
+      },
+      adminAiUserLimitDrafts: {},
+      adminAiUsage: {
+        seriesUnit: 'day',
+        globalLimit: {
+          windowHours: 24,
+          inputTokenLimit: 200000,
+          outputTokenLimit: 50000
+        },
+        totalPromptTokens: 0,
+        totalCompletionTokens: 0,
+        totalCalls: 0,
+        todayPromptTokens: 0,
+        todayCompletionTokens: 0,
+        todayCalls: 0,
+        trendSeries: [],
+        users: []
       },
       adminLoading: false,
       adminTimelineLoadedUserId: '',
@@ -427,6 +487,97 @@ createApp({
         left: `${this.adminTrafficHoverPoint.x}%`,
         top: `${this.adminTrafficHoverPoint.y}%`
       };
+    },
+    aiUsageMetricCards() {
+      return [
+        { label: '全站输入 token', value: this.formatTokenCount(this.adminAiUsage.totalPromptTokens) },
+        { label: '全站输出 token', value: this.formatTokenCount(this.adminAiUsage.totalCompletionTokens) },
+        { label: '总调用次数', value: this.formatTokenCount(this.adminAiUsage.totalCalls) },
+        { label: '今日输入 / 输出', value: `${this.formatTokenCount(this.adminAiUsage.todayPromptTokens)} / ${this.formatTokenCount(this.adminAiUsage.todayCompletionTokens)}` }
+      ];
+    },
+    aiUsageSeries() {
+      return Array.isArray(this.adminAiUsage.trendSeries) ? this.adminAiUsage.trendSeries : [];
+    },
+    aiUsageChartTitle() {
+      const labels = {
+        '30d': '近 30 天 Token 趋势',
+        '7d': '近 7 天 Token 趋势',
+        '1d': '近 24 小时 Token 趋势',
+        '6h': '近 6 小时 Token 趋势'
+      };
+      return labels[this.adminAiUsageView] || 'Token 趋势';
+    },
+    aiUsageChartPointItems() {
+      const series = this.aiUsageSeries;
+      if (!series.length) return [];
+      const maxTokens = Math.max(
+        1,
+        ...series.map(item => Number(item.promptTokens || 0)),
+        ...series.map(item => Number(item.completionTokens || 0))
+      );
+      return series.map((item, index) => {
+        const promptTokens = Number(item.promptTokens || 0);
+        const completionTokens = Number(item.completionTokens || 0);
+        const x = series.length === 1 ? 50 : (index / (series.length - 1)) * 100;
+        const inputY = 92 - (promptTokens / maxTokens) * 76;
+        const outputY = 92 - (completionTokens / maxTokens) * 76;
+        return {
+          ...item,
+          x,
+          y: Math.min(inputY, outputY),
+          inputY,
+          outputY,
+          promptTokens,
+          completionTokens,
+          totalTokens: Number(item.totalTokens || 0),
+          calls: Number(item.calls || 0)
+        };
+      });
+    },
+    aiUsageInputChartPoints() {
+      if (!this.aiUsageChartPointItems.length) return '';
+      return this.aiUsageChartPointItems.map(point => `${point.x.toFixed(2)},${point.inputY.toFixed(2)}`).join(' ');
+    },
+    aiUsageOutputChartPoints() {
+      if (!this.aiUsageChartPointItems.length) return '';
+      return this.aiUsageChartPointItems.map(point => `${point.x.toFixed(2)},${point.outputY.toFixed(2)}`).join(' ');
+    },
+    aiUsageChartLabels() {
+      const series = this.aiUsageSeries;
+      if (!series.length) return [];
+      if (this.adminAiUsageView === '6h' || this.adminAiUsageView === '7d') return series;
+      const step = this.adminAiUsageView === '1d' ? 3 : 5;
+      const labels = series.filter((item, index) => index % step === 0);
+      const last = series[series.length - 1];
+      if (labels[labels.length - 1] !== last) labels.push(last);
+      return labels;
+    },
+    aiUsageMaxTokens() {
+      const series = this.aiUsageSeries;
+      return Math.max(
+        0,
+        ...series.map(item => Number(item.promptTokens || 0)),
+        ...series.map(item => Number(item.completionTokens || 0))
+      );
+    },
+    aiUsageHoverStyle() {
+      if (!this.adminAiUsageHoverPoint) return {};
+      return {
+        left: `${this.adminAiUsageHoverPoint.x}%`,
+        top: `${this.adminAiUsageHoverPoint.y}%`
+      };
+    },
+    showAiAssistant() {
+      return !this.adminMode && this.activePage === 'ddl' && this.appSettings.aiEnabled;
+    },
+    showTaskPoolSection() {
+      return this.activePage === 'daily'
+        ? this.appSettings.showArrangementPool
+        : this.appSettings.showUnscheduledDdl;
+    },
+    showHabitPoolSection() {
+      return this.activePage === 'daily' && this.appSettings.showHabitPool;
     },
     sortedTasks() {
       return [...this.tasks].sort((a, b) => this.compareTasks(a, b));
@@ -733,6 +884,14 @@ createApp({
       document.documentElement.dataset.theme = theme;
       localStorage.setItem(THEME_STORAGE_KEY, theme);
     },
+    openSettingsDialog() {
+      this.settingsDialogVisible = true;
+    },
+    saveAppSettings() {
+      localStorage.setItem(APP_SETTINGS_STORAGE_KEY, JSON.stringify(this.appSettings));
+      if (!this.appSettings.aiEnabled) this.aiChatOpen = false;
+      this.$nextTick(() => this.updateGuideTarget());
+    },
     setTheme(value) {
       this.isDarkMode = !!value;
       this.applyTheme();
@@ -897,6 +1056,414 @@ createApp({
       if (!response.ok) throw new Error(payload.message || payload.error || '请求失败');
       return payload;
     },
+    toggleAiChat() {
+      if (this.adminMode) return;
+      if (this.activePage !== 'ddl' || !this.appSettings.aiEnabled) return;
+      if (!this.currentUser) {
+        ElementPlus.ElMessage.warning('请先登录或注册，再使用 AI 助手。');
+        return;
+      }
+      this.aiChatOpen = !this.aiChatOpen;
+      if (this.aiChatOpen) {
+        this.$nextTick(() => {
+          const input = this.$refs.aiChatInput;
+          if (input && input.focus) input.focus();
+          this.scrollAiChatToBottom();
+        });
+      }
+    },
+    scrollAiChatToBottom() {
+      this.$nextTick(() => {
+        const body = this.$refs.aiChatBody;
+        if (body) body.scrollTop = body.scrollHeight;
+      });
+    },
+    aiHistoryForRequest() {
+      return this.aiChatMessages
+        .slice(-20)
+        .map(item => ({ role: item.role, content: item.content }))
+        .filter(item => ['user', 'assistant'].includes(item.role) && item.content);
+    },
+    handleAiChatKeydown(event) {
+      if (event.key !== 'Enter' || event.shiftKey) return;
+      event.preventDefault();
+      this.sendAiMessage();
+    },
+    setAiChatMessageContent(message, content) {
+      const index = this.aiChatMessages.indexOf(message);
+      const nextMessage = { ...message, content };
+      if (index !== -1) {
+        this.aiChatMessages.splice(index, 1, nextMessage);
+        return nextMessage;
+      }
+      message.content = content;
+      return message;
+    },
+    async readAiChatStream(body, onDelta) {
+      const response = await fetch(AI_CHAT_STREAM_API, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...this.authHeaders()
+        },
+        body: JSON.stringify(body)
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.message || payload.error || '请求失败');
+      }
+      if (!response.body) throw new Error('当前浏览器不支持流式响应');
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let donePayload = null;
+
+      const handleBlock = block => {
+        const lines = block.split(/\r?\n/);
+        let event = 'message';
+        const dataLines = [];
+        lines.forEach(line => {
+          if (line.startsWith('event:')) {
+            event = line.slice(6).trim();
+          } else if (line.startsWith('data:')) {
+            dataLines.push(line.slice(5).trimStart());
+          }
+        });
+        if (!dataLines.length) return;
+        const payload = JSON.parse(dataLines.join('\n'));
+        if (event === 'delta') {
+          onDelta(String(payload.text || ''));
+        } else if (event === 'done') {
+          donePayload = payload;
+        } else if (event === 'error') {
+          throw new Error(payload.message || payload.error || 'AI 请求失败');
+        }
+      };
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let boundaryIndex = buffer.indexOf('\n\n');
+        while (boundaryIndex !== -1) {
+          const block = buffer.slice(0, boundaryIndex);
+          buffer = buffer.slice(boundaryIndex + 2);
+          if (block.trim()) handleBlock(block);
+          if (donePayload) {
+            await reader.cancel().catch(() => {});
+            return donePayload;
+          }
+          boundaryIndex = buffer.indexOf('\n\n');
+        }
+      }
+      buffer += decoder.decode();
+      if (buffer.trim()) handleBlock(buffer);
+      if (!donePayload) throw new Error('AI 流式响应没有结束标记');
+      return donePayload;
+    },
+    aiRejectedSummary(rejected) {
+      const reasons = (Array.isArray(rejected) ? rejected : [])
+        .map(item => String(item.reason || '').trim())
+        .filter(Boolean)
+        .slice(0, 3);
+      if (!reasons.length) return '有些候选操作没有通过校验，未写入任务。';
+      return `有些候选操作没有通过校验，未写入任务。原因：${reasons.join('；')}`;
+    },
+    async sendAiMessage() {
+      if (!this.appSettings.aiEnabled) {
+        ElementPlus.ElMessage.warning('AI 功能已关闭。');
+        return;
+      }
+      if (!this.currentUser) {
+        ElementPlus.ElMessage.warning('请先登录或注册，再使用 AI 助手。');
+        return;
+      }
+      const message = this.aiChatInput.trim();
+      if (!message || this.aiChatLoading) return;
+      const history = this.aiHistoryForRequest();
+      this.aiChatInput = '';
+      this.aiChatMessages.push({ role: 'user', content: message });
+      let assistantMessage = { role: 'assistant', content: '' };
+      this.aiChatMessages.push(assistantMessage);
+      this.aiChatLoading = true;
+      this.scrollAiChatToBottom();
+      try {
+        const payload = await this.readAiChatStream({
+          message,
+          history,
+          clientNow: new Date().toISOString(),
+          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai'
+        }, text => {
+          if (!text) return;
+          assistantMessage = this.setAiChatMessageContent(assistantMessage, assistantMessage.content + text);
+          this.scrollAiChatToBottom();
+        });
+        const reply = payload.reply || '我没有生成可执行操作。';
+        assistantMessage = this.setAiChatMessageContent(assistantMessage, reply);
+        const actions = Array.isArray(payload.actions) ? payload.actions : [];
+        if (actions.length) {
+          this.openAiApproval(actions);
+        }
+        const rejected = Array.isArray(payload.rejectedActions) ? payload.rejectedActions : [];
+        if (!actions.length && rejected.length) {
+          this.aiChatMessages.push({ role: 'assistant', content: this.aiRejectedSummary(rejected) });
+        }
+      } catch (error) {
+        console.error('AI 助手请求失败：', error);
+        assistantMessage = this.setAiChatMessageContent(assistantMessage, `AI 请求失败：${error.message}`);
+        ElementPlus.ElMessage.error(`AI 请求失败：${error.message}`);
+      } finally {
+        this.aiChatLoading = false;
+        this.scrollAiChatToBottom();
+      }
+    },
+    openAiApproval(actions) {
+      this.aiPendingActions = actions.map(action => this.normalizeAiApprovalAction(action));
+      this.aiActionResults = this.aiPendingActions.map(action => ({
+        actionId: action.id,
+        status: 'pending',
+        message: ''
+      }));
+      this.aiCurrentActionIndex = 0;
+      this.aiExecutingActionId = '';
+      this.aiApprovalVisible = true;
+    },
+    normalizeAiApprovalAction(action) {
+      const normalized = { ...action };
+      if (normalized.type === 'create_task') {
+        normalized.draft = {
+          title: '',
+          subject: '',
+          dueAt: '',
+          priority: 'medium',
+          note: '',
+          ...(normalized.task || {})
+        };
+      } else {
+        normalized.draft = {
+          title: '',
+          subject: '',
+          dueAt: '',
+          priority: 'medium',
+          note: '',
+          ...(normalized.before || {}),
+          ...(normalized.patch || {}),
+          ...(normalized.after || {})
+        };
+      }
+      return normalized;
+    },
+    currentAiAction() {
+      return this.aiPendingActions[this.aiCurrentActionIndex] || null;
+    },
+    aiActionResult(action) {
+      if (!action) return null;
+      return this.aiActionResults.find(result => result.actionId === action.id) || null;
+    },
+    aiActionStatus(action) {
+      const result = this.aiActionResult(action);
+      return result ? result.status : 'pending';
+    },
+    aiActionStatusLabel(action) {
+      const status = this.aiActionStatus(action);
+      return {
+        pending: '待处理',
+        executed: '已执行',
+        canceled: '已取消'
+      }[status] || '待处理';
+    },
+    aiActionStatusType(action) {
+      const status = this.aiActionStatus(action);
+      return {
+        pending: 'info',
+        executed: 'success',
+        canceled: 'warning'
+      }[status] || 'info';
+    },
+    aiActionTypeLabel(action) {
+      if (!action) return '';
+      return action.type === 'create_task' ? '创建任务' : '修改任务';
+    },
+    aiEditableFields() {
+      return ['title', 'subject', 'dueAt', 'priority', 'note'].map(field => ({
+        field,
+        label: this.aiFieldLabel(field)
+      }));
+    },
+    aiActionLocked(action) {
+      return ['executed', 'canceled'].includes(this.aiActionStatus(action));
+    },
+    aiActionFieldChanged(action, field) {
+      if (!action || action.type !== 'update_task') return false;
+      const before = action.before || {};
+      const draft = action.draft || {};
+      return String(before[field] || '') !== String(draft[field] || '');
+    },
+    aiFieldLabel(field) {
+      return {
+        title: '标题',
+        subject: '科目',
+        dueAt: '截止时间',
+        priority: '优先级',
+        note: '备注'
+      }[field] || field;
+    },
+    aiFormatFieldValue(field, value) {
+      if (field === 'priority') return this.priorityLabel(value || 'medium');
+      if (field === 'dueAt') return value ? String(value).replace('T', ' ').slice(0, 16) : '待安排DDL';
+      return value === '' || value === null || value === undefined ? '空' : String(value);
+    },
+    aiActionPreviewFields(action) {
+      if (!action) return [];
+      if (action.type === 'create_task') {
+        const task = action.task || {};
+        return ['title', 'subject', 'dueAt', 'priority', 'note'].map(field => ({
+          field,
+          label: this.aiFieldLabel(field),
+          mode: 'create',
+          after: this.aiFormatFieldValue(field, task[field] || '')
+        }));
+      }
+      const patch = action.patch || {};
+      const before = action.before || {};
+      return Object.keys(patch).map(field => ({
+        field,
+        label: this.aiFieldLabel(field),
+        mode: 'update',
+        before: this.aiFormatFieldValue(field, before[field] || ''),
+        after: this.aiFormatFieldValue(field, patch[field] || '')
+      }));
+    },
+    normalizeAiDraftFields(draft) {
+      const fields = {
+        title: String(draft.title || '').trim(),
+        subject: String(draft.subject || '').trim(),
+        dueAt: String(draft.dueAt || '').trim(),
+        priority: String(draft.priority || 'medium').trim() || 'medium',
+        note: String(draft.note || '').trim()
+      };
+      if (!fields.title) throw new Error('标题不能为空');
+      if (fields.title.length > 80) throw new Error('标题不能超过 80 个字符');
+      if (!fields.subject) throw new Error('科目不能为空');
+      if (fields.subject.length > 40) throw new Error('科目不能超过 40 个字符');
+      if (!['high', 'medium', 'low'].includes(fields.priority)) throw new Error('优先级无效');
+      if (fields.dueAt && !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:00$/.test(fields.dueAt)) {
+        throw new Error('截止时间必须为空，或使用 YYYY-MM-DDTHH:mm:00');
+      }
+      if (fields.dueAt && Number.isNaN(new Date(fields.dueAt).getTime())) {
+        throw new Error('截止时间不是有效日期');
+      }
+      return fields;
+    },
+    aiPatchFromDraft(action, existing) {
+      const fields = this.normalizeAiDraftFields(action.draft || {});
+      const patch = {};
+      ['title', 'subject', 'dueAt', 'priority', 'note'].forEach(field => {
+        if (String(fields[field] || '') !== String(existing[field] || '')) {
+          patch[field] = fields[field];
+        }
+      });
+      return patch;
+    },
+    markAiAction(action, status, message = '') {
+      this.aiActionResults = this.aiActionResults.map(result => (
+        result.actionId === action.id ? { ...result, status, message } : result
+      ));
+    },
+    aiApprovalCounts() {
+      return this.aiActionResults.reduce((summary, result) => {
+        summary[result.status] = (summary[result.status] || 0) + 1;
+        return summary;
+      }, {});
+    },
+    aiApprovalProgressText() {
+      const counts = this.aiApprovalCounts();
+      return `已执行 ${counts.executed || 0} · 已取消 ${counts.canceled || 0} · 待处理 ${counts.pending || 0}`;
+    },
+    appendAiActionSummary() {
+      const counts = this.aiApprovalCounts();
+      const parts = [
+        `已执行 ${counts.executed || 0} 条`,
+        `已取消 ${counts.canceled || 0} 条`,
+        `未处理 ${counts.pending || 0} 条`
+      ];
+      const details = this.aiPendingActions.map((action, index) => {
+        const result = this.aiActionResult(action);
+        const status = result ? this.aiActionStatusLabel(action) : '待审批';
+        const message = result && result.message ? `，${result.message}` : '';
+        return `${index + 1}. ${action.summary}：${status}${message}`;
+      });
+      this.aiChatMessages.push({
+        role: 'assistant',
+        kind: 'approval-result',
+        content: `审批结果：${parts.join('，')}。\n${details.join('\n')}`
+      });
+      this.scrollAiChatToBottom();
+      this.aiPendingActions = [];
+      this.aiActionResults = [];
+      this.aiCurrentActionIndex = 0;
+      this.aiExecutingActionId = '';
+    },
+    canCloseAiApproval() {
+      if (this.aiExecutingActionId) return false;
+      return this.aiActionResults.every(result => result.status !== 'pending');
+    },
+    closeAiApproval() {
+      if (!this.canCloseAiApproval()) return;
+      this.aiApprovalVisible = false;
+      this.appendAiActionSummary();
+    },
+    aiTaskPayloadFromFields(fields) {
+      return {
+        id: this.createTaskId(),
+        createdAt: new Date().toISOString(),
+        title: String(fields.title || '').trim(),
+        subject: String(fields.subject || '').trim(),
+        dueAt: String(fields.dueAt || '').trim(),
+        pool: 'todo',
+        priority: fields.priority || 'medium',
+        note: String(fields.note || '').trim(),
+        completed: false
+      };
+    },
+    async approveAiAction(action) {
+      if (!action || this.aiExecutingActionId) return;
+      if (this.aiActionStatus(action) === 'executed') return;
+      this.aiExecutingActionId = action.id;
+      try {
+        if (action.type === 'create_task') {
+          const task = this.aiTaskPayloadFromFields(this.normalizeAiDraftFields(action.draft || {}));
+          const savedTask = await this.createTaskOnServer(task);
+          this.tasks = [...this.tasks, savedTask || task];
+          this.markAiAction(action, 'executed', '任务已创建');
+          ElementPlus.ElMessage.success('AI 指令已执行：任务已创建。');
+        } else if (action.type === 'update_task') {
+          const existing = this.tasks.find(task => task.id === action.targetTaskId);
+          if (!existing) throw new Error('目标任务不存在或已变化');
+          const patch = this.aiPatchFromDraft(action, existing);
+          if (!Object.keys(patch).length) throw new Error('没有实际变更');
+          const nextTask = { ...existing, ...patch, updatedAt: new Date().toISOString() };
+          const savedTask = await this.updateTaskOnServer(action.targetTaskId, nextTask);
+          this.tasks = this.tasks.map(task => task.id === action.targetTaskId ? (savedTask || nextTask) : task);
+          await this.loadScheduleItems();
+          this.markAiAction(action, 'executed', '任务已更新');
+          ElementPlus.ElMessage.success('AI 指令已执行：任务已更新。');
+        } else {
+          throw new Error('不支持的 AI 指令');
+        }
+      } catch (error) {
+        console.error('AI 指令执行失败：', error);
+        this.markAiAction(action, 'pending', `执行失败：${error.message}`);
+        ElementPlus.ElMessage.error(`AI 指令执行失败：${error.message}`);
+      } finally {
+        this.aiExecutingActionId = '';
+      }
+    },
+    cancelAiAction(action) {
+      if (!action || this.aiExecutingActionId) return;
+      this.markAiAction(action, 'canceled', '用户取消');
+    },
     defaultSubjectTemplate() {
       return JSON.parse(JSON.stringify(DEFAULT_SUBJECT_TEMPLATE));
     },
@@ -1017,6 +1584,7 @@ createApp({
       if (this.adminSection === 'timeline') await this.loadAdminTimeline();
       if (this.adminSection === 'feedback') await this.loadAdminFeedback(1);
       if (this.adminSection === 'traffic') await this.loadAdminTraffic();
+      if (this.adminSection === 'aiUsage') await this.loadAdminAiUsage();
       await this.recordVisit('admin');
     },
     async exitAdminMode() {
@@ -1035,6 +1603,7 @@ createApp({
       if (section === 'timeline') await this.loadAdminTimeline();
       if (section === 'feedback') await this.loadAdminFeedback(1);
       if (section === 'traffic') await this.loadAdminTraffic();
+      if (section === 'aiUsage') await this.loadAdminAiUsage();
     },
     async recordVisit(page) {
       try {
@@ -1223,6 +1792,180 @@ createApp({
     hideTrafficPoint() {
       this.adminTrafficHoverPoint = null;
     },
+    normalizeAiLimitDraft(limit) {
+      const windowHours = Number(limit && limit.windowHours);
+      const inputTokenLimit = Number(limit && limit.inputTokenLimit);
+      const outputTokenLimit = Number(limit && limit.outputTokenLimit);
+      if (!Number.isInteger(windowHours) || windowHours < 1 || windowHours > 8760) {
+        throw new Error('窗口小时数必须是 1 到 8760 之间的整数。');
+      }
+      if (!Number.isInteger(inputTokenLimit) || inputTokenLimit < 1 || inputTokenLimit > 10000000000) {
+        throw new Error('输入 token 上限必须是 1 到 10000000000 之间的整数。');
+      }
+      if (!Number.isInteger(outputTokenLimit) || outputTokenLimit < 1 || outputTokenLimit > 10000000000) {
+        throw new Error('输出 token 上限必须是 1 到 10000000000 之间的整数。');
+      }
+      return { windowHours, inputTokenLimit, outputTokenLimit };
+    },
+    aiLimitDraftFromLimit(limit) {
+      return {
+        windowHours: Number(limit && limit.windowHours ? limit.windowHours : 24),
+        inputTokenLimit: Number(limit && limit.inputTokenLimit ? limit.inputTokenLimit : 200000),
+        outputTokenLimit: Number(limit && limit.outputTokenLimit ? limit.outputTokenLimit : 50000)
+      };
+    },
+    async loadAdminAiUsage(page = this.adminAiUsagePage) {
+      if (!this.isAdmin) return;
+      const nextPage = Number(page);
+      const safePage = Number.isFinite(nextPage) && nextPage > 0 ? Math.floor(nextPage) : this.adminAiUsagePage;
+      this.adminLoading = true;
+      try {
+        const url = `${ADMIN_API}/ai-usage/summary?view=${encodeURIComponent(this.adminAiUsageView)}&page=${safePage}&pageSize=${this.adminAiUsagePageSize}`;
+        const payload = await this.apiJson(url, { cache: 'no-store' });
+        const globalLimit = this.aiLimitDraftFromLimit(payload.globalLimit);
+        const users = Array.isArray(payload.users) ? payload.users : [];
+        this.adminAiUsage = {
+          seriesUnit: payload.seriesUnit || 'day',
+          globalLimit,
+          totalPromptTokens: Number(payload.totalPromptTokens || 0),
+          totalCompletionTokens: Number(payload.totalCompletionTokens || 0),
+          totalCalls: Number(payload.totalCalls || 0),
+          todayPromptTokens: Number(payload.todayPromptTokens || 0),
+          todayCompletionTokens: Number(payload.todayCompletionTokens || 0),
+          todayCalls: Number(payload.todayCalls || 0),
+          trendSeries: Array.isArray(payload.trendSeries) ? payload.trendSeries : [],
+          users
+        };
+        this.adminAiGlobalLimitDraft = this.aiLimitDraftFromLimit(globalLimit);
+        this.adminAiUserLimitDrafts = users.reduce((drafts, row) => {
+          const id = row && row.user ? String(row.user.id) : '';
+          if (!id) return drafts;
+          drafts[id] = this.aiLimitDraftFromLimit(row.effectiveLimit || globalLimit);
+          return drafts;
+        }, {});
+        this.adminAiUsageUsersTotal = Number(payload.usersTotal || 0);
+        this.adminAiUsagePage = Number(payload.page || safePage);
+        this.adminAiUsageHoverPoint = null;
+      } catch (error) {
+        ElementPlus.ElMessage.error(`Token 使用情况读取失败：${error.message}`);
+      } finally {
+        this.adminLoading = false;
+      }
+    },
+    async switchAdminAiUsageView(view) {
+      if (view === this.adminAiUsageView) return;
+      this.adminAiUsageView = view;
+      this.adminAiUsageHoverPoint = null;
+      await this.loadAdminAiUsage(this.adminAiUsagePage);
+    },
+    showAiUsagePoint(point) {
+      this.adminAiUsageHoverPoint = point;
+    },
+    hideAiUsagePoint() {
+      this.adminAiUsageHoverPoint = null;
+    },
+    formatTokenCount(value) {
+      const number = Number(value || 0);
+      return new Intl.NumberFormat('zh-CN').format(Number.isFinite(number) ? number : 0);
+    },
+    aiLimitSourceLabel(row) {
+      return row && row.hasOverride ? '个人覆盖' : '全局';
+    },
+    aiLimitSourceType(row) {
+      return row && row.hasOverride ? 'warning' : 'info';
+    },
+    aiLimitText(limit) {
+      const safe = this.aiLimitDraftFromLimit(limit);
+      return `${safe.windowHours} 小时 · 输入 ${this.formatTokenCount(safe.inputTokenLimit)} · 输出 ${this.formatTokenCount(safe.outputTokenLimit)}`;
+    },
+    aiWindowUsageText(usage) {
+      const safe = usage || {};
+      return `输入 ${this.formatTokenCount(safe.promptTokens)} / 输出 ${this.formatTokenCount(safe.completionTokens)}`;
+    },
+    async saveAdminAiGlobalLimit() {
+      if (!this.isAdmin) return;
+      let limit;
+      try {
+        limit = this.normalizeAiLimitDraft(this.adminAiGlobalLimitDraft);
+      } catch (error) {
+        ElementPlus.ElMessage.warning(error.message);
+        return;
+      }
+      this.adminLoading = true;
+      try {
+        await this.apiJson(`${ADMIN_API}/ai-usage/global-limit`, {
+          method: 'PUT',
+          body: JSON.stringify(limit)
+        });
+        ElementPlus.ElMessage.success('全局 Token 限制已保存。');
+        await this.loadAdminAiUsage(this.adminAiUsagePage);
+      } catch (error) {
+        ElementPlus.ElMessage.error(`全局 Token 限制保存失败：${error.message}`);
+      } finally {
+        this.adminLoading = false;
+      }
+    },
+    async saveAdminAiUserLimit(row) {
+      if (!this.isAdmin || !row || !row.user) return;
+      const userId = String(row.user.id);
+      let limit;
+      try {
+        limit = this.normalizeAiLimitDraft(this.adminAiUserLimitDrafts[userId]);
+      } catch (error) {
+        ElementPlus.ElMessage.warning(error.message);
+        return;
+      }
+      this.adminLoading = true;
+      try {
+        await this.apiJson(`${ADMIN_API}/users/${encodeURIComponent(userId)}/ai-token-limit`, {
+          method: 'PUT',
+          body: JSON.stringify(limit)
+        });
+        ElementPlus.ElMessage.success('用户 Token 限制已保存。');
+        await this.loadAdminAiUsage(this.adminAiUsagePage);
+      } catch (error) {
+        ElementPlus.ElMessage.error(`用户 Token 限制保存失败：${error.message}`);
+      } finally {
+        this.adminLoading = false;
+      }
+    },
+    async clearAdminAiUserLimit(row) {
+      if (!this.isAdmin || !row || !row.user) return;
+      const userId = String(row.user.id);
+      this.adminLoading = true;
+      try {
+        await this.apiJson(`${ADMIN_API}/users/${encodeURIComponent(userId)}/ai-token-limit`, { method: 'DELETE' });
+        ElementPlus.ElMessage.success('该用户已恢复全局限制。');
+        await this.loadAdminAiUsage(this.adminAiUsagePage);
+      } catch (error) {
+        ElementPlus.ElMessage.error(`恢复全局限制失败：${error.message}`);
+      } finally {
+        this.adminLoading = false;
+      }
+    },
+    async clearAllAdminAiUserLimits() {
+      if (!this.isAdmin) return;
+      ElementPlus.ElMessageBox.confirm(
+        '确定清除所有用户个人 Token 限制，让所有用户重新使用全局设置？',
+        '统一全局限制',
+        {
+          confirmButtonText: '统一全局',
+          cancelButtonText: '取消',
+          type: 'warning'
+        }
+      ).then(async () => {
+        this.adminLoading = true;
+        try {
+          await this.apiJson(`${ADMIN_API}/ai-usage/clear-user-limits`, { method: 'POST' });
+          ElementPlus.ElMessage.success('所有用户已恢复全局限制。');
+          await this.loadAdminAiUsage(this.adminAiUsagePage);
+        } catch (error) {
+          ElementPlus.ElMessage.error(`统一全局失败：${error.message}`);
+        } finally {
+          this.adminLoading = false;
+        }
+      }).catch(() => {});
+    },
     async saveAdminFeedbackLimit() {
       if (!this.isAdmin) return;
       const feedbackLimitPerUser = Number(this.adminFeedbackLimitDraft);
@@ -1361,7 +2104,11 @@ createApp({
         'admin.feedback.delete': '删除反馈',
         'admin.feedback.limit_update': '修改未回复反馈上限',
         'feedback.delete': '删除反馈',
-        'subject_template.update': '更新科目模板'
+        'subject_template.update': '更新科目模板',
+        'admin.ai_token.global_limit_update': '修改 AI 全局 Token 限制',
+        'admin.ai_token.user_limit_update': '修改用户 AI Token 限制',
+        'admin.ai_token.user_limit_clear': '清除用户 AI Token 覆盖',
+        'admin.ai_token.user_limits_clear_all': '清除全部 AI Token 覆盖'
       };
       return labels[action] || action;
     },
@@ -1885,6 +2632,32 @@ createApp({
         topIps: [],
         recentVisits: []
       };
+      this.adminAiUsageView = '7d';
+      this.adminAiUsageHoverPoint = null;
+      this.adminAiUsageUsersTotal = 0;
+      this.adminAiUsagePage = 1;
+      this.adminAiGlobalLimitDraft = {
+        windowHours: 24,
+        inputTokenLimit: 200000,
+        outputTokenLimit: 50000
+      };
+      this.adminAiUserLimitDrafts = {};
+      this.adminAiUsage = {
+        seriesUnit: 'day',
+        globalLimit: {
+          windowHours: 24,
+          inputTokenLimit: 200000,
+          outputTokenLimit: 50000
+        },
+        totalPromptTokens: 0,
+        totalCompletionTokens: 0,
+        totalCalls: 0,
+        todayPromptTokens: 0,
+        todayCompletionTokens: 0,
+        todayCalls: 0,
+        trendSeries: [],
+        users: []
+      };
       this.nicknameDialogVisible = false;
       this.nicknameForm.nickname = '';
       this.passwordDialogVisible = false;
@@ -1900,6 +2673,14 @@ createApp({
       this.tasks = [];
       this.scheduleItems = [];
       this.habits = [];
+      this.aiChatOpen = false;
+      this.aiChatMessages = [];
+      this.aiChatInput = '';
+      this.aiPendingActions = [];
+      this.aiActionResults = [];
+      this.aiApprovalVisible = false;
+      this.aiCurrentActionIndex = 0;
+      this.aiExecutingActionId = '';
       this.habitSyncConflicts = [];
       this.scheduleTemplateVersions = [];
       this.scheduleDayOverrides = {};
@@ -2640,9 +3421,65 @@ createApp({
       return `${this.pad(hour)}:${this.pad(minute)}`;
     },
     setDialogTimePart(part, value) {
-      const cleaned = String(value || '').replace(/\D/g, '').slice(0, 2);
+      const raw = String(value || '');
       const [hour = '', minute = ''] = String(this.form.time || '').split(':');
-      this.form.time = part === 'hour' ? `${cleaned}:${minute}` : `${hour}:${cleaned}`;
+      if (raw.includes(':')) {
+        const [rawHour = '', rawMinute = ''] = raw.split(':');
+        const nextHour = rawHour.replace(/\D/g, '').slice(0, 2);
+        const nextMinute = rawMinute.replace(/\D/g, '').slice(0, 2);
+        this.form.time = nextHour || nextMinute ? `${nextHour}:${nextMinute}` : '';
+        if (nextHour.length >= 2) this.focusDialogTimePart('minute');
+        return;
+      }
+
+      const digits = raw.replace(/\D/g, '');
+      if (part === 'hour') {
+        const nextHour = digits.slice(0, 2);
+        const nextMinute = digits.length > 2 ? digits.slice(2, 4) : minute;
+        this.form.time = nextHour || nextMinute ? `${nextHour}:${nextMinute}` : '';
+        if (digits.length >= 2) this.focusDialogTimePart('minute', true);
+        return;
+      }
+
+      const nextMinute = digits.slice(0, 2);
+      this.form.time = hour || nextMinute ? `${hour}:${nextMinute}` : '';
+    },
+    focusDialogTimeContainer(event) {
+      if (event && event.target && event.target.closest && event.target.closest('.el-input')) return;
+      this.focusDialogTimePart(String(this.dueHour || '').length >= 2 ? 'minute' : 'hour', true);
+    },
+    focusDialogTimePart(part, select = false) {
+      const refName = part === 'minute' ? 'dueMinuteInput' : 'dueHourInput';
+      this.$nextTick(() => {
+        const inputRef = this.$refs[refName];
+        if (!inputRef) return;
+        if (inputRef.focus) inputRef.focus();
+        const input = inputRef.input || (inputRef.$el && inputRef.$el.querySelector('input'));
+        if (input && input.focus) input.focus();
+        if (select && input && input.select) input.select();
+      });
+    },
+    selectDialogTimeInput(event) {
+      const input = event && event.target;
+      if (!input || !input.select) return;
+      window.setTimeout(() => {
+        if (document.activeElement === input) input.select();
+      }, 0);
+    },
+    handleDialogTimeKeydown(part, event) {
+      const input = event.target;
+      const value = String(input && input.value ? input.value : '');
+      const selectionStart = input && typeof input.selectionStart === 'number' ? input.selectionStart : value.length;
+      const selectionEnd = input && typeof input.selectionEnd === 'number' ? input.selectionEnd : value.length;
+      if (part === 'hour' && (event.key === ':' || event.key === 'ArrowRight') && selectionStart === value.length && selectionEnd === value.length) {
+        if (event.key === ':') event.preventDefault();
+        this.focusDialogTimePart('minute', true);
+        return;
+      }
+      if (part === 'minute' && (event.key === 'Backspace' || event.key === 'ArrowLeft') && selectionStart === 0 && selectionEnd === 0) {
+        if (event.key === 'Backspace' && value) return;
+        this.focusDialogTimePart('hour');
+      }
     },
     normalizeDialogTimeInput() {
       const [rawHour = '', rawMinute = ''] = String(this.form.time || '').split(':');
@@ -3220,6 +4057,7 @@ createApp({
       if (page === this.activePage) return;
       this.rememberCurrentViewDate(this.activePage);
       this.activePage = page;
+      if (page !== 'ddl') this.aiChatOpen = false;
       const key = this.pageViewDateKeys[page] || this.currentViewDateKey || this.formatDateKey(new Date());
       this.$nextTick(() => {
         if (page === 'ddl') this.setDdlCalendarMonth(key);

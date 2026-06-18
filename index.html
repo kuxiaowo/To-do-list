@@ -28,8 +28,8 @@
         </div>
         <button class="sidebar-peek-button" :class="{ 'is-expanded-control': !sidebarCollapsed }" type="button" :title="sidebarCollapsed ? '展开侧栏' : '收起侧栏'" @click="sidebarCollapsed = !sidebarCollapsed">
           <span class="sidebar-peek-icon">{{ sidebarCollapsed ? '›' : '‹' }}</span>
-          <span v-if="sidebarCollapsed" class="sidebar-peek-text">{{ activePage === 'daily' ? '任务池' : '待安排' }}</span>
-          <span v-if="sidebarCollapsed" class="sidebar-peek-count">{{ unscheduledCount }}</span>
+          <span v-if="sidebarCollapsed" class="sidebar-peek-text">{{ showTaskPoolSection ? (activePage === 'daily' ? '任务池' : '待安排') : '侧栏' }}</span>
+          <span v-if="sidebarCollapsed && showTaskPoolSection" class="sidebar-peek-count">{{ unscheduledCount }}</span>
         </button>
         <div class="summary-panel-content">
         <div class="summary-header">
@@ -61,7 +61,7 @@
           </div>
         </div>
 
-        <section class="summary-section">
+        <section v-if="showTaskPoolSection" class="summary-section">
           <h3>
             <span>{{ activePage === 'daily' ? '临时任务池' : '待安排DDL' }}</span>
             <span class="day-subtitle">{{ unscheduledCount }} 项</span>
@@ -112,7 +112,7 @@
           </div>
         </section>
 
-        <section v-if="activePage === 'daily'" class="summary-section habit-pool-section">
+        <section v-if="showHabitPoolSection" class="summary-section habit-pool-section">
           <h3>
             <span>习惯池</span>
             <span class="day-subtitle">{{ habitCount }} 项</span>
@@ -163,6 +163,7 @@
             </div>
 
             <div class="feedback-quick-action">
+              <el-button plain @click="openSettingsDialog">设置</el-button>
               <el-button type="primary" plain :disabled="!currentUser" @click="openFeedbackDialog" data-guide="feedback">反馈</el-button>
               <el-button plain @click="startGuide">帮助</el-button>
             </div>
@@ -451,6 +452,7 @@
           <button class="admin-nav-button" :class="{ active: adminSection === 'logs' }" type="button" @click="switchAdminSection('logs')">用户日志</button>
           <button class="admin-nav-button" :class="{ active: adminSection === 'feedback' }" type="button" @click="switchAdminSection('feedback')">用户反馈</button>
           <button class="admin-nav-button" :class="{ active: adminSection === 'traffic' }" type="button" @click="switchAdminSection('traffic')">流量统计</button>
+          <button class="admin-nav-button" :class="{ active: adminSection === 'aiUsage' }" type="button" @click="switchAdminSection('aiUsage')">Token 使用情况</button>
           <button class="admin-nav-button" :class="{ active: adminSection === 'timeline' }" type="button" @click="switchAdminSection('timeline')">用户时间表</button>
         </nav>
         <div class="admin-sidebar-footer">
@@ -754,6 +756,221 @@
           </div>
         </section>
 
+        <section v-else-if="adminSection === 'aiUsage'" class="admin-panel">
+          <div class="admin-panel-header">
+            <div>
+              <h2>Token 使用情况</h2>
+              <p>统计 DeepSeek 调用返回的输入和输出 token，并按滚动窗口限制 AI 使用量。</p>
+            </div>
+            <el-button plain @click="loadAdminAiUsage(adminAiUsagePage)">刷新统计</el-button>
+          </div>
+
+          <div class="traffic-metrics">
+            <article v-for="metric in aiUsageMetricCards" :key="metric.label" class="traffic-metric">
+              <div class="traffic-metric-label">{{ metric.label }}</div>
+              <div class="traffic-metric-value">{{ metric.value }}</div>
+            </article>
+          </div>
+
+          <div class="traffic-grid">
+            <section class="traffic-chart-panel">
+              <div class="traffic-section-title">
+                <span>{{ aiUsageChartTitle }}</span>
+                <div class="traffic-chart-actions">
+                  <div class="traffic-view-switch" aria-label="切换 Token 统计时间范围">
+                    <button
+                      v-for="option in adminTrafficViewOptions"
+                      :key="option.value"
+                      type="button"
+                      :class="{ active: adminAiUsageView === option.value }"
+                      @click="switchAdminAiUsageView(option.value)"
+                    >
+                      {{ option.label }}
+                    </button>
+                  </div>
+                  <span>峰值 {{ formatTokenCount(aiUsageMaxTokens) }}</span>
+                </div>
+              </div>
+              <div v-if="aiUsageInputChartPoints || aiUsageOutputChartPoints" class="traffic-chart" @mouseleave="hideAiUsagePoint">
+                <svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-label="Token 使用趋势折线图">
+                  <polyline class="traffic-chart-line ai-usage-input-line" :points="aiUsageInputChartPoints"></polyline>
+                  <polyline class="traffic-chart-line ai-usage-output-line" :points="aiUsageOutputChartPoints"></polyline>
+                  <g v-for="point in aiUsageChartPointItems" :key="point.date">
+                    <circle
+                      class="traffic-chart-dot ai-usage-input-dot"
+                      :cx="point.x"
+                      :cy="point.inputY"
+                      r="1.1"
+                    ></circle>
+                    <circle
+                      class="traffic-chart-dot ai-usage-output-dot"
+                      :cx="point.x"
+                      :cy="point.outputY"
+                      r="1.1"
+                    ></circle>
+                    <circle
+                      class="traffic-chart-hit"
+                      :cx="point.x"
+                      :cy="point.inputY"
+                      r="5"
+                      @mouseenter="showAiUsagePoint(point)"
+                      @mousemove="showAiUsagePoint(point)"
+                    ></circle>
+                    <circle
+                      class="traffic-chart-hit"
+                      :cx="point.x"
+                      :cy="point.outputY"
+                      r="5"
+                      @mouseenter="showAiUsagePoint(point)"
+                      @mousemove="showAiUsagePoint(point)"
+                    ></circle>
+                  </g>
+                </svg>
+                <div v-if="adminAiUsageHoverPoint" class="traffic-chart-tooltip" :style="aiUsageHoverStyle">
+                  <div class="traffic-tooltip-time">{{ formatTrafficTooltipTime(adminAiUsageHoverPoint.date) }}</div>
+                  <div>输入 {{ formatTokenCount(adminAiUsageHoverPoint.promptTokens) }}</div>
+                  <div>输出 {{ formatTokenCount(adminAiUsageHoverPoint.completionTokens) }}</div>
+                  <div>调用 {{ formatTokenCount(adminAiUsageHoverPoint.calls) }} 次</div>
+                </div>
+                <div class="traffic-chart-labels">
+                  <span v-for="item in aiUsageChartLabels" :key="item.date">{{ formatTrafficDate(item.date) }}</span>
+                </div>
+                <div class="ai-usage-legend">
+                  <span><i class="ai-usage-legend-input"></i>输入 token</span>
+                  <span><i class="ai-usage-legend-output"></i>输出 token</span>
+                </div>
+              </div>
+              <div v-else class="empty-column">暂无 Token 使用趋势。</div>
+            </section>
+
+            <section class="traffic-top-panel ai-limit-panel">
+              <div class="traffic-section-title">
+                <span>全局限制</span>
+                <span>{{ aiLimitText(adminAiUsage.globalLimit) }}</span>
+              </div>
+              <div class="ai-limit-form">
+                <label>
+                  <span>窗口小时数</span>
+                  <el-input-number
+                    v-model="adminAiGlobalLimitDraft.windowHours"
+                    :min="1"
+                    :max="8760"
+                    :step="1"
+                    step-strictly
+                    controls-position="right"
+                  ></el-input-number>
+                </label>
+                <label>
+                  <span>输入 token 上限</span>
+                  <el-input-number
+                    v-model="adminAiGlobalLimitDraft.inputTokenLimit"
+                    :min="1"
+                    :max="10000000000"
+                    :step="1000"
+                    step-strictly
+                    controls-position="right"
+                  ></el-input-number>
+                </label>
+                <label>
+                  <span>输出 token 上限</span>
+                  <el-input-number
+                    v-model="adminAiGlobalLimitDraft.outputTokenLimit"
+                    :min="1"
+                    :max="10000000000"
+                    :step="1000"
+                    step-strictly
+                    controls-position="right"
+                  ></el-input-number>
+                </label>
+              </div>
+              <div class="ai-limit-actions">
+                <el-button type="primary" plain @click="saveAdminAiGlobalLimit">保存全局限制</el-button>
+                <el-button type="warning" plain @click="clearAllAdminAiUserLimits">统一全局</el-button>
+              </div>
+            </section>
+          </div>
+
+          <el-table :data="adminAiUsage.users" style="width: 100%;">
+            <el-table-column label="用户" min-width="180">
+              <template #default="{ row }">
+                {{ row.user ? `${row.user.name}（${row.user.nickname}）` : '—' }}
+              </template>
+            </el-table-column>
+            <el-table-column label="窗口内用量" min-width="180">
+              <template #default="{ row }">
+                <div>{{ aiWindowUsageText(row.windowUsage) }}</div>
+                <div class="traffic-muted">调用 {{ formatTokenCount(row.windowUsage ? row.windowUsage.calls : 0) }} 次</div>
+              </template>
+            </el-table-column>
+            <el-table-column label="有效限制" min-width="220">
+              <template #default="{ row }">{{ aiLimitText(row.effectiveLimit) }}</template>
+            </el-table-column>
+            <el-table-column label="来源" width="110">
+              <template #default="{ row }">
+                <el-tag :type="aiLimitSourceType(row)" effect="plain">{{ aiLimitSourceLabel(row) }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="最近使用" min-width="160">
+              <template #default="{ row }">{{ formatDateTime(row.lastUsedAt) }}</template>
+            </el-table-column>
+            <el-table-column label="单用户限制" min-width="420" fixed="right">
+              <template #default="{ row }">
+                <div
+                  v-if="row.user && adminAiUserLimitDrafts[String(row.user.id)]"
+                  class="ai-user-limit-editor"
+                >
+                  <div class="ai-user-limit-fields">
+                    <el-input-number
+                      v-model="adminAiUserLimitDrafts[String(row.user.id)].windowHours"
+                      size="small"
+                      :min="1"
+                      :max="8760"
+                      :step="1"
+                      step-strictly
+                      controls-position="right"
+                      aria-label="窗口小时数"
+                    ></el-input-number>
+                    <el-input-number
+                      v-model="adminAiUserLimitDrafts[String(row.user.id)].inputTokenLimit"
+                      size="small"
+                      :min="1"
+                      :max="10000000000"
+                      :step="1000"
+                      step-strictly
+                      controls-position="right"
+                      aria-label="输入 token 上限"
+                    ></el-input-number>
+                    <el-input-number
+                      v-model="adminAiUserLimitDrafts[String(row.user.id)].outputTokenLimit"
+                      size="small"
+                      :min="1"
+                      :max="10000000000"
+                      :step="1000"
+                      step-strictly
+                      controls-position="right"
+                      aria-label="输出 token 上限"
+                    ></el-input-number>
+                  </div>
+                  <div class="ai-user-limit-actions">
+                    <el-button size="small" type="primary" plain @click="saveAdminAiUserLimit(row)">保存</el-button>
+                    <el-button size="small" plain :disabled="!row.hasOverride" @click="clearAdminAiUserLimit(row)">使用全局</el-button>
+                  </div>
+                </div>
+              </template>
+            </el-table-column>
+          </el-table>
+          <div class="admin-pagination">
+            <el-pagination
+              background
+              layout="prev, pager, next, total"
+              :total="adminAiUsageUsersTotal"
+              :page-size="adminAiUsagePageSize"
+              :current-page="adminAiUsagePage"
+              @current-change="loadAdminAiUsage"
+            ></el-pagination>
+          </div>
+        </section>
+
         <section v-else-if="adminSection === 'timeline'" class="admin-timeline">
           <div class="admin-panel">
             <div class="admin-panel-header">
@@ -799,7 +1016,7 @@
                   ></el-date-picker>
                 </div>
               </div>
-              <section class="summary-section">
+              <section v-if="showTaskPoolSection" class="summary-section">
                 <h3>
                   <span>{{ activePage === 'daily' ? '临时任务池' : '待安排DDL' }}</span>
                   <span class="day-subtitle">{{ unscheduledCount }} 项</span>
@@ -831,7 +1048,7 @@
                   </div>
                 </div>
               </section>
-              <section v-if="activePage === 'daily'" class="summary-section habit-pool-section">
+              <section v-if="showHabitPoolSection" class="summary-section habit-pool-section">
                 <h3>
                   <span>习惯池</span>
                   <span class="day-subtitle">{{ habitCount }} 项</span>
@@ -1058,6 +1275,228 @@
       <div v-if="scheduleDragPreview.note" class="task-note-preview">{{ scheduleDragPreview.note }}</div>
       <span v-if="scheduleDragPreview.completed" class="schedule-check">✓</span>
     </div>
+
+    <div v-if="showAiAssistant" class="ai-assistant">
+      <button
+        class="ai-fab"
+        :class="{ 'is-open': aiChatOpen }"
+        type="button"
+        title="AI 助手"
+        :disabled="!currentUser"
+        @click="toggleAiChat"
+      >
+        AI
+      </button>
+      <section v-if="aiChatOpen" class="ai-chat-panel" aria-label="AI 助手聊天框">
+        <header class="ai-chat-header">
+          <div class="ai-chat-heading">
+            <div class="ai-chat-title">AI 助手</div>
+            <div class="ai-chat-subtitle">生成任务指令后需要你逐条批准，请包含完整信息</div>
+          </div>
+          <div class="ai-chat-header-actions">
+            <el-popover
+              placement="top-end"
+              trigger="click"
+              width="320"
+              popper-class="ai-help-popover"
+            >
+              <template #reference>
+                <button class="ai-help-button" type="button" title="AI 规则和信息范围">?</button>
+              </template>
+              <div class="ai-help-content">
+                <div class="ai-help-title">AI 规则和信息范围</div>
+                <ul>
+                  <li>只会生成“创建任务”和“修改任务详情”两类指令。</li>
+                  <li>不会删除任务、标记完成、修改每日安排、时间格子或习惯。</li>
+                  <li>所有指令必须等本轮输出结束后，在卡片列表里单独选择执行或取消。</li>
+                  <li>会读取本轮请求、最近最多 20 条聊天/审批结果、当前时间/时区，以及最多 200 条未完成时间线任务。</li>
+                  <li>任务字段包括 id、标题、科目、截止时间、优先级、备注、状态和任务池。</li>
+                  <li>普通 DDL 任务没有截止时间时会显示在“待安排DDL”；AI 创建这类任务会把截止时间留空。</li>
+                  <li>未完成时间线任务超过 200 条时，只给前 200 条详情，同时告诉 AI 有截断；看不到目标时应追问。</li>
+                  <li>不会发送 API Key、登录 token、密码、后台日志或其他用户数据。</li>
+                </ul>
+              </div>
+            </el-popover>
+            <el-button text @click="aiChatOpen = false">收起</el-button>
+          </div>
+        </header>
+        <div ref="aiChatBody" class="ai-chat-body">
+          <div v-if="!aiChatMessages.length" class="ai-chat-empty">
+            例如：创建一个数学作业，明天 23:00 截止；或者把物理作业备注改成复习错题。
+          </div>
+          <div
+            v-for="(message, index) in aiChatMessages"
+            :key="index"
+            class="ai-chat-message"
+            :class="[`is-${message.role}`, { 'is-approval-result': message.kind === 'approval-result' }]"
+          >
+            <div class="ai-chat-bubble">{{ message.content }}</div>
+          </div>
+          <div v-if="aiChatLoading && (!aiChatMessages.length || !aiChatMessages[aiChatMessages.length - 1].content)" class="ai-chat-message is-assistant">
+            <div class="ai-chat-bubble">正在整理指令……</div>
+          </div>
+        </div>
+        <footer class="ai-chat-footer">
+          <el-input
+            ref="aiChatInput"
+            v-model="aiChatInput"
+            type="textarea"
+            :rows="3"
+            maxlength="2000"
+            show-word-limit
+            resize="none"
+            placeholder="说出你想创建或修改的任务，Enter 发送，Shift + Enter 换行"
+            @keydown="handleAiChatKeydown"
+          ></el-input>
+          <div class="ai-chat-actions">
+            <el-button :disabled="aiChatLoading || !aiChatInput.trim()" type="primary" @click="sendAiMessage">发送</el-button>
+          </div>
+        </footer>
+      </section>
+    </div>
+
+    <el-dialog
+      v-model="settingsDialogVisible"
+      title="设置"
+      width="min(92vw, 520px)"
+      class="settings-dialog"
+    >
+      <div class="settings-list">
+        <div class="settings-row">
+          <div>
+            <div class="settings-row-title">AI 功能</div>
+            <div class="settings-row-desc">控制 DDL 页面右下角 AI 助手入口。</div>
+          </div>
+          <el-switch v-model="appSettings.aiEnabled" @change="saveAppSettings"></el-switch>
+        </div>
+        <div class="settings-row">
+          <div>
+            <div class="settings-row-title">待安排DDL</div>
+            <div class="settings-row-desc">控制左侧待安排 DDL 区域显示。</div>
+          </div>
+          <el-switch v-model="appSettings.showUnscheduledDdl" @change="saveAppSettings"></el-switch>
+        </div>
+        <div class="settings-row">
+          <div>
+            <div class="settings-row-title">临时任务池</div>
+            <div class="settings-row-desc">控制每日安排页左侧临时任务池显示。</div>
+          </div>
+          <el-switch v-model="appSettings.showArrangementPool" @change="saveAppSettings"></el-switch>
+        </div>
+        <div class="settings-row">
+          <div>
+            <div class="settings-row-title">习惯池</div>
+            <div class="settings-row-desc">控制每日安排页左侧习惯池显示。</div>
+          </div>
+          <el-switch v-model="appSettings.showHabitPool" @change="saveAppSettings"></el-switch>
+        </div>
+      </div>
+      <template #footer>
+        <div class="dialog-footer">
+          <div class="day-subtitle">设置保存在当前浏览器。</div>
+          <el-button type="primary" @click="settingsDialogVisible = false">完成</el-button>
+        </div>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="aiApprovalVisible"
+      title="审批 AI 指令"
+      width="min(94vw, 820px)"
+      class="ai-approval-dialog"
+      :show-close="false"
+      :close-on-click-modal="false"
+      :close-on-press-escape="false"
+    >
+      <div v-if="aiPendingActions.length" class="ai-approval">
+        <div class="ai-approval-progress">
+          <span>{{ aiApprovalProgressText() }}</span>
+          <el-tag type="info">{{ aiPendingActions.length }} 条指令</el-tag>
+        </div>
+        <div class="ai-approval-card-list">
+          <article
+            v-for="(action, index) in aiPendingActions"
+            :key="action.id"
+            class="ai-approval-card"
+            :class="`status-${aiActionStatus(action)}`"
+          >
+            <header class="ai-approval-card-header">
+              <div>
+                <div class="ai-approval-card-kicker">
+                  <el-tag size="small">{{ aiActionTypeLabel(action) }}</el-tag>
+                  <span>指令 {{ index + 1 }}</span>
+                </div>
+                <h3>{{ action.summary }}</h3>
+                <p v-if="action.type === 'update_task'">目标任务：{{ action.targetTaskTitle }}</p>
+              </div>
+              <el-tag :type="aiActionStatusType(action)">{{ aiActionStatusLabel(action) }}</el-tag>
+            </header>
+
+            <el-form label-position="top" class="ai-approval-form" @submit.prevent>
+              <el-form-item v-for="field in aiEditableFields()" :key="field.field" :label="field.label">
+                <template v-if="field.field === 'priority'">
+                  <el-select v-model="action.draft.priority" :class="{ 'ai-edited-field': aiActionFieldChanged(action, field.field) }" :disabled="aiActionLocked(action)" style="width: 100%;">
+                    <el-option label="高 / 红" value="high"></el-option>
+                    <el-option label="中 / 黄" value="medium"></el-option>
+                    <el-option label="低 / 绿" value="low"></el-option>
+                  </el-select>
+                </template>
+                <template v-else-if="field.field === 'note'">
+                  <el-input
+                    v-model="action.draft.note"
+                    :class="{ 'ai-edited-field': aiActionFieldChanged(action, field.field) }"
+                    type="textarea"
+                    :rows="2"
+                    resize="none"
+                    :disabled="aiActionLocked(action)"
+                    placeholder="备注"
+                  ></el-input>
+                </template>
+                <template v-else>
+                  <el-input
+                    v-model="action.draft[field.field]"
+                    :class="{ 'ai-edited-field': aiActionFieldChanged(action, field.field) }"
+                    :disabled="aiActionLocked(action)"
+                    :maxlength="field.field === 'title' ? 80 : (field.field === 'subject' ? 40 : undefined)"
+                    :show-word-limit="field.field === 'title' || field.field === 'subject'"
+                    :placeholder="field.field === 'dueAt' ? '留空则放入待安排DDL，或 YYYY-MM-DDTHH:mm:00' : field.label"
+                  ></el-input>
+                </template>
+                <div v-if="action.type === 'update_task'" class="ai-field-before">
+                  原值：{{ aiFormatFieldValue(field.field, (action.before || {})[field.field] || '') }}
+                </div>
+              </el-form-item>
+            </el-form>
+
+            <div v-if="aiActionResult(action) && aiActionResult(action).message" class="ai-approval-result-line">
+              {{ aiActionResult(action).message }}
+            </div>
+
+            <footer class="ai-approval-card-actions">
+              <el-button
+                :disabled="aiActionLocked(action) || !!aiExecutingActionId"
+                @click="cancelAiAction(action)"
+              >取消</el-button>
+              <el-button
+                type="primary"
+                :loading="aiExecutingActionId === action.id"
+                :disabled="aiActionLocked(action) || (!!aiExecutingActionId && aiExecutingActionId !== action.id)"
+                @click="approveAiAction(action)"
+              >执行</el-button>
+            </footer>
+          </article>
+        </div>
+      </div>
+      <template #footer>
+        <div class="dialog-footer">
+          <div class="left-actions">
+          </div>
+          <div class="right-actions">
+            <el-button :disabled="!canCloseAiApproval()" @click="closeAiApproval">完成审批</el-button>
+          </div>
+        </div>
+      </template>
+    </el-dialog>
 
     <el-dialog
       v-model="nicknameDialogVisible"
@@ -1387,10 +1826,10 @@
         </el-form-item>
 
         <el-form-item label="截止时间" v-if="!isArrangementDialog && !form.unscheduled">
-          <div class="fixed-time-input">
-            <el-input v-model="dueHour" placeholder="HH" maxlength="2" inputmode="numeric" @blur="normalizeDialogTimeInput"></el-input>
+          <div class="fixed-time-input" @click="focusDialogTimeContainer">
+            <el-input ref="dueHourInput" v-model="dueHour" placeholder="HH" inputmode="numeric" @focus="selectDialogTimeInput" @keydown="handleDialogTimeKeydown('hour', $event)" @blur="normalizeDialogTimeInput"></el-input>
             <span class="fixed-time-colon" aria-hidden="true">:</span>
-            <el-input v-model="dueMinute" placeholder="mm" maxlength="2" inputmode="numeric" @blur="normalizeDialogTimeInput"></el-input>
+            <el-input ref="dueMinuteInput" v-model="dueMinute" placeholder="mm" inputmode="numeric" @focus="selectDialogTimeInput" @keydown="handleDialogTimeKeydown('minute', $event)" @blur="normalizeDialogTimeInput"></el-input>
           </div>
         </el-form-item>
 

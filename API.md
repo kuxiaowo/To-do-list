@@ -569,6 +569,168 @@ DELETE /api/schedule-config
 
 说明：删除当前用户的一周模板版本和全部单日覆盖，恢复系统默认模板。如果恢复默认模板会破坏已有安排所在时间段，接口返回 `409 Conflict`。
 
+## 习惯接口
+
+### 获取习惯列表
+
+```http
+GET /api/habits
+```
+
+未登录响应：
+
+```json
+{
+  "habits": [],
+  "readOnly": true
+}
+```
+
+已登录响应：
+
+```json
+{
+  "habits": [],
+  "readOnly": false
+}
+```
+
+### 创建习惯
+
+```http
+POST /api/habits
+```
+
+请求：
+
+```json
+{
+  "id": "habit-1710000000000-abcd1234",
+  "title": "背单词",
+  "subject": "English B",
+  "weekdays": ["1", "3", "5"],
+  "slotKeyBase": "1-18:00",
+  "slotLabel": "晚饭后",
+  "slotStart": "18:00",
+  "slotEnd": "18:40",
+  "durationMinutes": 15,
+  "startDate": "2026-05-18",
+  "endDate": "",
+  "priority": "medium",
+  "note": "复习错题本",
+  "active": true
+}
+```
+
+响应：
+
+```json
+{
+  "ok": true,
+  "habit": {}
+}
+```
+
+状态码：
+
+- `201 Created`：创建成功，并同步生成符合日期范围的每日安排。
+- `400 Bad Request`：字段缺失、星期非法、时间格子非法或时长非法。
+- `401 Unauthorized`：未登录。
+- `409 Conflict`：习惯同步会超出已有时间格子容量。
+
+### 更新习惯
+
+```http
+PUT /api/habits/{id}
+```
+
+请求体同创建习惯。更新会重建今天及未来未完成的习惯安排；历史记录保留。
+
+### 删除习惯
+
+```http
+DELETE /api/habits/{id}
+```
+
+响应：
+
+```json
+{
+  "ok": true
+}
+```
+
+说明：删除习惯会归档该习惯，并删除今天及未来的相关每日安排。
+
+## 用户反馈接口
+
+### 获取我的反馈
+
+```http
+GET /api/feedback
+```
+
+响应：
+
+```json
+{
+  "feedback": [],
+  "feedbackLimitPerUser": 10
+}
+```
+
+状态码：
+
+- `200 OK`：获取成功。
+- `401 Unauthorized`：未登录。
+
+### 提交反馈
+
+```http
+POST /api/feedback
+```
+
+请求：
+
+```json
+{
+  "content": "希望增加导出功能"
+}
+```
+
+响应：
+
+```json
+{
+  "ok": true,
+  "feedback": {}
+}
+```
+
+状态码：
+
+- `201 Created`：提交成功。
+- `400 Bad Request`：内容为空或超过 1000 个字符。
+- `401 Unauthorized`：未登录。
+- `409 Conflict`：未回复反馈数量达到管理员设置的上限。
+
+### 删除我的反馈
+
+```http
+DELETE /api/feedback/{id}
+```
+
+响应：
+
+```json
+{
+  "ok": true,
+  "id": 1
+}
+```
+
+说明：只能删除当前登录用户自己的反馈。
+
 ## 健康检查
 
 ```http
@@ -579,8 +741,7 @@ GET /api/health
 
 ```json
 {
-  "ok": true,
-  "database": "D:\\Python\\programs\\GitHub\\To-do-list\\data\\todo-list.db"
+  "ok": true
 }
 ```
 

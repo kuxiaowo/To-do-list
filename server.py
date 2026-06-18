@@ -13,13 +13,44 @@ import posixpath
 import secrets
 import sqlite3
 import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
+from ai_prompts import AI_CHAT_SYSTEM_PROMPT, AI_REPAIR_SYSTEM_PROMPT, AI_STREAM_SYSTEM_PROMPT
+
 BASE_DIR = Path(__file__).resolve().parent
+
+
+def load_dotenv(path: Path | None = None, *, override: bool = False) -> None:
+    dotenv_path = path or (BASE_DIR / '.env')
+    if not dotenv_path.exists():
+        return
+    for raw_line in dotenv_path.read_text(encoding='utf-8').splitlines():
+        line = raw_line.strip().lstrip('\ufeff')
+        if not line or line.startswith('#'):
+            continue
+        if line.startswith('export '):
+            line = line[len('export '):].strip()
+        if '=' not in line:
+            continue
+        key, value = line.split('=', 1)
+        key = key.strip()
+        if not key:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+            value = value[1:-1]
+        if override or key not in os.environ:
+            os.environ[key] = value
+
+
+load_dotenv()
+
 DATA_DIR = BASE_DIR / 'data'
 DB_PATH = DATA_DIR / 'todo-list.db'
 HOST = os.environ.get('TODO_HOST', '127.0.0.1')
@@ -28,7 +59,18 @@ PASSWORD_ITERATIONS = 260_000
 SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
 DEFAULT_FEEDBACK_LIMIT_PER_USER = 10
 FEEDBACK_LIMIT_SETTING_KEY = 'feedback_limit_per_user'
+AI_TOKEN_LIMIT_SETTING_KEY = 'ai_token_limit_global'
+DEFAULT_AI_TOKEN_WINDOW_HOURS = 24
+DEFAULT_AI_INPUT_TOKEN_LIMIT = 200_000
+DEFAULT_AI_OUTPUT_TOKEN_LIMIT = 50_000
 TRUSTED_PROXY_IPS = {'127.0.0.1', '::1'}
+DEEPSEEK_API_URL = 'https://api.deepseek.com/chat/completions'
+DEFAULT_DEEPSEEK_MODEL = 'deepseek-v4-flash'
+DEFAULT_DEEPSEEK_TIMEOUT_SECONDS = 20
+AI_ACTION_LIMIT = 10
+AI_HISTORY_LIMIT = 20
+AI_CONTEXT_TASK_LIMIT = 200
+AI_TASK_FIELDS = {'title', 'subject', 'dueAt', 'priority', 'note'}
 HABIT_SYNC_FUTURE_DAYS = 90
 MAX_HABIT_SYNC_FUTURE_DAYS = 365
 MAX_AVATAR_BYTES = 2 * 1024 * 1024
@@ -340,10 +382,57 @@ def init_db() -> None:
         conn.execute('CREATE INDEX IF NOT EXISTS idx_visit_logs_page ON visit_logs(page)')
         conn.execute(
             '''
+            CREATE TABLE IF NOT EXISTS ai_usage_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                model TEXT NOT NULL,
+                call_type TEXT NOT NULL,
+                prompt_tokens INTEGER NOT NULL DEFAULT 0,
+                completion_tokens INTEGER NOT NULL DEFAULT 0,
+                total_tokens INTEGER NOT NULL DEFAULT 0,
+                prompt_cache_hit_tokens INTEGER NOT NULL DEFAULT 0,
+                prompt_cache_miss_tokens INTEGER NOT NULL DEFAULT 0,
+                reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            '''
+        )
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_ai_usage_logs_user_created ON ai_usage_logs(user_id, created_at)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_ai_usage_logs_created_at ON ai_usage_logs(created_at)')
+        conn.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS ai_token_limits (
+                user_id INTEGER PRIMARY KEY,
+                window_hours INTEGER NOT NULL,
+                input_token_limit INTEGER NOT NULL,
+                output_token_limit INTEGER NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            '''
+        )
+        conn.execute(
+            '''
             INSERT OR IGNORE INTO app_settings (key, value, updated_at)
             VALUES (?, ?, ?)
             ''',
             (FEEDBACK_LIMIT_SETTING_KEY, str(DEFAULT_FEEDBACK_LIMIT_PER_USER), now_iso()),
+        )
+        conn.execute(
+            '''
+            INSERT OR IGNORE INTO app_settings (key, value, updated_at)
+            VALUES (?, ?, ?)
+            ''',
+            (
+                AI_TOKEN_LIMIT_SETTING_KEY,
+                json.dumps({
+                    'windowHours': DEFAULT_AI_TOKEN_WINDOW_HOURS,
+                    'inputTokenLimit': DEFAULT_AI_INPUT_TOKEN_LIMIT,
+                    'outputTokenLimit': DEFAULT_AI_OUTPUT_TOKEN_LIMIT,
+                }, ensure_ascii=False),
+                now_iso(),
+            ),
         )
         nickname_duplicates = conn.execute(
             '''
@@ -449,6 +538,231 @@ def public_task(row: sqlite3.Row) -> dict:
         'createdAt': row['created_at'],
         'updatedAt': row['updated_at'],
     }
+
+
+def deepseek_api_key() -> str:
+    return os.environ.get('DEEPSEEK_API_KEY', '').strip()
+
+
+def deepseek_model() -> str:
+    return os.environ.get('DEEPSEEK_MODEL', DEFAULT_DEEPSEEK_MODEL).strip() or DEFAULT_DEEPSEEK_MODEL
+
+
+def deepseek_timeout_seconds() -> float:
+    try:
+        return max(1.0, float(os.environ.get('DEEPSEEK_TIMEOUT_SECONDS', str(DEFAULT_DEEPSEEK_TIMEOUT_SECONDS))))
+    except (TypeError, ValueError):
+        return float(DEFAULT_DEEPSEEK_TIMEOUT_SECONDS)
+
+
+def compact_task_for_ai(task: dict) -> dict:
+    return {
+        'id': task.get('id', ''),
+        'title': task.get('title', ''),
+        'subject': task.get('subject', ''),
+        'dueAt': task.get('dueAt', ''),
+        'priority': task.get('priority', 'medium'),
+        'note': task.get('note', ''),
+        'completed': bool(task.get('completed', False)),
+        'pool': task.get('pool', 'todo'),
+    }
+
+
+def ai_context_tasks(tasks: list[dict]) -> tuple[list[dict], dict]:
+    timeline_tasks = [
+        task for task in tasks
+        if not bool(task.get('completed')) and task.get('pool', 'todo') == 'todo'
+    ]
+    included_tasks = timeline_tasks[:AI_CONTEXT_TASK_LIMIT]
+    omitted_count = max(0, len(timeline_tasks) - len(included_tasks))
+    return included_tasks, {
+        'taskSelection': {
+            'status': 'incomplete_timeline_only',
+            'pool': 'todo',
+            'totalIncompleteTimelineTaskCount': len(timeline_tasks),
+            'includedTaskCount': len(included_tasks),
+            'omittedIncompleteTimelineTaskCount': omitted_count,
+            'truncated': omitted_count > 0,
+            'limit': AI_CONTEXT_TASK_LIMIT,
+            'policy': 'Only included incomplete timeline tasks with pool=todo may be used as update targets. Daily schedule items, habits, arrangement-pool tasks, and completed tasks are not visible. If truncated and the target is not visible, ask the user to narrow the request.',
+        },
+        'taskPlacement': {
+            'ddlTimeline': 'pool=todo 且 dueAt 非空的任务显示在 DDL 时间线/日历。',
+            'unscheduledDdl': 'pool=todo 且 dueAt 为空字符串的任务显示在“待安排DDL”。如果用户要求没有截止日期、先待安排或放入待安排DDL，create_task 应把 dueAt 设为空字符串。',
+            'dailyArrangementPool': 'pool=arrangement 是每日安排页的“临时任务池”，当前 AI 不可创建或修改。',
+            'createTaskPoolPolicy': 'create_task 不接收 pool 字段；后端/前端会按普通 DDL 任务写入 pool=todo。',
+        },
+        'tasks': [compact_task_for_ai(task) for task in included_tasks],
+    }
+
+
+def is_valid_ai_due_at(value: str) -> bool:
+    if value == '':
+        return True
+    if not value.endswith(':00'):
+        return False
+    try:
+        datetime.strptime(value, '%Y-%m-%dT%H:%M:%S')
+        return True
+    except ValueError:
+        return False
+
+
+def normalize_ai_task_fields(raw: object, *, partial: bool) -> tuple[dict | None, str | None]:
+    if not isinstance(raw, dict):
+        return None, 'task fields must be an object'
+    unsupported = sorted(set(raw) - AI_TASK_FIELDS)
+    if unsupported:
+        return None, f'unsupported task fields: {", ".join(unsupported)}'
+
+    fields: dict = {}
+    if not partial or 'title' in raw:
+        title = str(raw.get('title', '') or '').strip()
+        if not title:
+            return None, 'task title is required'
+        if len(title) > 80:
+            return None, 'task title is too long'
+        fields['title'] = title
+
+    if not partial or 'subject' in raw:
+        subject = str(raw.get('subject', '') or '').strip()
+        if not subject:
+            return None, 'task subject is required'
+        if len(subject) > 40:
+            return None, 'task subject is too long'
+        fields['subject'] = subject
+
+    if not partial or 'dueAt' in raw:
+        due_at = str(raw.get('dueAt', '') or '').strip()
+        if not is_valid_ai_due_at(due_at):
+            return None, 'task dueAt must be empty or YYYY-MM-DDTHH:mm:00'
+        fields['dueAt'] = due_at
+
+    if not partial or 'priority' in raw:
+        priority = str(raw.get('priority', 'medium') or 'medium').strip()
+        if priority not in {'high', 'medium', 'low'}:
+            return None, 'invalid task priority'
+        fields['priority'] = priority
+
+    if not partial or 'note' in raw:
+        note = str(raw.get('note', '') or '').strip()
+        if len(note) > 4000:
+            return None, 'task note is too long'
+        fields['note'] = note
+
+    if partial and not fields:
+        return None, 'update patch is empty'
+    return fields, None
+
+
+def ai_priority_label(priority: str) -> str:
+    return {'high': '高', 'medium': '中', 'low': '低'}.get(priority, priority or '中')
+
+
+def ai_due_label(value: str) -> str:
+    return value.replace('T', ' ')[:16] if value else '待安排DDL'
+
+
+def ai_task_summary(task: dict) -> str:
+    return f"{task.get('title', '')} / {task.get('subject', '')} / {ai_due_label(task.get('dueAt', ''))} / {ai_priority_label(task.get('priority', 'medium'))}"
+
+
+def normalize_ai_actions(raw_actions: object, tasks: list[dict]) -> tuple[list[dict], list[dict]]:
+    if raw_actions is None:
+        return [], []
+    if not isinstance(raw_actions, list):
+        return [], [{'index': 0, 'reason': 'actions must be a list'}]
+
+    tasks_by_id = {str(task.get('id', '')): task for task in tasks}
+    actions: list[dict] = []
+    rejected: list[dict] = []
+    for index, raw_action in enumerate(raw_actions[:AI_ACTION_LIMIT]):
+        if not isinstance(raw_action, dict):
+            rejected.append({'index': index, 'reason': 'action must be an object'})
+            continue
+        action_type = str(raw_action.get('type', '') or '').strip()
+        if action_type == 'create_task':
+            fields, error = normalize_ai_task_fields(raw_action.get('task'), partial=False)
+            if error:
+                rejected.append({'index': index, 'reason': error})
+                continue
+            action = {
+                'id': f'ai-action-{index + 1}',
+                'type': 'create_task',
+                'summary': f"创建任务：{ai_task_summary(fields)}",
+                'task': fields,
+            }
+            actions.append(action)
+            continue
+
+        if action_type == 'update_task':
+            target_task_id = str(raw_action.get('targetTaskId', '') or '').strip()
+            existing = tasks_by_id.get(target_task_id)
+            if not existing:
+                rejected.append({'index': index, 'reason': 'target task not found'})
+                continue
+            if existing.get('pool') in {'habit', 'schedule'}:
+                rejected.append({'index': index, 'reason': 'habit or schedule tasks cannot be updated by AI'})
+                continue
+            patch, error = normalize_ai_task_fields(raw_action.get('patch'), partial=True)
+            if error:
+                rejected.append({'index': index, 'reason': error})
+                continue
+            before = {key: existing.get(key, '') for key in AI_TASK_FIELDS}
+            changed_patch = {key: value for key, value in patch.items() if before.get(key, '') != value}
+            if not changed_patch:
+                rejected.append({'index': index, 'reason': 'update has no actual changes'})
+                continue
+            after = {**before, **changed_patch}
+            action = {
+                'id': f'ai-action-{index + 1}',
+                'type': 'update_task',
+                'summary': f"修改任务：{existing.get('title', '')}",
+                'targetTaskId': target_task_id,
+                'targetTaskTitle': existing.get('title', ''),
+                'patch': changed_patch,
+                'before': before,
+                'after': after,
+            }
+            actions.append(action)
+            continue
+
+        rejected.append({'index': index, 'reason': 'unsupported action type'})
+
+    if isinstance(raw_actions, list) and len(raw_actions) > AI_ACTION_LIMIT:
+        rejected.append({'index': AI_ACTION_LIMIT, 'reason': f'only first {AI_ACTION_LIMIT} actions are accepted'})
+    return actions, rejected
+
+
+def parse_ai_json_content(content: str) -> tuple[dict | None, str | None]:
+    try:
+        payload = json.loads(content)
+    except (TypeError, json.JSONDecodeError):
+        return None, 'AI returned invalid JSON'
+    if not isinstance(payload, dict):
+        return None, 'AI JSON response must be an object'
+    return payload, None
+
+
+def parse_ai_stream_content(content: str) -> tuple[str, object, str | None]:
+    start_tag = '<AI_ACTIONS_JSON>'
+    end_tag = '</AI_ACTIONS_JSON>'
+    start = content.find(start_tag)
+    end = content.find(end_tag, start + len(start_tag)) if start != -1 else -1
+    if start == -1 or end == -1:
+        payload, error = parse_ai_json_content(content)
+        if error:
+            return content.strip(), [], 'AI stream response missing actions JSON'
+        return str(payload.get('reply', '') or '').strip(), payload.get('actions'), None
+    reply = content[:start].strip()
+    raw_json = content[start + len(start_tag):end].strip()
+    try:
+        payload = json.loads(raw_json)
+    except (TypeError, json.JSONDecodeError):
+        return reply, [], 'AI actions JSON is invalid'
+    if not isinstance(payload, dict):
+        return reply, [], 'AI actions JSON must be an object'
+    return reply, payload.get('actions'), None
 
 
 def public_user(row: sqlite3.Row | dict) -> dict:
@@ -920,6 +1234,231 @@ def set_feedback_limit(conn: sqlite3.Connection, limit: int) -> None:
     )
 
 
+def default_ai_token_limit() -> dict:
+    return {
+        'windowHours': DEFAULT_AI_TOKEN_WINDOW_HOURS,
+        'inputTokenLimit': DEFAULT_AI_INPUT_TOKEN_LIMIT,
+        'outputTokenLimit': DEFAULT_AI_OUTPUT_TOKEN_LIMIT,
+    }
+
+
+def normalize_ai_token_limit(raw: object) -> tuple[dict | None, str | None]:
+    if not isinstance(raw, dict):
+        return None, 'limit must be an object'
+    try:
+        window_hours = int(raw.get('windowHours'))
+        input_limit = int(raw.get('inputTokenLimit'))
+        output_limit = int(raw.get('outputTokenLimit'))
+    except (TypeError, ValueError):
+        return None, 'windowHours, inputTokenLimit and outputTokenLimit must be integers'
+    if window_hours < 1 or window_hours > 24 * 365:
+        return None, 'windowHours must be between 1 and 8760'
+    if input_limit < 1 or input_limit > 10_000_000_000:
+        return None, 'inputTokenLimit must be between 1 and 10000000000'
+    if output_limit < 1 or output_limit > 10_000_000_000:
+        return None, 'outputTokenLimit must be between 1 and 10000000000'
+    return {
+        'windowHours': window_hours,
+        'inputTokenLimit': input_limit,
+        'outputTokenLimit': output_limit,
+    }, None
+
+
+def get_ai_global_token_limit(conn: sqlite3.Connection) -> dict:
+    row = conn.execute('SELECT value FROM app_settings WHERE key = ?', (AI_TOKEN_LIMIT_SETTING_KEY,)).fetchone()
+    if not row:
+        return default_ai_token_limit()
+    try:
+        payload = json.loads(row['value'])
+    except (TypeError, json.JSONDecodeError):
+        return default_ai_token_limit()
+    limit, error = normalize_ai_token_limit(payload)
+    return default_ai_token_limit() if error else limit
+
+
+def set_ai_global_token_limit(conn: sqlite3.Connection, limit: dict) -> None:
+    conn.execute(
+        '''
+        INSERT INTO app_settings (key, value, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+        ''',
+        (AI_TOKEN_LIMIT_SETTING_KEY, json.dumps(limit, ensure_ascii=False), now_iso()),
+    )
+
+
+def get_ai_user_token_limit(conn: sqlite3.Connection, user_id: int) -> dict | None:
+    row = conn.execute(
+        '''
+        SELECT window_hours, input_token_limit, output_token_limit, updated_at
+        FROM ai_token_limits
+        WHERE user_id = ?
+        ''',
+        (user_id,),
+    ).fetchone()
+    if not row:
+        return None
+    return {
+        'windowHours': int(row['window_hours']),
+        'inputTokenLimit': int(row['input_token_limit']),
+        'outputTokenLimit': int(row['output_token_limit']),
+        'updatedAt': row['updated_at'],
+    }
+
+
+def set_ai_user_token_limit(conn: sqlite3.Connection, user_id: int, limit: dict) -> None:
+    conn.execute(
+        '''
+        INSERT INTO ai_token_limits
+        (user_id, window_hours, input_token_limit, output_token_limit, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET
+            window_hours = excluded.window_hours,
+            input_token_limit = excluded.input_token_limit,
+            output_token_limit = excluded.output_token_limit,
+            updated_at = excluded.updated_at
+        ''',
+        (
+            user_id,
+            limit['windowHours'],
+            limit['inputTokenLimit'],
+            limit['outputTokenLimit'],
+            now_iso(),
+        ),
+    )
+
+
+def effective_ai_token_limit(conn: sqlite3.Connection, user_id: int) -> dict:
+    user_limit = get_ai_user_token_limit(conn, user_id)
+    if user_limit:
+        return {**user_limit, 'source': 'user', 'hasOverride': True}
+    return {**get_ai_global_token_limit(conn), 'source': 'global', 'hasOverride': False}
+
+
+def ai_token_window_start(window_hours: int) -> str:
+    start = datetime.now(timezone.utc) - timedelta(hours=window_hours)
+    return start.strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def ai_usage_totals_since(conn: sqlite3.Connection, user_id: int | None, start_key: str) -> dict:
+    params: list[object] = [start_key]
+    where = 'created_at >= ?'
+    if user_id is not None:
+        where += ' AND user_id = ?'
+        params.append(user_id)
+    row = conn.execute(
+        f'''
+        SELECT
+            COUNT(*) AS calls,
+            COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
+            COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
+            COALESCE(SUM(total_tokens), 0) AS total_tokens
+        FROM ai_usage_logs
+        WHERE {where}
+        ''',
+        tuple(params),
+    ).fetchone()
+    return {
+        'calls': int(row['calls'] or 0),
+        'promptTokens': int(row['prompt_tokens'] or 0),
+        'completionTokens': int(row['completion_tokens'] or 0),
+        'totalTokens': int(row['total_tokens'] or 0),
+    }
+
+
+def normalize_deepseek_usage(usage: object) -> dict:
+    source = usage if isinstance(usage, dict) else {}
+    details = source.get('completion_tokens_details') if isinstance(source.get('completion_tokens_details'), dict) else {}
+
+    def safe_int(key: str, raw_source: dict = source) -> int:
+        try:
+            return max(0, int(raw_source.get(key, 0) or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    return {
+        'promptTokens': safe_int('prompt_tokens'),
+        'completionTokens': safe_int('completion_tokens'),
+        'totalTokens': safe_int('total_tokens'),
+        'promptCacheHitTokens': safe_int('prompt_cache_hit_tokens'),
+        'promptCacheMissTokens': safe_int('prompt_cache_miss_tokens'),
+        'reasoningTokens': safe_int('reasoning_tokens', details),
+    }
+
+
+def record_ai_usage(conn: sqlite3.Connection, user_id: int, model: str, call_type: str, usage: object) -> dict:
+    normalized = normalize_deepseek_usage(usage)
+    conn.execute(
+        '''
+        INSERT INTO ai_usage_logs
+        (user_id, model, call_type, prompt_tokens, completion_tokens, total_tokens,
+         prompt_cache_hit_tokens, prompt_cache_miss_tokens, reasoning_tokens, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''',
+        (
+            user_id,
+            model,
+            call_type,
+            normalized['promptTokens'],
+            normalized['completionTokens'],
+            normalized['totalTokens'],
+            normalized['promptCacheHitTokens'],
+            normalized['promptCacheMissTokens'],
+            normalized['reasoningTokens'],
+            now_iso(),
+        ),
+    )
+    return normalized
+
+
+def ai_token_limit_status(conn: sqlite3.Connection, user_id: int) -> dict:
+    limit = effective_ai_token_limit(conn, user_id)
+    usage = ai_usage_totals_since(conn, user_id, ai_token_window_start(limit['windowHours']))
+    exceeded_dimension = ''
+    if usage['promptTokens'] >= limit['inputTokenLimit']:
+        exceeded_dimension = 'input'
+    elif usage['completionTokens'] >= limit['outputTokenLimit']:
+        exceeded_dimension = 'output'
+    return {
+        'limit': limit,
+        'usage': usage,
+        'exceeded': bool(exceeded_dimension),
+        'dimension': exceeded_dimension,
+    }
+
+
+def ai_token_limit_error(status: dict) -> dict:
+    limit = status['limit']
+    usage = status['usage']
+    dimension = status.get('dimension') or 'input'
+    if dimension == 'output':
+        message = (
+            f"AI 输出 token 额度已达到限制：最近 {limit['windowHours']} 小时已用 "
+            f"{usage['completionTokens']} / {limit['outputTokenLimit']}。"
+        )
+    else:
+        message = (
+            f"AI 输入 token 额度已达到限制：最近 {limit['windowHours']} 小时已用 "
+            f"{usage['promptTokens']} / {limit['inputTokenLimit']}。"
+        )
+    return {
+        'error': 'AI token limit exceeded',
+        'message': message,
+        'dimension': dimension,
+        'windowHours': limit['windowHours'],
+        'inputTokenLimit': limit['inputTokenLimit'],
+        'outputTokenLimit': limit['outputTokenLimit'],
+        'currentInputTokens': usage['promptTokens'],
+        'currentOutputTokens': usage['completionTokens'],
+    }
+
+
+class AiTokenLimitExceeded(Exception):
+    def __init__(self, payload: dict):
+        super().__init__(payload.get('message') or 'AI token limit exceeded')
+        self.payload = payload
+
+
 def normalize_ip(value: str) -> str:
     value = str(value).strip()
     if not value:
@@ -1006,6 +1545,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
         path = urlparse(self.path).path
         if path == '/api/visits':
             return self.handle_create_visit()
+        if path == '/api/admin/ai-usage/clear-user-limits':
+            return self.handle_admin_clear_all_ai_token_limits()
         if path == '/api/auth/register':
             return self.handle_auth_register()
         if path == '/api/auth/login':
@@ -1014,6 +1555,10 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return self.handle_auth_logout()
         if path == '/api/auth/avatar':
             return self.handle_auth_update_avatar()
+        if path == '/api/ai/chat':
+            return self.handle_ai_chat()
+        if path == '/api/ai/chat-stream':
+            return self.handle_ai_chat_stream()
         if path == '/api/tasks':
             return self.handle_create_task()
         if path == '/api/schedule-items':
@@ -1032,6 +1577,11 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return self.handle_auth_update_password()
         if path == '/api/auth/avatar-color':
             return self.handle_auth_update_avatar_color()
+        if path == '/api/admin/ai-usage/global-limit':
+            return self.handle_admin_update_ai_global_limit()
+        parts = path.strip('/').split('/')
+        if len(parts) == 5 and parts[:3] == ['api', 'admin', 'users'] and parts[4] == 'ai-token-limit':
+            return self.handle_admin_update_user_ai_token_limit(parts[3])
         if path == '/api/admin/feedback-settings':
             return self.handle_admin_update_feedback_settings()
         if path.startswith('/api/admin/feedback/') and path.endswith('/reply'):
@@ -1058,6 +1608,9 @@ class TodoHandler(SimpleHTTPRequestHandler):
         path = urlparse(self.path).path
         if path.startswith('/api/admin/feedback/'):
             return self.handle_admin_delete_feedback(path.rsplit('/', 1)[-1])
+        parts = path.strip('/').split('/')
+        if len(parts) == 5 and parts[:3] == ['api', 'admin', 'users'] and parts[4] == 'ai-token-limit':
+            return self.handle_admin_clear_user_ai_token_limit(parts[3])
         if path.startswith('/api/feedback/'):
             return self.handle_delete_feedback(path.rsplit('/', 1)[-1])
         if path == '/api/auth/avatar':
@@ -1190,6 +1743,239 @@ class TodoHandler(SimpleHTTPRequestHandler):
         ).fetchall()
         return [public_task(row) for row in rows]
 
+    def normalize_ai_history(self, raw_history: object) -> list[dict]:
+        if not isinstance(raw_history, list):
+            return []
+        history = []
+        for item in raw_history[-AI_HISTORY_LIMIT:]:
+            if not isinstance(item, dict):
+                continue
+            role = str(item.get('role', '') or '').strip()
+            if role not in {'user', 'assistant'}:
+                continue
+            content = str(item.get('content', '') or '').strip()
+            if not content:
+                continue
+            history.append({'role': role, 'content': content[:1000]})
+        return history
+
+    def ensure_ai_token_available(self, user_id: int) -> None:
+        with get_db() as conn:
+            status = ai_token_limit_status(conn, int(user_id))
+        if status['exceeded']:
+            raise AiTokenLimitExceeded(ai_token_limit_error(status))
+
+    def record_ai_usage_for_user(self, user_id: int, call_type: str, usage: object) -> dict:
+        with get_db() as conn:
+            normalized = record_ai_usage(conn, int(user_id), deepseek_model(), call_type, usage)
+            conn.commit()
+            return normalized
+
+    def call_deepseek_chat_recorded(self, messages: list[dict], user_id: int, call_type: str) -> str:
+        self._last_deepseek_usage = None
+        content = self.call_deepseek_chat(messages)
+        self.record_ai_usage_for_user(user_id, call_type, getattr(self, '_last_deepseek_usage', None))
+        return content
+
+    def build_ai_messages(self, message: str, history: list[dict], tasks: list[dict], client_now: str, timezone_name: str) -> list[dict]:
+        _, task_context = ai_context_tasks(tasks)
+        context = {
+            'clientNow': client_now,
+            'timezone': timezone_name,
+            'request': message,
+            **task_context,
+        }
+        return [
+            {'role': 'system', 'content': AI_CHAT_SYSTEM_PROMPT},
+            *history,
+            {
+                'role': 'user',
+                'content': '请根据下面 JSON 上下文处理用户请求，并按 system 中的 JSON schema 输出：\n'
+                           + json.dumps(context, ensure_ascii=False),
+            },
+        ]
+
+    def build_ai_stream_messages(self, message: str, history: list[dict], tasks: list[dict], client_now: str, timezone_name: str) -> list[dict]:
+        _, task_context = ai_context_tasks(tasks)
+        context = {
+            'clientNow': client_now,
+            'timezone': timezone_name,
+            'request': message,
+            **task_context,
+        }
+        return [
+            {'role': 'system', 'content': AI_STREAM_SYSTEM_PROMPT},
+            *history,
+            {
+                'role': 'user',
+                'content': '请根据下面 JSON 上下文处理用户请求，先输出自然语言回复，最后输出动作 JSON 标签：\n'
+                           + json.dumps(context, ensure_ascii=False),
+            },
+        ]
+
+    def call_deepseek_chat(self, messages: list[dict]) -> str:
+        api_key = deepseek_api_key()
+        if not api_key:
+            raise ValueError('missing api key')
+        self._last_deepseek_usage = None
+        body = json.dumps({
+            'model': deepseek_model(),
+            'messages': messages,
+            'response_format': {'type': 'json_object'},
+            'stream': False,
+            'max_tokens': 2000,
+        }, ensure_ascii=False).encode('utf-8')
+        request = urllib.request.Request(
+            DEEPSEEK_API_URL,
+            data=body,
+            method='POST',
+            headers={
+                'Content-Type': 'application/json',
+                'Authorization': f'Bearer {api_key}',
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=deepseek_timeout_seconds()) as response:
+                payload = json.loads(response.read().decode('utf-8') or '{}')
+        except urllib.error.HTTPError as error:
+            detail = error.read().decode('utf-8', errors='replace')[:500]
+            raise RuntimeError(f'DeepSeek HTTP {error.code}: {detail}') from error
+        except urllib.error.URLError as error:
+            raise RuntimeError(f'DeepSeek request failed: {error.reason}') from error
+        except (TimeoutError, json.JSONDecodeError) as error:
+            raise RuntimeError(f'DeepSeek response failed: {error}') from error
+
+        try:
+            content = payload['choices'][0]['message']['content']
+        except (KeyError, IndexError, TypeError) as error:
+            raise RuntimeError('DeepSeek response missing message content') from error
+        self._last_deepseek_usage = payload.get('usage') if isinstance(payload, dict) else None
+        return str(content or '').strip()
+
+    def build_ai_repair_messages(
+        self,
+        message: str,
+        history: list[dict],
+        tasks: list[dict],
+        client_now: str,
+        timezone_name: str,
+        original_reply: str,
+        raw_actions: object,
+        rejected_actions: list[dict],
+    ) -> list[dict]:
+        _, task_context = ai_context_tasks(tasks)
+        context = {
+            'clientNow': client_now,
+            'timezone': timezone_name,
+            'request': message,
+            **task_context,
+            'originalReply': original_reply,
+            'originalActions': raw_actions if isinstance(raw_actions, list) else [],
+            'rejectedActions': rejected_actions,
+            'backendSafetyValidation': {
+                'blocked': True,
+                'instruction': '这些 actions 已被后端安全校验拒绝。请根据 rejectedActions 的 reason 修正；如果缺少必需信息，就追问用户并返回空 actions。',
+                'rejectedActions': rejected_actions,
+            },
+        }
+        return [
+            {'role': 'system', 'content': AI_REPAIR_SYSTEM_PROMPT},
+            *history,
+            {
+                'role': 'user',
+                'content': '请根据下面 JSON 上下文修正被拦截的 AI 指令。如果不能安全修正，就追问用户：\n'
+                           + json.dumps(context, ensure_ascii=False),
+            },
+        ]
+
+    def repair_ai_response(
+        self,
+        user_id: int,
+        message: str,
+        history: list[dict],
+        tasks: list[dict],
+        client_now: str,
+        timezone_name: str,
+        original_reply: str,
+        raw_actions: object,
+        rejected_actions: list[dict],
+    ) -> tuple[str, list[dict], list[dict]] | None:
+        if not rejected_actions:
+            return None
+        repair_messages = self.build_ai_repair_messages(
+            message,
+            history,
+            tasks,
+            client_now,
+            timezone_name,
+            original_reply,
+            raw_actions,
+            rejected_actions,
+        )
+        self.ensure_ai_token_available(user_id)
+        content = self.call_deepseek_chat_recorded(repair_messages, user_id, 'repair')
+        repair_payload, parse_error = parse_ai_json_content(content)
+        if parse_error:
+            return None
+        visible_tasks, _ = ai_context_tasks(tasks)
+        repair_reply = str(repair_payload.get('reply', '') or '').strip()
+        repair_actions, repair_rejected = normalize_ai_actions(repair_payload.get('actions'), visible_tasks)
+        if not repair_reply:
+            repair_reply = '我还需要更明确的信息。' if not repair_actions else '我修正好了可审批的操作。'
+        return repair_reply[:2000], repair_actions, repair_rejected
+
+    def stream_deepseek_chat(self, messages: list[dict]):
+        api_key = deepseek_api_key()
+        if not api_key:
+            raise ValueError('missing api key')
+        self._last_deepseek_stream_usage = None
+        body = json.dumps({
+            'model': deepseek_model(),
+            'messages': messages,
+            'stream': True,
+            'stream_options': {'include_usage': True},
+            'max_tokens': 2000,
+        }, ensure_ascii=False).encode('utf-8')
+        request = urllib.request.Request(
+            DEEPSEEK_API_URL,
+            data=body,
+            method='POST',
+            headers={
+                'Content-Type': 'application/json',
+                'Authorization': f'Bearer {api_key}',
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=deepseek_timeout_seconds()) as response:
+                for raw_line in response:
+                    line = raw_line.decode('utf-8', errors='replace').strip()
+                    if not line or line.startswith(':'):
+                        continue
+                    if not line.startswith('data:'):
+                        continue
+                    data = line[len('data:'):].strip()
+                    if data == '[DONE]':
+                        break
+                    try:
+                        payload = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(payload, dict) and payload.get('usage') is not None:
+                        self._last_deepseek_stream_usage = payload.get('usage')
+                    try:
+                        delta = payload['choices'][0].get('delta', {}).get('content', '')
+                    except (KeyError, IndexError, TypeError):
+                        delta = ''
+                    if delta:
+                        yield str(delta)
+        except urllib.error.HTTPError as error:
+            detail = error.read().decode('utf-8', errors='replace')[:500]
+            raise RuntimeError(f'DeepSeek HTTP {error.code}: {detail}') from error
+        except urllib.error.URLError as error:
+            raise RuntimeError(f'DeepSeek request failed: {error.reason}') from error
+        except TimeoutError as error:
+            raise RuntimeError(f'DeepSeek response failed: {error}') from error
+
     def fetch_schedule_items_for_user(self, conn: sqlite3.Connection, user_id: int) -> list[dict]:
         rows = conn.execute(
             """
@@ -1270,6 +2056,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return self.handle_admin_feedback_settings()
         if parts == ['api', 'admin', 'traffic', 'summary']:
             return self.handle_admin_traffic_summary()
+        if parts == ['api', 'admin', 'ai-usage', 'summary']:
+            return self.handle_admin_ai_usage_summary()
         if len(parts) == 5 and parts[:3] == ['api', 'admin', 'users']:
             try:
                 target_user_id = int(parts[3])
@@ -1481,6 +2269,256 @@ class TodoHandler(SimpleHTTPRequestHandler):
                 for row in recent_rows
             ],
         })
+
+    def handle_admin_ai_usage_summary(self):
+        query = parse_qs(urlparse(self.path).query)
+        usage_view = str(query.get('view', ['7d'])[0]).strip()
+        if usage_view not in {'30d', '7d', '1d', '6h'}:
+            return self.write_json({'error': 'invalid usage view'}, status=HTTPStatus.BAD_REQUEST)
+        try:
+            page = max(1, int(query.get('page', ['1'])[0]))
+            page_size = min(100, max(1, int(query.get('pageSize', ['50'])[0])))
+        except ValueError:
+            return self.write_json({'error': 'invalid pagination'}, status=HTTPStatus.BAD_REQUEST)
+        offset = (page - 1) * page_size
+
+        now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0, tzinfo=None)
+        today_key = now.date().isoformat()
+        if usage_view == '30d':
+            series_unit = 'day'
+            bucket_count = 30
+            start_dt = datetime.combine(now.date() - timedelta(days=bucket_count - 1), datetime.min.time())
+        elif usage_view == '7d':
+            series_unit = 'day'
+            bucket_count = 7
+            start_dt = datetime.combine(now.date() - timedelta(days=bucket_count - 1), datetime.min.time())
+        elif usage_view == '1d':
+            series_unit = 'hour'
+            bucket_count = 24
+            start_dt = now - timedelta(hours=bucket_count - 1)
+        else:
+            series_unit = 'hour'
+            bucket_count = 6
+            start_dt = now - timedelta(hours=bucket_count - 1)
+        start_key = start_dt.strftime('%Y-%m-%dT%H:%M:%SZ')
+
+        with get_db() as conn:
+            global_limit = get_ai_global_token_limit(conn)
+            total_row = conn.execute(
+                '''
+                SELECT
+                    COUNT(*) AS calls,
+                    COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
+                    COALESCE(SUM(completion_tokens), 0) AS completion_tokens
+                FROM ai_usage_logs
+                '''
+            ).fetchone()
+            today_row = conn.execute(
+                '''
+                SELECT
+                    COUNT(*) AS calls,
+                    COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
+                    COALESCE(SUM(completion_tokens), 0) AS completion_tokens
+                FROM ai_usage_logs
+                WHERE substr(created_at, 1, 10) = ?
+                ''',
+                (today_key,),
+            ).fetchone()
+            trend_rows = conn.execute(
+                '''
+                SELECT created_at, prompt_tokens, completion_tokens, total_tokens
+                FROM ai_usage_logs
+                WHERE created_at >= ?
+                ORDER BY created_at ASC
+                ''',
+                (start_key,),
+            ).fetchall()
+            users_total = conn.execute('SELECT COUNT(*) FROM users').fetchone()[0]
+            user_rows = conn.execute(
+                '''
+                SELECT users.id, users.name, users.nickname, users.role, MAX(ai_usage_logs.created_at) AS last_used_at
+                FROM users
+                LEFT JOIN ai_usage_logs ON ai_usage_logs.user_id = users.id
+                GROUP BY users.id
+                ORDER BY
+                    CASE WHEN MAX(ai_usage_logs.created_at) IS NULL THEN 1 ELSE 0 END ASC,
+                    MAX(ai_usage_logs.created_at) DESC,
+                    users.id ASC
+                LIMIT ? OFFSET ?
+                ''',
+                (page_size, offset),
+            ).fetchall()
+
+            user_payload = []
+            for row in user_rows:
+                limit = effective_ai_token_limit(conn, int(row['id']))
+                usage = ai_usage_totals_since(conn, int(row['id']), ai_token_window_start(limit['windowHours']))
+                user_payload.append({
+                    'user': {
+                        'id': row['id'],
+                        'name': row['name'],
+                        'nickname': row['nickname'],
+                        'role': row['role'],
+                    },
+                    'effectiveLimit': limit,
+                    'hasOverride': bool(limit.get('hasOverride')),
+                    'source': limit.get('source', 'global'),
+                    'windowUsage': usage,
+                    'lastUsedAt': row['last_used_at'],
+                })
+
+        trend_by_bucket = {}
+        for row in trend_rows:
+            try:
+                created_at = datetime.strptime(row['created_at'], '%Y-%m-%dT%H:%M:%SZ')
+            except (TypeError, ValueError):
+                continue
+            if series_unit == 'day':
+                bucket_key = created_at.date().isoformat()
+            else:
+                bucket_key = created_at.replace(minute=0, second=0, microsecond=0).strftime('%Y-%m-%dT%H:00:00Z')
+            bucket = trend_by_bucket.setdefault(bucket_key, {
+                'promptTokens': 0,
+                'completionTokens': 0,
+                'totalTokens': 0,
+                'calls': 0,
+            })
+            bucket['promptTokens'] += int(row['prompt_tokens'] or 0)
+            bucket['completionTokens'] += int(row['completion_tokens'] or 0)
+            bucket['totalTokens'] += int(row['total_tokens'] or 0)
+            bucket['calls'] += 1
+
+        trend_series = []
+        for bucket_offset in range(bucket_count):
+            bucket_dt = start_dt + (timedelta(days=bucket_offset) if series_unit == 'day' else timedelta(hours=bucket_offset))
+            if series_unit == 'day':
+                bucket_key = bucket_dt.date().isoformat()
+            else:
+                bucket_key = bucket_dt.strftime('%Y-%m-%dT%H:00:00Z')
+            item = trend_by_bucket.get(bucket_key, {
+                'promptTokens': 0,
+                'completionTokens': 0,
+                'totalTokens': 0,
+                'calls': 0,
+            })
+            trend_series.append({'date': bucket_key, **item})
+
+        return self.write_json({
+            'usageView': usage_view,
+            'seriesUnit': series_unit,
+            'globalLimit': global_limit,
+            'totalPromptTokens': int(total_row['prompt_tokens'] or 0),
+            'totalCompletionTokens': int(total_row['completion_tokens'] or 0),
+            'totalCalls': int(total_row['calls'] or 0),
+            'todayPromptTokens': int(today_row['prompt_tokens'] or 0),
+            'todayCompletionTokens': int(today_row['completion_tokens'] or 0),
+            'todayCalls': int(today_row['calls'] or 0),
+            'trendSeries': trend_series,
+            'users': user_payload,
+            'usersTotal': users_total,
+            'page': page,
+            'pageSize': page_size,
+        })
+
+    def handle_admin_update_ai_global_limit(self):
+        admin = self.require_admin()
+        if not admin:
+            return
+        payload = self.read_json_body()
+        if payload is None:
+            return
+        limit, error = normalize_ai_token_limit(payload)
+        if error:
+            return self.write_json({'error': error}, status=HTTPStatus.BAD_REQUEST)
+        with get_db() as conn:
+            set_ai_global_token_limit(conn, limit)
+            self.log_operation(
+                conn,
+                int(admin['id']),
+                int(admin['id']),
+                'admin.ai_token.global_limit_update',
+                'ai_token_limit',
+                'global',
+                {'limit': limit},
+            )
+            conn.commit()
+        return self.write_json({'ok': True, 'globalLimit': limit})
+
+    def handle_admin_update_user_ai_token_limit(self, user_id_text: str):
+        admin = self.require_admin()
+        if not admin:
+            return
+        try:
+            user_id = int(user_id_text)
+        except ValueError:
+            return self.write_json({'error': 'invalid user id'}, status=HTTPStatus.BAD_REQUEST)
+        payload = self.read_json_body()
+        if payload is None:
+            return
+        limit, error = normalize_ai_token_limit(payload)
+        if error:
+            return self.write_json({'error': error}, status=HTTPStatus.BAD_REQUEST)
+        with get_db() as conn:
+            user_row = self.ensure_user_exists(conn, user_id)
+            if not user_row:
+                return self.write_json({'error': 'user not found'}, status=HTTPStatus.NOT_FOUND)
+            set_ai_user_token_limit(conn, user_id, limit)
+            effective_limit = effective_ai_token_limit(conn, user_id)
+            self.log_operation(
+                conn,
+                int(admin['id']),
+                user_id,
+                'admin.ai_token.user_limit_update',
+                'ai_token_limit',
+                str(user_id),
+                {'limit': limit},
+            )
+            conn.commit()
+        return self.write_json({'ok': True, 'userId': user_id, 'effectiveLimit': effective_limit})
+
+    def handle_admin_clear_user_ai_token_limit(self, user_id_text: str):
+        admin = self.require_admin()
+        if not admin:
+            return
+        try:
+            user_id = int(user_id_text)
+        except ValueError:
+            return self.write_json({'error': 'invalid user id'}, status=HTTPStatus.BAD_REQUEST)
+        with get_db() as conn:
+            user_row = self.ensure_user_exists(conn, user_id)
+            if not user_row:
+                return self.write_json({'error': 'user not found'}, status=HTTPStatus.NOT_FOUND)
+            conn.execute('DELETE FROM ai_token_limits WHERE user_id = ?', (user_id,))
+            effective_limit = effective_ai_token_limit(conn, user_id)
+            self.log_operation(
+                conn,
+                int(admin['id']),
+                user_id,
+                'admin.ai_token.user_limit_clear',
+                'ai_token_limit',
+                str(user_id),
+                {},
+            )
+            conn.commit()
+        return self.write_json({'ok': True, 'userId': user_id, 'effectiveLimit': effective_limit})
+
+    def handle_admin_clear_all_ai_token_limits(self):
+        admin = self.require_admin()
+        if not admin:
+            return
+        with get_db() as conn:
+            deleted = conn.execute('DELETE FROM ai_token_limits').rowcount
+            self.log_operation(
+                conn,
+                int(admin['id']),
+                int(admin['id']),
+                'admin.ai_token.user_limits_clear_all',
+                'ai_token_limit',
+                'all',
+                {'deleted': int(deleted or 0)},
+            )
+            conn.commit()
+        return self.write_json({'ok': True, 'deleted': int(deleted or 0)})
 
     def handle_admin_users(self):
         with get_db() as conn:
@@ -1944,6 +2982,196 @@ class TodoHandler(SimpleHTTPRequestHandler):
             )
             conn.commit()
         return self.write_json({'ok': True, 'id': feedback_id})
+
+    def handle_ai_chat(self):
+        user = self.require_user()
+        if not user:
+            return
+        if not deepseek_api_key():
+            return self.write_json(
+                {'error': 'DeepSeek API key is not configured'},
+                status=HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+        payload = self.read_json_body()
+        if payload is None:
+            return
+        message = str(payload.get('message', '') or '').strip()
+        if not message:
+            return self.write_json({'error': 'message is required'}, status=HTTPStatus.BAD_REQUEST)
+        if len(message) > 2000:
+            return self.write_json({'error': 'message is too long'}, status=HTTPStatus.BAD_REQUEST)
+        try:
+            self.ensure_ai_token_available(int(user['id']))
+        except AiTokenLimitExceeded as error:
+            return self.write_json(error.payload, status=HTTPStatus.TOO_MANY_REQUESTS)
+
+        client_now = str(payload.get('clientNow', '') or '').strip()[:40]
+        timezone_name = str(payload.get('timezone', 'Asia/Shanghai') or 'Asia/Shanghai').strip()[:64]
+        history = self.normalize_ai_history(payload.get('history'))
+        with get_db() as conn:
+            tasks = self.fetch_tasks_for_user(conn, int(user['id']))
+
+        messages = self.build_ai_messages(message, history, tasks, client_now, timezone_name)
+        try:
+            content = self.call_deepseek_chat_recorded(messages, int(user['id']), 'chat')
+        except ValueError:
+            return self.write_json(
+                {'error': 'DeepSeek API key is not configured'},
+                status=HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+        except AiTokenLimitExceeded as error:
+            return self.write_json(error.payload, status=HTTPStatus.TOO_MANY_REQUESTS)
+        except RuntimeError as error:
+            return self.write_json(
+                {'error': 'DeepSeek request failed', 'message': str(error)},
+                status=HTTPStatus.BAD_GATEWAY,
+            )
+
+        ai_payload, parse_error = parse_ai_json_content(content)
+        if parse_error:
+            return self.write_json({
+                'ok': True,
+                'reply': 'AI 返回的格式不是可执行 JSON，我没有生成任何操作。',
+                'actions': [],
+                'rejectedActions': [{'index': 0, 'reason': parse_error}],
+            })
+
+        reply = str(ai_payload.get('reply', '') or '').strip()
+        visible_tasks, _ = ai_context_tasks(tasks)
+        raw_actions = ai_payload.get('actions')
+        actions, rejected = normalize_ai_actions(raw_actions, visible_tasks)
+        if not reply:
+            reply = '我整理好了可审批的操作。' if actions else '我还需要更明确的信息。'
+        if rejected:
+            try:
+                repaired = self.repair_ai_response(
+                    int(user['id']),
+                    message,
+                    history,
+                    tasks,
+                    client_now,
+                    timezone_name,
+                    reply,
+                    raw_actions,
+                    rejected,
+                )
+            except RuntimeError as error:
+                repaired = None
+                rejected.append({'index': 0, 'reason': f'AI correction failed: {error}'})
+            except AiTokenLimitExceeded as error:
+                return self.write_json(error.payload, status=HTTPStatus.TOO_MANY_REQUESTS)
+            if repaired is not None:
+                reply, actions, rejected = repaired
+        return self.write_json({
+            'ok': True,
+            'reply': reply[:2000],
+            'actions': actions,
+            'rejectedActions': rejected,
+        })
+
+    def handle_ai_chat_stream(self):
+        user = self.require_user()
+        if not user:
+            return
+        if not deepseek_api_key():
+            return self.write_json(
+                {'error': 'DeepSeek API key is not configured'},
+                status=HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+        payload = self.read_json_body()
+        if payload is None:
+            return
+        message = str(payload.get('message', '') or '').strip()
+        if not message:
+            return self.write_json({'error': 'message is required'}, status=HTTPStatus.BAD_REQUEST)
+        if len(message) > 2000:
+            return self.write_json({'error': 'message is too long'}, status=HTTPStatus.BAD_REQUEST)
+        try:
+            self.ensure_ai_token_available(int(user['id']))
+        except AiTokenLimitExceeded as error:
+            return self.write_json(error.payload, status=HTTPStatus.TOO_MANY_REQUESTS)
+
+        client_now = str(payload.get('clientNow', '') or '').strip()[:40]
+        timezone_name = str(payload.get('timezone', 'Asia/Shanghai') or 'Asia/Shanghai').strip()[:64]
+        history = self.normalize_ai_history(payload.get('history'))
+        with get_db() as conn:
+            tasks = self.fetch_tasks_for_user(conn, int(user['id']))
+
+        messages = self.build_ai_stream_messages(message, history, tasks, client_now, timezone_name)
+        self.start_sse()
+        full_content = ''
+        visible_buffer = ''
+        hidden_actions = False
+        marker = '<AI_ACTIONS_JSON>'
+        keep_tail = len(marker) - 1
+
+        try:
+            for chunk in self.stream_deepseek_chat(messages):
+                full_content += chunk
+                if hidden_actions:
+                    continue
+                visible_buffer += chunk
+                marker_index = visible_buffer.find(marker)
+                if marker_index != -1:
+                    text = visible_buffer[:marker_index]
+                    if text:
+                        self.write_sse_event('delta', {'text': text})
+                    visible_buffer = ''
+                    hidden_actions = True
+                    continue
+                safe_length = max(0, len(visible_buffer) - keep_tail)
+                if safe_length:
+                    text = visible_buffer[:safe_length]
+                    visible_buffer = visible_buffer[safe_length:]
+                    self.write_sse_event('delta', {'text': text})
+
+            if visible_buffer and not hidden_actions:
+                self.write_sse_event('delta', {'text': visible_buffer})
+
+            self.record_ai_usage_for_user(
+                int(user['id']),
+                'chat_stream',
+                getattr(self, '_last_deepseek_stream_usage', None),
+            )
+            reply, raw_actions, parse_error = parse_ai_stream_content(full_content)
+            visible_tasks, _ = ai_context_tasks(tasks)
+            actions, rejected = normalize_ai_actions(raw_actions, visible_tasks)
+            if parse_error:
+                rejected.append({'index': 0, 'reason': parse_error})
+            if not reply:
+                reply = '我整理好了可审批的操作。' if actions else '我还需要更明确的信息。'
+            if rejected:
+                try:
+                    repaired = self.repair_ai_response(
+                        int(user['id']),
+                        message,
+                        history,
+                        tasks,
+                        client_now,
+                        timezone_name,
+                        reply,
+                        raw_actions,
+                        rejected,
+                    )
+                except RuntimeError as error:
+                    repaired = None
+                    rejected.append({'index': 0, 'reason': f'AI correction failed: {error}'})
+                except AiTokenLimitExceeded as error:
+                    self.write_sse_event('error', error.payload)
+                    return
+                if repaired is not None:
+                    reply, actions, rejected = repaired
+            self.write_sse_event('done', {
+                'reply': reply[:2000],
+                'actions': actions,
+                'rejectedActions': rejected,
+            })
+        except ValueError:
+            self.write_sse_event('error', {'error': 'DeepSeek API key is not configured'})
+        except RuntimeError as error:
+            self.write_sse_event('error', {'error': 'DeepSeek request failed', 'message': str(error)})
+        finally:
+            self.close_connection = True
 
     def handle_list_tasks(self):
         user = self.current_user()
@@ -3309,6 +4537,24 @@ class TodoHandler(SimpleHTTPRequestHandler):
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def start_sse(self):
+        self.send_response(HTTPStatus.OK)
+        self.send_header('Content-Type', 'text/event-stream; charset=utf-8')
+        self.send_header('Cache-Control', 'no-cache, no-store')
+        self.send_header('X-Accel-Buffering', 'no')
+        self.send_header('Connection', 'close')
+        self.end_headers()
+        self.wfile.write(b': connected\n\n')
+        self.wfile.flush()
+
+    def write_sse_event(self, event: str, payload: dict):
+        body = (
+            f'event: {event}\n'
+            f'data: {json.dumps(payload, ensure_ascii=False)}\n\n'
+        ).encode('utf-8')
+        self.wfile.write(body)
+        self.wfile.flush()
 
     def log_message(self, format: str, *args):
         super().log_message(format, *args)
