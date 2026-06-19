@@ -274,6 +274,95 @@ class ServerRegressionTests(unittest.TestCase):
             self.assertIn('dueAt', prompt)
             self.assertIn('空字符串', prompt)
 
+    def test_ai_subject_template_context_and_matching(self):
+        subject_names = ['Physics', 'Mathematics']
+        messages = server.TodoHandler.build_ai_messages(None, '物理作业明天交', [], [], '2026-06-18T12:00:00Z', 'Asia/Shanghai', subject_names)
+        context = self.ai_request_context(messages)
+        self.assertEqual(context['subjectTemplate']['availableSubjects'], subject_names)
+        self.assertIn('不要从任务内容自行推断科目', context['subjectTemplate']['matchingPolicy'])
+        self.assertEqual(server.match_existing_subject('物理', subject_names), 'Physics')
+        self.assertEqual(server.match_existing_subject('physics', subject_names), 'Physics')
+        self.assertEqual(server.match_existing_subject('天文学', subject_names), '天文学')
+
+        actions, rejected = server.normalize_ai_actions([
+            {
+                'type': 'create_task',
+                'task': {
+                    'title': '做实验报告',
+                    'subject': '物理',
+                    'dueAt': '',
+                    'priority': 'medium',
+                    'note': '',
+                },
+            },
+            {
+                'type': 'create_task',
+                'task': {
+                    'title': '观星记录',
+                    'subject': '天文学',
+                    'dueAt': '',
+                    'priority': 'low',
+                    'note': '',
+                },
+            },
+        ], [], subject_names)
+
+        self.assertEqual(rejected, [])
+        self.assertEqual(actions[0]['task']['subject'], 'Physics')
+        self.assertEqual(actions[1]['task']['subject'], '天文学')
+
+    def test_ai_prompts_explain_subject_template_matching(self):
+        prompts = [
+            server.AI_CHAT_SYSTEM_PROMPT,
+            server.AI_STREAM_SYSTEM_PROMPT,
+            server.AI_REPAIR_SYSTEM_PROMPT,
+        ]
+        for prompt in prompts:
+            self.assertIn('科目匹配规则', prompt)
+            self.assertIn('subjectTemplate.availableSubjects', prompt)
+            self.assertIn('不要因为任务内容或标题自行推断科目', prompt)
+
+    def test_ai_create_task_requires_explicit_priority(self):
+        actions, rejected = server.normalize_ai_actions([
+            {
+                'type': 'create_task',
+                'task': {
+                    'title': 'No priority task',
+                    'subject': 'Math',
+                    'dueAt': '',
+                    'note': '',
+                },
+            },
+        ], [], ['Math'])
+
+        self.assertEqual(actions, [])
+        self.assertEqual(rejected, [{'index': 0, 'reason': 'task priority is required'}])
+
+        actions, rejected = server.normalize_ai_actions([
+            {
+                'type': 'create_task',
+                'task': {
+                    'title': 'Blank priority task',
+                    'subject': 'Math',
+                    'dueAt': '',
+                    'priority': '',
+                    'note': '',
+                },
+            },
+        ], [], ['Math'])
+
+        self.assertEqual(actions, [])
+        self.assertEqual(rejected, [{'index': 0, 'reason': 'task priority is required'}])
+
+    def test_ai_prompts_require_explicit_priority(self):
+        for prompt in [server.AI_CHAT_SYSTEM_PROMPT, server.AI_STREAM_SYSTEM_PROMPT]:
+            self.assertIn('创建任务时，如果用户没有明确提供优先级', prompt)
+            self.assertIn('不要猜测或默认 medium', prompt)
+            self.assertIn('这个任务的优先级是高、中还是低？', prompt)
+        self.assertIn('task priority is required', server.AI_REPAIR_SYSTEM_PROMPT)
+        self.assertIn('不要补默认 medium', server.AI_REPAIR_SYSTEM_PROMPT)
+
+
     def test_dotenv_loader_sets_missing_values_without_overriding_existing_env(self):
         keys = ['DOTENV_TEST_KEY', 'DOTENV_EXISTING_KEY', 'DOTENV_QUOTED_KEY']
         original = {key: os.environ.get(key) for key in keys}
@@ -1286,6 +1375,25 @@ class ServerRegressionTests(unittest.TestCase):
         self.assertIn("return !this.adminMode && this.activePage === 'ddl' && this.appSettings.aiEnabled;", app_js)
         self.assertIn("if (this.activePage !== 'ddl' || !this.appSettings.aiEnabled) return;", app_js)
         self.assertIn("if (page !== 'ddl') this.aiChatOpen = false;", app_js)
+
+    def test_ai_approval_subject_uses_template_select(self):
+        index_html = Path('index.html').read_text(encoding='utf-8')
+
+        self.assertIn("field.field === 'subject'", index_html)
+        self.assertIn('v-model="action.draft.subject"', index_html)
+        self.assertIn('allow-create', index_html)
+        self.assertIn('v-for="subject in enabledSubjectOptions"', index_html)
+        self.assertIn('placeholder="选择或输入科目"', index_html)
+
+    def test_ai_approval_does_not_show_pending_status_text(self):
+        index_html = Path('index.html').read_text(encoding='utf-8')
+        app_js = Path('app.js').read_text(encoding='utf-8')
+
+        self.assertIn('aiActionStatus(action) !== \'pending\'', index_html)
+        self.assertIn('>取消</el-button>', index_html)
+        self.assertIn('>执行</el-button>', index_html)
+        self.assertNotIn('待处理', app_js)
+        self.assertNotIn('未处理', app_js)
 
     def test_frontend_settings_control_ai_and_pool_visibility(self):
         index_html = Path('index.html').read_text(encoding='utf-8')

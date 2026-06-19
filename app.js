@@ -12,6 +12,7 @@ const VISITS_API = '/api/visits';
 const AI_CHAT_STREAM_API = '/api/ai/chat-stream';
 const MANAGEBAC_HELPER_BASE = 'http://127.0.0.1:27654';
 const MANAGEBAC_WAKE_URL = 'managebac-sync://wake';
+const MANAGEBAC_INSTALLER_DOWNLOAD_URL = '/api/managebac-helper/installer';
 const MANAGEBAC_CONNECT_TIMEOUT_MS = 20000;
 const MANAGEBAC_REQUEST_TIMEOUT_MS = 15000;
 const AUTH_TOKEN_KEY = 'todo-list-auth-token-v1';
@@ -388,13 +389,6 @@ createApp({
           target: 'daily-tools',
           title: '每日安排使用时间格子',
           text: '你可以维护一周模板，也可以只编辑某一天的时间格子，让安排贴合当天节奏。',
-          page: 'daily'
-        },
-        {
-          key: 'flex-pool',
-          target: 'task-pool',
-          title: '临时任务池',
-          text: '这里放临时、长期，没有 DDL的任务。把任务从这里拖到右侧某个时间格子，就会生成当天的一次学习安排。',
           page: 'daily'
         },
         {
@@ -948,6 +942,7 @@ createApp({
       localStorage.setItem(THEME_STORAGE_KEY, theme);
     },
     openSettingsDialog() {
+      this.accountMenuOpen = false;
       this.settingsDialogVisible = true;
     },
     saveAppSettings() {
@@ -1247,6 +1242,9 @@ createApp({
       } catch (error) {
         console.error('连接 ManageBac Helper 失败：', error);
       }
+    },
+    downloadManageBacInstaller() {
+      window.location.assign(MANAGEBAC_INSTALLER_DOWNLOAD_URL);
     },
     async openManageBacLogin() {
       try {
@@ -1602,10 +1600,9 @@ createApp({
     aiActionStatusLabel(action) {
       const status = this.aiActionStatus(action);
       return {
-        pending: '待处理',
         executed: '已执行',
         canceled: '已取消'
-      }[status] || '待处理';
+      }[status] || '';
     },
     aiActionStatusType(action) {
       const status = this.aiActionStatus(action);
@@ -1713,20 +1710,19 @@ createApp({
     },
     aiApprovalProgressText() {
       const counts = this.aiApprovalCounts();
-      return `已执行 ${counts.executed || 0} · 已取消 ${counts.canceled || 0} · 待处理 ${counts.pending || 0}`;
+      return `已执行 ${counts.executed || 0} · 已取消 ${counts.canceled || 0}`;
     },
     appendAiActionSummary() {
       const counts = this.aiApprovalCounts();
       const parts = [
         `已执行 ${counts.executed || 0} 条`,
-        `已取消 ${counts.canceled || 0} 条`,
-        `未处理 ${counts.pending || 0} 条`
+        `已取消 ${counts.canceled || 0} 条`
       ];
       const details = this.aiPendingActions.map((action, index) => {
         const result = this.aiActionResult(action);
-        const status = result ? this.aiActionStatusLabel(action) : '待审批';
+        const status = result ? this.aiActionStatusLabel(action) : '';
         const message = result && result.message ? `，${result.message}` : '';
-        return `${index + 1}. ${action.summary}：${status}${message}`;
+        return `${index + 1}. ${action.summary}：${status || '已取消'}${message}`;
       });
       this.aiChatMessages.push({
         role: 'assistant',

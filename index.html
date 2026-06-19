@@ -163,7 +163,6 @@
             </div>
 
             <div class="feedback-quick-action">
-              <el-button plain @click="openSettingsDialog">设置</el-button>
               <el-button plain :disabled="!currentUser" @click="openManageBacSyncDialog">同步 ManageBac</el-button>
               <el-button type="primary" plain :disabled="!currentUser" @click="openFeedbackDialog" data-guide="feedback">反馈</el-button>
               <el-button plain @click="startGuide">帮助</el-button>
@@ -203,7 +202,6 @@
                       <div class="auth-status" v-else>未登录：可打开页面，但不能新增、编辑、删除或保存任务。</div>
                     </div>
                   </div>
-                  <el-button v-if="currentUser" plain size="small" @click="logout">退出</el-button>
                 </div>
 
                 <div v-if="currentUser" class="auth-form">
@@ -212,6 +210,7 @@
                     <el-button text @click="openNicknameDialog">修改昵称</el-button>
                   </div>
                   <el-button v-if="isAdmin" type="primary" plain @click="openAdminMode('users')">进入管理员后台</el-button>
+                  <el-button plain @click="openSettingsDialog">设置</el-button>
                   <el-button plain @click="logout">退出账号，重新登录</el-button>
                 </div>
 
@@ -1292,7 +1291,7 @@
         <header class="ai-chat-header">
           <div class="ai-chat-heading">
             <div class="ai-chat-title">AI 助手</div>
-            <div class="ai-chat-subtitle">生成任务指令后需要你逐条批准，请包含完整信息</div>
+            <div class="ai-chat-subtitle">我会先生成待审批指令，不会直接修改任务。</div>
           </div>
           <div class="ai-chat-header-actions">
             <el-popover
@@ -1302,20 +1301,22 @@
               popper-class="ai-help-popover"
             >
               <template #reference>
-                <button class="ai-help-button" type="button" title="AI 规则和信息范围">?</button>
+                <button class="ai-help-button" type="button" title="AI 助手会怎样处理">?</button>
               </template>
               <div class="ai-help-content">
-                <div class="ai-help-title">AI 规则和信息范围</div>
-                <ul>
-                  <li>只会生成“创建任务”和“修改任务详情”两类指令。</li>
-                  <li>不会删除任务、标记完成、修改每日安排、时间格子或习惯。</li>
-                  <li>所有指令必须等本轮输出结束后，在卡片列表里单独选择执行或取消。</li>
-                  <li>会读取本轮请求、最近最多 20 条聊天/审批结果、当前时间/时区，以及最多 200 条未完成时间线任务。</li>
-                  <li>任务字段包括 id、标题、科目、截止时间、优先级、备注、状态和任务池。</li>
-                  <li>普通 DDL 任务没有截止时间时会显示在“待安排DDL”；AI 创建这类任务会把截止时间留空。</li>
-                  <li>未完成时间线任务超过 200 条时，只给前 200 条详情，同时告诉 AI 有截断；看不到目标时应追问。</li>
-                  <li>不会发送 API Key、登录 token、密码、后台日志或其他用户数据。</li>
-                </ul>
+                <div class="ai-help-title">AI 助手会怎样处理</div>
+                <div class="ai-help-section">
+                  <div class="ai-help-section-title">可以做</div>
+                  <p>创建任务、修改任务详情、总结最近待办。没有截止时间时会显示在“待安排DDL”。</p>
+                </div>
+                <div class="ai-help-section">
+                  <div class="ai-help-section-title">不会做</div>
+                  <p>不会直接执行；不会删除任务、标记完成、修改每日安排、时间格子或习惯。</p>
+                </div>
+                <div class="ai-help-section">
+                  <div class="ai-help-section-title">会参考</div>
+                  <p>当前时间、最近对话、审批结果和未完成任务；不会发送 API Key、登录 token 或密码。</p>
+                </div>
               </div>
             </el-popover>
             <el-button text @click="aiChatOpen = false">收起</el-button>
@@ -1323,7 +1324,9 @@
         </header>
         <div ref="aiChatBody" class="ai-chat-body">
           <div v-if="!aiChatMessages.length" class="ai-chat-empty">
-            例如：创建一个数学作业，明天 23:00 截止；或者把物理作业备注改成复习错题。
+            <div class="ai-empty-example"><span>创建</span>Math Worksheet，Math，明天 12:00，高优先级</div>
+            <div class="ai-empty-example"><span>修改</span>把物理作业截止时间改成明天</div>
+            <div class="ai-empty-example"><span>总结</span>帮我总结最近要做的事</div>
           </div>
           <div
             v-for="(message, index) in aiChatMessages"
@@ -1346,10 +1349,11 @@
             maxlength="2000"
             show-word-limit
             resize="none"
-            placeholder="说出你想创建或修改的任务，Enter 发送，Shift + Enter 换行"
+            placeholder="输入任务需求"
             @keydown="handleAiChatKeydown"
           ></el-input>
           <div class="ai-chat-actions">
+            <span class="ai-chat-shortcut">Enter发送,Shift+Enter换行</span>
             <el-button :disabled="aiChatLoading || !aiChatInput.trim()" type="primary" @click="sendAiMessage">发送</el-button>
           </div>
         </footer>
@@ -1358,10 +1362,15 @@
 
     <el-dialog
       v-model="manageBacDialogVisible"
-      title="同步 ManageBac"
       width="min(96vw, 980px)"
       class="managebac-dialog"
     >
+      <template #header>
+        <div class="managebac-dialog-header">
+          <span>同步 ManageBac</span>
+          <el-button plain size="small" @click="downloadManageBacInstaller">下载安装包</el-button>
+        </div>
+      </template>
       <div class="managebac-sync">
         <section class="managebac-status-panel">
           <div>
@@ -1502,12 +1511,7 @@
           <el-switch v-model="appSettings.showHabitPool" @change="saveAppSettings"></el-switch>
         </div>
       </div>
-      <template #footer>
-        <div class="dialog-footer">
-          <div class="day-subtitle">设置保存在当前浏览器。</div>
-          <el-button type="primary" @click="settingsDialogVisible = false">完成</el-button>
-        </div>
-      </template>
+      <div class="settings-note">修改后立即生效，并保存在当前浏览器。</div>
     </el-dialog>
 
     <el-dialog
@@ -1540,7 +1544,7 @@
                 <h3>{{ action.summary }}</h3>
                 <p v-if="action.type === 'update_task'">目标任务：{{ action.targetTaskTitle }}</p>
               </div>
-              <el-tag :type="aiActionStatusType(action)">{{ aiActionStatusLabel(action) }}</el-tag>
+              <el-tag v-if="aiActionStatus(action) !== 'pending'" :type="aiActionStatusType(action)">{{ aiActionStatusLabel(action) }}</el-tag>
             </header>
 
             <el-form label-position="top" class="ai-approval-form" @submit.prevent>
@@ -1563,13 +1567,32 @@
                     placeholder="备注"
                   ></el-input>
                 </template>
+                <template v-else-if="field.field === 'subject'">
+                  <el-select
+                    v-model="action.draft.subject"
+                    filterable
+                    allow-create
+                    default-first-option
+                    placeholder="选择或输入科目"
+                    class="subject-select"
+                    :class="{ 'ai-edited-field': aiActionFieldChanged(action, field.field) }"
+                    :disabled="aiActionLocked(action)"
+                  >
+                    <el-option
+                      v-for="subject in enabledSubjectOptions"
+                      :key="subject"
+                      :label="subject"
+                      :value="subject"
+                    ></el-option>
+                  </el-select>
+                </template>
                 <template v-else>
                   <el-input
                     v-model="action.draft[field.field]"
                     :class="{ 'ai-edited-field': aiActionFieldChanged(action, field.field) }"
                     :disabled="aiActionLocked(action)"
-                    :maxlength="field.field === 'title' ? 80 : (field.field === 'subject' ? 40 : undefined)"
-                    :show-word-limit="field.field === 'title' || field.field === 'subject'"
+                    :maxlength="field.field === 'title' ? 80 : undefined"
+                    :show-word-limit="field.field === 'title'"
                     :placeholder="field.field === 'dueAt' ? '留空则放入待安排DDL，或 YYYY-MM-DDTHH:mm:00' : field.label"
                   ></el-input>
                 </template>

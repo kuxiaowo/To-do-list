@@ -19,7 +19,7 @@ from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from ai_prompts import AI_CHAT_SYSTEM_PROMPT, AI_REPAIR_SYSTEM_PROMPT, AI_STREAM_SYSTEM_PROMPT
 
@@ -83,6 +83,7 @@ AVATAR_EXTENSIONS = {'png', 'jpg', 'jpeg', 'webp'}
 DEFAULT_AVATAR_COLOR = '#6366f1'
 STATIC_FILE_PATHS = {'/index.html', '/app.js', '/style.css'}
 STATIC_DIRECTORY_PREFIXES = ('/vendor/', '/assets/')
+MANAGEBAC_HELPER_DIR = BASE_DIR / 'managebac-sync-helper'
 DEFAULT_SUBJECTS = [
     'Chinese',
     'Mathematics',
@@ -95,6 +96,19 @@ DEFAULT_SUBJECTS = [
     'Biology',
     'Computer Science',
 ]
+AI_SUBJECT_ALIASES = {
+    'Chinese': ['chinese', '中文', '语文', '汉语'],
+    'Mathematics': ['mathematics', 'math', 'maths', '数学'],
+    'English B': ['english b', 'english', '英语'],
+    'IELTS': ['ielts', '雅思'],
+    'Physics': ['physics', '物理'],
+    'Economics': ['economics', 'econ', '经济', '经济学'],
+    'Chemistry': ['chemistry', '化学'],
+    'Psychology': ['psychology', '心理', '心理学'],
+    'Biology': ['biology', '生物'],
+    'Computer Science': ['computer science', 'computer', 'cs', '计算机', '计算机科学', '电脑'],
+}
+
 
 # Weekday keys follow JavaScript Date.getDay(): 0 is Sunday, 1 is Monday.
 # The frontend also keeps a fallback copy, but this server-side value is the
@@ -608,7 +622,7 @@ def is_valid_ai_due_at(value: str) -> bool:
         return False
 
 
-def normalize_ai_task_fields(raw: object, *, partial: bool) -> tuple[dict | None, str | None]:
+def normalize_ai_task_fields(raw: object, *, partial: bool, subject_names: list[str] | None = None) -> tuple[dict | None, str | None]:
     if not isinstance(raw, dict):
         return None, 'task fields must be an object'
     unsupported = sorted(set(raw) - AI_TASK_FIELDS)
@@ -630,7 +644,7 @@ def normalize_ai_task_fields(raw: object, *, partial: bool) -> tuple[dict | None
             return None, 'task subject is required'
         if len(subject) > 40:
             return None, 'task subject is too long'
-        fields['subject'] = subject
+        fields['subject'] = match_existing_subject(subject, subject_names or [])
 
     if not partial or 'dueAt' in raw:
         due_at = str(raw.get('dueAt', '') or '').strip()
@@ -639,7 +653,9 @@ def normalize_ai_task_fields(raw: object, *, partial: bool) -> tuple[dict | None
         fields['dueAt'] = due_at
 
     if not partial or 'priority' in raw:
-        priority = str(raw.get('priority', 'medium') or 'medium').strip()
+        priority = str(raw.get('priority', '') or '').strip()
+        if not priority:
+            return None, 'task priority is required'
         if priority not in {'high', 'medium', 'low'}:
             return None, 'invalid task priority'
         fields['priority'] = priority
@@ -667,7 +683,7 @@ def ai_task_summary(task: dict) -> str:
     return f"{task.get('title', '')} / {task.get('subject', '')} / {ai_due_label(task.get('dueAt', ''))} / {ai_priority_label(task.get('priority', 'medium'))}"
 
 
-def normalize_ai_actions(raw_actions: object, tasks: list[dict]) -> tuple[list[dict], list[dict]]:
+def normalize_ai_actions(raw_actions: object, tasks: list[dict], subject_names: list[str] | None = None) -> tuple[list[dict], list[dict]]:
     if raw_actions is None:
         return [], []
     if not isinstance(raw_actions, list):
@@ -682,7 +698,7 @@ def normalize_ai_actions(raw_actions: object, tasks: list[dict]) -> tuple[list[d
             continue
         action_type = str(raw_action.get('type', '') or '').strip()
         if action_type == 'create_task':
-            fields, error = normalize_ai_task_fields(raw_action.get('task'), partial=False)
+            fields, error = normalize_ai_task_fields(raw_action.get('task'), partial=False, subject_names=subject_names)
             if error:
                 rejected.append({'index': index, 'reason': error})
                 continue
@@ -704,7 +720,7 @@ def normalize_ai_actions(raw_actions: object, tasks: list[dict]) -> tuple[list[d
             if existing.get('pool') in {'habit', 'schedule'}:
                 rejected.append({'index': index, 'reason': 'habit or schedule tasks cannot be updated by AI'})
                 continue
-            patch, error = normalize_ai_task_fields(raw_action.get('patch'), partial=True)
+            patch, error = normalize_ai_task_fields(raw_action.get('patch'), partial=True, subject_names=subject_names)
             if error:
                 rejected.append({'index': index, 'reason': error})
                 continue
@@ -906,6 +922,58 @@ def parse_subject_template(raw_json: str | None) -> list[dict]:
         return default_subject_template()
     subjects, error = normalize_subject_template(payload)
     return default_subject_template() if error else subjects
+
+
+def subject_match_key(value: str) -> str:
+    return ''.join(ch for ch in str(value or '').casefold() if ch.isalnum())
+
+
+def enabled_subject_names(subjects: list[dict]) -> list[str]:
+    names: list[str] = []
+    seen = set()
+    for item in subjects:
+        if not isinstance(item, dict) or not item.get('enabled', True):
+            continue
+        name = str(item.get('name', '')).strip()
+        key = subject_match_key(name)
+        if name and key not in seen:
+            names.append(name)
+            seen.add(key)
+    return names
+
+
+def get_subject_template_for_user(conn: sqlite3.Connection, user_id: int) -> list[dict]:
+    row = conn.execute(
+        'SELECT subjects_json FROM subject_templates WHERE user_id = ?',
+        (user_id,),
+    ).fetchone()
+    return parse_subject_template(row['subjects_json'] if row else None)
+
+
+def ai_subject_context(subject_names: list[str]) -> dict:
+    return {
+        'subjectTemplate': {
+            'availableSubjects': list(subject_names),
+            'matchingPolicy': '用户明确提供科目后，先匹配 availableSubjects；匹配成功时使用已有科目的原始名称；没有匹配时保留用户原话；不要从任务内容自行推断科目。',
+        },
+    }
+
+
+def match_existing_subject(subject: str, subject_names: list[str]) -> str:
+    subject = str(subject or '').strip()
+    key = subject_match_key(subject)
+    if not key:
+        return subject
+    for name in subject_names:
+        if subject_match_key(name) == key:
+            return name
+    for canonical, aliases in AI_SUBJECT_ALIASES.items():
+        if key not in {subject_match_key(alias) for alias in aliases}:
+            continue
+        for name in subject_names:
+            if subject_match_key(name) == subject_match_key(canonical):
+                return name
+    return subject
 
 
 def minutes_between(start: str, end: str) -> int:
@@ -1497,12 +1565,35 @@ def is_allowed_static_path(path: str) -> bool:
     )
 
 
+def find_managebac_installer() -> Path | None:
+    direct_exes = sorted(MANAGEBAC_HELPER_DIR.glob('*.exe'))
+    if len(direct_exes) == 1:
+        return direct_exes[0]
+
+    dist_dir = MANAGEBAC_HELPER_DIR / 'dist'
+    setup_exes = sorted(
+        path
+        for path in dist_dir.glob('*.exe')
+        if 'setup' in path.name.lower()
+    )
+    if len(setup_exes) == 1:
+        return setup_exes[0]
+
+    dist_exes = sorted(dist_dir.glob('*.exe'))
+    if len(dist_exes) == 1:
+        return dist_exes[0]
+
+    return None
+
+
 class TodoHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(BASE_DIR), **kwargs)
 
     def do_GET(self):
         path = urlparse(self.path).path
+        if path == '/api/managebac-helper/installer':
+            return self.handle_managebac_installer(send_body=True)
         if path.startswith('/uploads/avatars/'):
             return self.handle_avatar_file(path, send_body=True)
         if path.startswith('/api/admin/'):
@@ -1534,6 +1625,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
 
     def do_HEAD(self):
         path = urlparse(self.path).path
+        if path == '/api/managebac-helper/installer':
+            return self.handle_managebac_installer(send_body=False)
         if path.startswith('/uploads/avatars/'):
             return self.handle_avatar_file(path, send_body=False)
         if not is_allowed_static_path(path):
@@ -1652,6 +1745,29 @@ class TodoHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         if send_body:
             self.wfile.write(raw)
+
+    def handle_managebac_installer(self, send_body: bool = True):
+        file_path = find_managebac_installer()
+        if not file_path or not file_path.is_file():
+            self.send_error(HTTPStatus.NOT_FOUND, 'ManageBac installer not found')
+            return
+        try:
+            size = file_path.stat().st_size
+            source = file_path.open('rb') if send_body else None
+        except OSError:
+            self.send_error(HTTPStatus.NOT_FOUND, 'ManageBac installer not found')
+            return
+        filename = file_path.name
+        ascii_name = ''.join(ch if 32 <= ord(ch) < 127 and ch not in {'"', '\\'} else '_' for ch in filename)
+        self.send_response(HTTPStatus.OK)
+        self.send_header('Content-Type', 'application/vnd.microsoft.portable-executable')
+        self.send_header('Content-Length', str(size))
+        self.send_header('Content-Disposition', f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(filename)}")
+        self.send_header('Cache-Control', 'no-store')
+        self.end_headers()
+        if source:
+            with source:
+                self.copyfile(source, self.wfile)
 
     def current_user(self):
         """Resolve the bearer token and slide the session expiration forward."""
@@ -1777,12 +1893,13 @@ class TodoHandler(SimpleHTTPRequestHandler):
         self.record_ai_usage_for_user(user_id, call_type, getattr(self, '_last_deepseek_usage', None))
         return content
 
-    def build_ai_messages(self, message: str, history: list[dict], tasks: list[dict], client_now: str, timezone_name: str) -> list[dict]:
+    def build_ai_messages(self, message: str, history: list[dict], tasks: list[dict], client_now: str, timezone_name: str, subject_names: list[str] | None = None) -> list[dict]:
         _, task_context = ai_context_tasks(tasks)
         context = {
             'clientNow': client_now,
             'timezone': timezone_name,
             'request': message,
+            **ai_subject_context(subject_names or []),
             **task_context,
         }
         return [
@@ -1795,12 +1912,13 @@ class TodoHandler(SimpleHTTPRequestHandler):
             },
         ]
 
-    def build_ai_stream_messages(self, message: str, history: list[dict], tasks: list[dict], client_now: str, timezone_name: str) -> list[dict]:
+    def build_ai_stream_messages(self, message: str, history: list[dict], tasks: list[dict], client_now: str, timezone_name: str, subject_names: list[str] | None = None) -> list[dict]:
         _, task_context = ai_context_tasks(tasks)
         context = {
             'clientNow': client_now,
             'timezone': timezone_name,
             'request': message,
+            **ai_subject_context(subject_names or []),
             **task_context,
         }
         return [
@@ -1862,12 +1980,14 @@ class TodoHandler(SimpleHTTPRequestHandler):
         original_reply: str,
         raw_actions: object,
         rejected_actions: list[dict],
+        subject_names: list[str] | None = None,
     ) -> list[dict]:
         _, task_context = ai_context_tasks(tasks)
         context = {
             'clientNow': client_now,
             'timezone': timezone_name,
             'request': message,
+            **ai_subject_context(subject_names or []),
             **task_context,
             'originalReply': original_reply,
             'originalActions': raw_actions if isinstance(raw_actions, list) else [],
@@ -1899,6 +2019,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
         original_reply: str,
         raw_actions: object,
         rejected_actions: list[dict],
+        subject_names: list[str] | None = None,
     ) -> tuple[str, list[dict], list[dict]] | None:
         if not rejected_actions:
             return None
@@ -1911,6 +2032,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
             original_reply,
             raw_actions,
             rejected_actions,
+            subject_names or [],
         )
         self.ensure_ai_token_available(user_id)
         content = self.call_deepseek_chat_recorded(repair_messages, user_id, 'repair')
@@ -1919,7 +2041,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return None
         visible_tasks, _ = ai_context_tasks(tasks)
         repair_reply = str(repair_payload.get('reply', '') or '').strip()
-        repair_actions, repair_rejected = normalize_ai_actions(repair_payload.get('actions'), visible_tasks)
+        repair_actions, repair_rejected = normalize_ai_actions(repair_payload.get('actions'), visible_tasks, subject_names or [])
         if not repair_reply:
             repair_reply = '我还需要更明确的信息。' if not repair_actions else '我修正好了可审批的操作。'
         return repair_reply[:2000], repair_actions, repair_rejected
@@ -3010,8 +3132,9 @@ class TodoHandler(SimpleHTTPRequestHandler):
         history = self.normalize_ai_history(payload.get('history'))
         with get_db() as conn:
             tasks = self.fetch_tasks_for_user(conn, int(user['id']))
+            subject_names = enabled_subject_names(get_subject_template_for_user(conn, int(user['id'])))
 
-        messages = self.build_ai_messages(message, history, tasks, client_now, timezone_name)
+        messages = self.build_ai_messages(message, history, tasks, client_now, timezone_name, subject_names)
         try:
             content = self.call_deepseek_chat_recorded(messages, int(user['id']), 'chat')
         except ValueError:
@@ -3039,7 +3162,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
         reply = str(ai_payload.get('reply', '') or '').strip()
         visible_tasks, _ = ai_context_tasks(tasks)
         raw_actions = ai_payload.get('actions')
-        actions, rejected = normalize_ai_actions(raw_actions, visible_tasks)
+        actions, rejected = normalize_ai_actions(raw_actions, visible_tasks, subject_names)
         if not reply:
             reply = '我整理好了可审批的操作。' if actions else '我还需要更明确的信息。'
         if rejected:
@@ -3054,6 +3177,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
                     reply,
                     raw_actions,
                     rejected,
+                    subject_names,
                 )
             except RuntimeError as error:
                 repaired = None
@@ -3096,8 +3220,9 @@ class TodoHandler(SimpleHTTPRequestHandler):
         history = self.normalize_ai_history(payload.get('history'))
         with get_db() as conn:
             tasks = self.fetch_tasks_for_user(conn, int(user['id']))
+            subject_names = enabled_subject_names(get_subject_template_for_user(conn, int(user['id'])))
 
-        messages = self.build_ai_stream_messages(message, history, tasks, client_now, timezone_name)
+        messages = self.build_ai_stream_messages(message, history, tasks, client_now, timezone_name, subject_names)
         self.start_sse()
         full_content = ''
         visible_buffer = ''
@@ -3135,7 +3260,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
             )
             reply, raw_actions, parse_error = parse_ai_stream_content(full_content)
             visible_tasks, _ = ai_context_tasks(tasks)
-            actions, rejected = normalize_ai_actions(raw_actions, visible_tasks)
+            actions, rejected = normalize_ai_actions(raw_actions, visible_tasks, subject_names)
             if parse_error:
                 rejected.append({'index': 0, 'reason': parse_error})
             if not reply:
@@ -3152,6 +3277,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
                         reply,
                         raw_actions,
                         rejected,
+                        subject_names,
                     )
                 except RuntimeError as error:
                     repaired = None

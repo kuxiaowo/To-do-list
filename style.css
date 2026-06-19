@@ -347,6 +347,13 @@ body {
   line-height: 1.45;
 }
 
+.settings-note {
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 0.86rem;
+  line-height: 1.5;
+}
+
 .auth-title-row {
   display: flex;
   justify-content: space-between;
@@ -1454,7 +1461,9 @@ body {
 .feedback-quick-action {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 8px;
+  flex-wrap: wrap;
 }
 
 .feedback-quick-action .el-button {
@@ -1903,6 +1912,16 @@ body.is-schedule-touch-dragging * {
   padding-top: 8px;
 }
 
+.managebac-dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-right: 30px;
+  color: var(--text-strong);
+  font-weight: 800;
+}
+
 .managebac-sync {
   display: flex;
   flex-direction: column;
@@ -2120,14 +2139,21 @@ body.is-schedule-touch-dragging * {
   font-weight: 800;
 }
 
-.ai-help-content ul {
+.ai-help-section {
   display: grid;
-  gap: 6px;
-  margin: 0;
-  padding-left: 18px;
+  gap: 3px;
+  padding: 8px 0;
+  border-top: 1px solid var(--line);
 }
 
-.ai-help-content li {
+.ai-help-section-title {
+  color: var(--text-strong);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.ai-help-section p {
+  margin: 0;
   color: var(--note);
   font-size: 12px;
   line-height: 1.45;
@@ -2142,9 +2168,23 @@ body.is-schedule-touch-dragging * {
 }
 
 .ai-chat-empty {
+  display: grid;
+  gap: 8px;
   color: var(--muted);
   font-size: 13px;
   line-height: 1.6;
+}
+
+.ai-empty-example {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+}
+
+.ai-empty-example span {
+  color: var(--brand);
+  font-weight: 800;
 }
 
 .ai-chat-message {
@@ -2204,8 +2244,17 @@ body.is-schedule-touch-dragging * {
 
 .ai-chat-actions {
   display: flex;
+  align-items: center;
+  gap: 10px;
   justify-content: flex-end;
   margin-top: 10px;
+}
+
+.ai-chat-shortcut {
+  margin-right: auto;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .ai-approval {
