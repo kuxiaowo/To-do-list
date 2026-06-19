@@ -1,6 +1,7 @@
-const { app, BrowserWindow, dialog, session, shell } = require("electron");
+const { app, BrowserWindow, dialog, session, shell, Tray, Menu, nativeImage } = require("electron");
 const http = require("node:http");
 const crypto = require("node:crypto");
+const path = require("node:path");
 const { URL } = require("node:url");
 
 const { parseManageBacTasks } = require("./managebacParser");
@@ -14,11 +15,23 @@ const PARTITION = "persist:managebac-sync-helper";
 const TOKEN_TTL_MS = 10 * 60 * 1000;
 const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36";
+const APP_DISPLAY_NAME = "nethub.wiki ManageBac 同步辅助程序";
 
 const clientSessions = new Map();
 let server;
 let loginWindow;
+let tray;
+let trayStatusTimer;
+let manageBacStatusText = "ManageBac：正在检查";
+let isQuitting = false;
 let protocolRegistered = false;
+let protocolRegistration = {
+  status: "checking",
+  repaired: false,
+  error: ""
+};
+
+app.setAppUserModelId("cn.managebac.sync.helper");
 
 function configuredOrigins() {
   const configured = String(process.env.MANAGEBAC_ALLOWED_ORIGINS || "")
@@ -75,9 +88,49 @@ function isTasksPage(html) {
     /<title[^>]*>\s*ManageBac\s*\|\s*Tasks\s*&amp;\s*Deadlines\s*<\/title>/i.test(html);
 }
 
+function getErrorMessage(error) {
+  return error && error.message ? error.message : String(error || "");
+}
+
 function registerProtocol() {
-  if (!app.isPackaged) return false;
-  return app.setAsDefaultProtocolClient(PROTOCOL);
+  if (!app.isPackaged) {
+    protocolRegistration = {
+      status: "development",
+      repaired: false,
+      error: ""
+    };
+    return false;
+  }
+
+  let wasDefault = false;
+  try {
+    wasDefault = app.isDefaultProtocolClient(PROTOCOL);
+  } catch (_error) {
+    wasDefault = false;
+  }
+
+  let setResult = false;
+  let error = "";
+  try {
+    setResult = app.setAsDefaultProtocolClient(PROTOCOL);
+  } catch (registrationError) {
+    error = getErrorMessage(registrationError);
+  }
+
+  let isDefault = false;
+  try {
+    isDefault = app.isDefaultProtocolClient(PROTOCOL);
+  } catch (statusError) {
+    if (!error) error = getErrorMessage(statusError);
+  }
+
+  const registered = Boolean(isDefault || setResult);
+  protocolRegistration = {
+    status: registered ? (wasDefault ? "registered" : "updated") : "failed",
+    repaired: registered && !wasDefault,
+    error
+  };
+  return registered;
 }
 
 function findProtocolUrl(argv) {
@@ -96,6 +149,147 @@ function handleProtocolUrl(rawUrl) {
   }
 }
 
+function getAssetPath(fileName) {
+  const assetDir = app.isPackaged
+    ? path.join(process.resourcesPath, "assets")
+    : path.join(__dirname, "..", "assets");
+  return path.join(assetDir, fileName);
+}
+
+function protocolStatusText() {
+  if (!app.isPackaged) return "协议：开发模式未注册";
+  if (protocolRegistered) {
+    return protocolRegistration.repaired
+      ? "协议：managebac-sync:// 已覆盖注册"
+      : "协议：managebac-sync:// 已注册";
+  }
+  return protocolRegistration.error ? "协议：注册失败" : "协议：未注册";
+}
+
+function setTrayMenu() {
+  if (!tray) return;
+  tray.setToolTip([
+    APP_DISPLAY_NAME,
+    manageBacStatusText,
+    `本地接口：http://${HOST}:${PORT}`
+  ].join("\n"));
+  tray.setContextMenu(Menu.buildFromTemplate([
+    {
+      label: APP_DISPLAY_NAME,
+      enabled: false
+    },
+    {
+      label: "状态：Helper 已运行",
+      enabled: false
+    },
+    {
+      label: manageBacStatusText,
+      enabled: false
+    },
+    {
+      label: `本地接口：${HOST}:${PORT}`,
+      enabled: false
+    },
+    {
+      label: protocolStatusText(),
+      enabled: false
+    },
+    { type: "separator" },
+    {
+      label: "刷新状态",
+      click: () => refreshTrayStatus()
+    },
+    {
+      label: "打开登录窗口",
+      click: () => createLoginWindow()
+    },
+    {
+      label: "应用说明与安全性",
+      click: () => showSecurityInfo()
+    },
+    { type: "separator" },
+    {
+      label: "退出",
+      click: () => quitApp()
+    }
+  ]));
+}
+
+async function refreshTrayStatus() {
+  try {
+    const status = await getCookieStatus();
+    manageBacStatusText = status.hasManageBacSession
+      ? `ManageBac：已检测到登录 cookie（${status.cookieCount || 0} 个）`
+      : "ManageBac：未登录";
+  } catch (_error) {
+    manageBacStatusText = "ManageBac：状态检查失败";
+  }
+  setTrayMenu();
+}
+
+function showSecurityInfo() {
+  dialog.showMessageBox({
+    type: "info",
+    title: `关于 ${APP_DISPLAY_NAME}`,
+    message: APP_DISPLAY_NAME,
+    detail: [
+      "这是 nethub.wiki 的 ManageBac 本地同步辅助程序，用于打开 ManageBac 登录窗口并解析任务预览。",
+      "",
+      "安全说明：",
+      "- 不读取、不保存 ManageBac 账号密码。",
+      "- 登录窗口直接访问 ManageBac，账号密码提交给 ManageBac。",
+      "- 只在本机保存 Helper 自己的 ManageBac 登录 cookie，用于维持登录状态。",
+      "- 不读取 Chrome 或 Edge 浏览器 cookie。",
+      "- 不把 cookie 发送给网站；网站只接收解析后的任务预览数据。",
+      "- 本地接口只监听 127.0.0.1，并使用短期访问令牌。",
+      "",
+      "实现说明：",
+      "- 网页通过 managebac-sync://wake 唤起本程序；程序启动后在系统托盘常驻。",
+      "- 本程序只在本机开启 127.0.0.1 HTTP API，供网页检查状态、打开登录窗口、获取任务预览。",
+      "- 登录窗口由本程序内置浏览器打开 ManageBac 页面，登录 cookie 存在本程序独立的 Electron 存储分区。",
+      "- 抓取任务时，本程序使用自己的 cookie 请求 ManageBac 任务页，并在本机解析为任务列表。",
+      "- 网页只负责展示预览和确认导入；科目识别、导入规则和最终写入由网页端处理。",
+      "- 安装时会注册 managebac-sync:// 协议；启动时会校验并覆盖旧路径；卸载时会清理该协议注册。",
+      "",
+      `本地接口：http://${HOST}:${PORT}`,
+      protocolStatusText()
+    ].join("\n"),
+    buttons: ["知道了"]
+  }).catch(() => {});
+}
+
+function createTray() {
+  if (tray) return;
+  const iconPath = getAssetPath("icon.ico");
+  const icon = nativeImage.createFromPath(iconPath);
+  tray = new Tray(icon.isEmpty() ? iconPath : icon.resize({ width: 16, height: 16 }));
+  setTrayMenu();
+  refreshTrayStatus();
+  trayStatusTimer = setInterval(refreshTrayStatus, 30 * 1000);
+  tray.on("double-click", () => createLoginWindow());
+}
+
+function quitApp() {
+  isQuitting = true;
+  if (trayStatusTimer) {
+    clearInterval(trayStatusTimer);
+    trayStatusTimer = null;
+  }
+  if (tray) {
+    tray.destroy();
+    tray = null;
+  }
+  if (loginWindow && !loginWindow.isDestroyed()) {
+    loginWindow.destroy();
+    loginWindow = null;
+  }
+  if (server) {
+    server.close();
+    server = null;
+  }
+  app.quit();
+}
+
 function createLoginWindow() {
   if (loginWindow && !loginWindow.isDestroyed()) {
     loginWindow.focus();
@@ -105,7 +299,8 @@ function createLoginWindow() {
   loginWindow = new BrowserWindow({
     width: 1160,
     height: 840,
-    title: "ManageBac Login",
+    title: `ManageBac 登录 - ${APP_DISPLAY_NAME}`,
+    icon: getAssetPath("icon.ico"),
     webPreferences: {
       partition: PARTITION,
       contextIsolation: true,
@@ -298,6 +493,9 @@ async function handleRequest(req, res) {
         version: app.getVersion(),
         protocol: PROTOCOL,
         protocolRegistered,
+        protocolStatus: protocolRegistration.status,
+        protocolRepaired: protocolRegistration.repaired,
+        protocolError: protocolRegistration.error || null,
         port: PORT
       });
       return;
@@ -359,15 +557,15 @@ function startLocalServer() {
   });
   server.on("error", (error) => {
     if (error.code === "EADDRINUSE") {
-      dialog.showErrorBox("ManageBac Sync Helper", `127.0.0.1:${PORT} 已被占用，Helper 无法启动。`);
+      dialog.showErrorBox(APP_DISPLAY_NAME, `127.0.0.1:${PORT} 已被占用，Helper 无法启动。`);
       app.quit();
       return;
     }
-    dialog.showErrorBox("ManageBac Sync Helper", error.message || String(error));
+    dialog.showErrorBox(APP_DISPLAY_NAME, error.message || String(error));
     app.quit();
   });
   server.listen(PORT, HOST, () => {
-    console.log(`ManageBac Sync Helper is running at http://${HOST}:${PORT}`);
+    console.log(`${APP_DISPLAY_NAME} is running at http://${HOST}:${PORT}`);
     console.log("Keep this process open while testing the website sync flow.");
     if (!app.isPackaged) {
       console.log("Development mode does not register managebac-sync://wake. Start this helper manually before testing.");
@@ -385,12 +583,18 @@ if (!gotLock) {
 
   app.whenReady().then(() => {
     protocolRegistered = registerProtocol();
+    createTray();
     startLocalServer();
     handleProtocolUrl(findProtocolUrl(process.argv));
   });
 }
 
 app.on("before-quit", () => {
+  isQuitting = true;
+  if (trayStatusTimer) {
+    clearInterval(trayStatusTimer);
+    trayStatusTimer = null;
+  }
   if (server) {
     server.close();
     server = null;
@@ -398,5 +602,5 @@ app.on("before-quit", () => {
 });
 
 app.on("window-all-closed", (event) => {
-  event.preventDefault();
+  if (!isQuitting) event.preventDefault();
 });

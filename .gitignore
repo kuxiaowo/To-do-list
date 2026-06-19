@@ -1,3 +1,4 @@
 /data/
 .env
 /managebac-sync-helper/node_modules/
+/managebac-sync-helper/dist/
