@@ -424,6 +424,14 @@ class ServerRegressionTests(unittest.TestCase):
             self.assertIn('subjectTemplate.availableSubjects', prompt)
             self.assertIn('不要因为任务内容或标题自行推断科目', prompt)
 
+    def test_ai_prompts_allow_summary_without_actions(self):
+        for prompt in [server.AI_CHAT_SYSTEM_PROMPT, server.AI_STREAM_SYSTEM_PROMPT]:
+            self.assertIn('总结任务、梳理待办、解释当前安排', prompt)
+            self.assertIn('actions 返回 []', prompt)
+            self.assertIn('只能生成 create_task 或 update_task', prompt)
+        self.assertIn('总结、解释或追问', server.AI_REPAIR_SYSTEM_PROMPT)
+        self.assertIn('不要为了修正而编造动作', server.AI_REPAIR_SYSTEM_PROMPT)
+
     def test_ai_create_task_requires_explicit_priority(self):
         actions, rejected = server.normalize_ai_actions([
             {
