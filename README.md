@@ -27,10 +27,12 @@
 
 ```text
 .
-├── index.html           # 前端页面结构
-├── style.css            # 页面样式
-├── app.js               # Vue 应用逻辑
-├── vendor/              # Vue 和 Element Plus 本地依赖
+├── web/                 # 前端静态文件根目录
+│   ├── index.html       # 前端页面结构
+│   ├── style.css        # 页面样式
+│   ├── app.js           # Vue 应用逻辑
+│   ├── vendor/          # Vue 和 Element Plus 本地依赖
+│   └── assets/          # 图标等静态资源
 ├── server.py            # 静态文件服务、API 服务和 SQLite 初始化
 ├── managebac-sync-helper/ # ManageBac 本地 Helper
 ├── deploy-first-run.sh  # Linux 首次部署脚本
@@ -262,13 +264,13 @@ data/todo-list.db
 
 项目没有打包步骤。修改前端文件后刷新浏览器即可查看效果；修改后端文件后通常需要重启 `server.py`。
 
-前端依赖已放在 `vendor/` 目录：
+前端依赖已放在 `web/vendor/` 目录：
 
-- `vendor/vue.global.prod.js`
-- `vendor/element-plus.full.min.js`
-- `vendor/element-plus.css`
+- `web/vendor/vue.global.prod.js`
+- `web/vendor/element-plus.full.min.js`
+- `web/vendor/element-plus.css`
 
-因此部署环境不需要访问外部 CDN。以后升级 Vue 或 Element Plus 时，替换 `vendor/` 中对应文件即可。
+因此部署环境不需要访问外部 CDN。以后升级 Vue 或 Element Plus 时，替换 `web/vendor/` 中对应文件即可。
 
 ## 许可证
 

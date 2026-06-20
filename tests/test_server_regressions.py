@@ -15,6 +15,11 @@ from pathlib import Path
 
 import server
 
+WEB_DIR = Path('web')
+INDEX_HTML_PATH = WEB_DIR / 'index.html'
+APP_JS_PATH = WEB_DIR / 'app.js'
+STYLE_CSS_PATH = WEB_DIR / 'style.css'
+
 
 class ServerRegressionTests(unittest.TestCase):
     def setUp(self):
@@ -112,6 +117,16 @@ class ServerRegressionTests(unittest.TestCase):
         })
         self.assertEqual(status, 200, payload)
         return payload['token'], payload['user']
+
+    def test_static_files_are_served_from_web_directory(self):
+        status, headers, body = self.raw_request('GET', '/')
+        self.assertEqual(status, 200)
+        self.assertIn(b'app.js', body)
+        self.assertIn(b'style.css', body)
+
+        status, headers, body = self.raw_request('GET', '/app.js')
+        self.assertEqual(status, 200)
+        self.assertIn(b'MANAGEBAC_INSTALLER_DOWNLOAD_URL', body)
 
     def make_admin(self, user_id):
         conn = server.get_db()
@@ -1575,7 +1590,7 @@ class ServerRegressionTests(unittest.TestCase):
         self.assertEqual(users_by_id[student['id']]['avatarColor'], '#123abc')
 
     def test_frontend_uses_due_date_task_grouping(self):
-        app_js = Path('app.js').read_text(encoding='utf-8')
+        app_js = APP_JS_PATH.read_text(encoding='utf-8')
         self.assertIn('todoTasksByDueDate()', app_js)
         self.assertIn('const tasks = this.todoTasksByDueDate[key] || []', app_js)
         self.assertIn('return this.todoTasksByDueDate[key] || []', app_js)
@@ -1585,16 +1600,16 @@ class ServerRegressionTests(unittest.TestCase):
         )
 
     def test_ai_frontend_explains_unscheduled_ddl_placement(self):
-        index_html = Path('index.html').read_text(encoding='utf-8')
-        app_js = Path('app.js').read_text(encoding='utf-8')
+        index_html = INDEX_HTML_PATH.read_text(encoding='utf-8')
+        app_js = APP_JS_PATH.read_text(encoding='utf-8')
 
         self.assertIn('没有截止时间时会显示在“待安排DDL”', index_html)
         self.assertIn('留空则放入待安排DDL', index_html)
         self.assertIn(": '待安排DDL'", app_js)
 
     def test_ai_frontend_entry_only_renders_on_ddl_page(self):
-        index_html = Path('index.html').read_text(encoding='utf-8')
-        app_js = Path('app.js').read_text(encoding='utf-8')
+        index_html = INDEX_HTML_PATH.read_text(encoding='utf-8')
+        app_js = APP_JS_PATH.read_text(encoding='utf-8')
 
         self.assertIn('v-if="showAiAssistant"', index_html)
         self.assertIn("return !this.adminMode && this.activePage === 'ddl' && this.appSettings.aiEnabled;", app_js)
@@ -1602,7 +1617,7 @@ class ServerRegressionTests(unittest.TestCase):
         self.assertIn("if (page !== 'ddl') this.aiChatOpen = false;", app_js)
 
     def test_ai_approval_subject_uses_template_select(self):
-        index_html = Path('index.html').read_text(encoding='utf-8')
+        index_html = INDEX_HTML_PATH.read_text(encoding='utf-8')
 
         self.assertIn("field.field === 'subject'", index_html)
         self.assertIn('v-model="action.draft.subject"', index_html)
@@ -1611,8 +1626,8 @@ class ServerRegressionTests(unittest.TestCase):
         self.assertIn('placeholder="选择或输入科目"', index_html)
 
     def test_ai_approval_does_not_show_pending_status_text(self):
-        index_html = Path('index.html').read_text(encoding='utf-8')
-        app_js = Path('app.js').read_text(encoding='utf-8')
+        index_html = INDEX_HTML_PATH.read_text(encoding='utf-8')
+        app_js = APP_JS_PATH.read_text(encoding='utf-8')
 
         self.assertIn('aiActionStatus(action) !== \'pending\'', index_html)
         self.assertIn('>取消</el-button>', index_html)
@@ -1621,9 +1636,9 @@ class ServerRegressionTests(unittest.TestCase):
         self.assertNotIn('未处理', app_js)
 
     def test_frontend_settings_control_ai_and_pool_visibility(self):
-        index_html = Path('index.html').read_text(encoding='utf-8')
-        app_js = Path('app.js').read_text(encoding='utf-8')
-        style_css = Path('style.css').read_text(encoding='utf-8')
+        index_html = INDEX_HTML_PATH.read_text(encoding='utf-8')
+        app_js = APP_JS_PATH.read_text(encoding='utf-8')
+        style_css = STYLE_CSS_PATH.read_text(encoding='utf-8')
 
         self.assertIn('APP_SETTINGS_STORAGE_KEY', app_js)
         self.assertIn('todo-list-app-settings-v1', app_js)
@@ -1642,9 +1657,9 @@ class ServerRegressionTests(unittest.TestCase):
         self.assertIn('.settings-row', style_css)
 
     def test_admin_user_list_renders_avatar_column(self):
-        index_html = Path('index.html').read_text(encoding='utf-8')
-        app_js = Path('app.js').read_text(encoding='utf-8')
-        style_css = Path('style.css').read_text(encoding='utf-8')
+        index_html = INDEX_HTML_PATH.read_text(encoding='utf-8')
+        app_js = APP_JS_PATH.read_text(encoding='utf-8')
+        style_css = STYLE_CSS_PATH.read_text(encoding='utf-8')
 
         self.assertIn('label="头像"', index_html)
         self.assertIn(':data="paginatedAdminUsers"', index_html)
@@ -1664,9 +1679,9 @@ class ServerRegressionTests(unittest.TestCase):
         self.assertIn('border-radius: 50%;', style_css)
 
     def test_admin_ai_usage_frontend_scaffold(self):
-        index_html = Path('index.html').read_text(encoding='utf-8')
-        app_js = Path('app.js').read_text(encoding='utf-8')
-        style_css = Path('style.css').read_text(encoding='utf-8')
+        index_html = INDEX_HTML_PATH.read_text(encoding='utf-8')
+        app_js = APP_JS_PATH.read_text(encoding='utf-8')
+        style_css = STYLE_CSS_PATH.read_text(encoding='utf-8')
 
         self.assertIn("adminSection === 'aiUsage'", index_html)
         self.assertIn('Token 使用情况', index_html)
@@ -1681,9 +1696,9 @@ class ServerRegressionTests(unittest.TestCase):
         self.assertIn('.ai-user-limit-editor', style_css)
 
     def test_admin_installer_download_frontend_scaffold(self):
-        index_html = Path('index.html').read_text(encoding='utf-8')
-        app_js = Path('app.js').read_text(encoding='utf-8')
-        style_css = Path('style.css').read_text(encoding='utf-8')
+        index_html = INDEX_HTML_PATH.read_text(encoding='utf-8')
+        app_js = APP_JS_PATH.read_text(encoding='utf-8')
+        style_css = STYLE_CSS_PATH.read_text(encoding='utf-8')
 
         self.assertIn("adminSection === 'installerDownloads'", index_html)
         self.assertIn('下载统计', index_html)

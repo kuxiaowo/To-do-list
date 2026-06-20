@@ -25,6 +25,7 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 from ai_prompts import AI_CHAT_SYSTEM_PROMPT, AI_REPAIR_SYSTEM_PROMPT, AI_STREAM_SYSTEM_PROMPT
 
 BASE_DIR = Path(__file__).resolve().parent
+WEB_DIR = BASE_DIR / 'web'
 
 
 def load_dotenv(path: Path | None = None, *, override: bool = False) -> None:
@@ -1917,7 +1918,7 @@ def generate_managebac_oss_installer_url(config: ManageBacOssInstallerConfig) ->
 
 class TodoHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, directory=str(BASE_DIR), **kwargs)
+        super().__init__(*args, directory=str(WEB_DIR), **kwargs)
 
     def do_GET(self):
         path = urlparse(self.path).path
