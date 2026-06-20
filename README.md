@@ -34,6 +34,7 @@
 ├── server.py            # 静态文件服务、API 服务和 SQLite 初始化
 ├── managebac-sync-helper/ # ManageBac 本地 Helper
 ├── deploy-first-run.sh  # Linux 首次部署脚本
+├── .env.example         # 环境变量示例
 ├── API.md               # API 接口文档
 ├── LICENSE              # MIT 许可证
 ├── .gitignore           # 忽略 data/ 运行时数据目录
@@ -63,14 +64,20 @@ http://127.0.0.1:8092
 
 可通过 `.env` 或环境变量修改监听地址、端口和 AI 配置。项目启动时会自动读取根目录下的 `.env`，且不会覆盖已经存在的系统环境变量。
 
-`.env` 示例：
+可以从示例文件复制一份本地配置：
+
+```bash
+cp .env.example .env
+```
+
+然后按需修改 `.env`。示例内容：
 
 ```env
 TODO_HOST=127.0.0.1
 TODO_PORT=8092
 DEEPSEEK_API_KEY=your-deepseek-api-key
 DEEPSEEK_MODEL=deepseek-v4-flash
-DEEPSEEK_TIMEOUT_SECONDS=60
+DEEPSEEK_TIMEOUT_SECONDS=20
 ```
 
 本机访问通常使用：
@@ -96,6 +103,7 @@ http://localhost:8092
 
 ```bash
 cd /root/To-do-list
+cp .env.example .env
 nano .env
 ```
 
@@ -106,7 +114,7 @@ TODO_HOST=127.0.0.1
 TODO_PORT=8092
 DEEPSEEK_API_KEY=your-deepseek-api-key
 DEEPSEEK_MODEL=deepseek-v4-flash
-DEEPSEEK_TIMEOUT_SECONDS=60
+DEEPSEEK_TIMEOUT_SECONDS=20
 ```
 
 如果已经用 Caddy 或 Nginx 反代，`TODO_HOST` 建议保持 `127.0.0.1`，不要开放 Python 服务到公网。
@@ -147,12 +155,28 @@ TODO_ADMIN_PASSWORD='change-this-password' \
 ./deploy-first-run.sh
 ```
 
-这些管理员环境变量需要在运行脚本前提供；再次运行脚本时，如果昵称已存在，会把该账号更新为管理员并重设密码。
+也可以把管理员初始化配置写进 `.env`：
+
+```env
+TODO_ADMIN_NICKNAME=admin
+TODO_ADMIN_NAME=管理员
+TODO_ADMIN_PASSWORD=change-this-password
+```
+
+`deploy-first-run.sh` 初始化数据库时会导入 `server.py`，而 `server.py` 会读取 `.env`，所以这些管理员变量可以从 `.env` 生效。再次运行脚本时，如果昵称已存在，会把该账号更新为管理员并重设密码。
+
+如果只设置了 `TODO_ADMIN_NICKNAME` 或只设置了 `TODO_ADMIN_PASSWORD`，脚本会报错退出；两者需要同时设置。部署完成后建议从 `.env` 中移除明文管理员密码，别把钥匙挂门口，风一吹大家都知道。
 
 其他环境变量：
 
 - `TODO_SERVICE_NAME`：systemd 用户服务名，默认 `todo-list.service`。
 - `TODO_PORT`：只用于脚本最后输出访问地址提示；实际监听端口由 `.env`、外部环境变量或程序默认值决定。
+
+注意：`TODO_SERVICE_NAME` 是 shell 脚本开头读取的变量，不会通过 `.env` 生效。如需自定义服务名，请在运行脚本时直接传入：
+
+```bash
+TODO_SERVICE_NAME=my-todo-list.service ./deploy-first-run.sh
+```
 
 脚本生成的用户服务默认位置：
 
