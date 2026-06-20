@@ -19,6 +19,12 @@ Authorization: Bearer <token>
 
 未登录访问部分读取接口时会返回只读空数据；写入、更新和删除接口必须登录。
 
+请求体约束：
+
+- JSON 请求体顶层必须是对象。
+- 单个 JSON 请求体最大 5 MiB；头像上传的 base64 内容也包含在这个限制内。
+- 未匹配的 `/api/...` 路径会返回 JSON 404，而不是 HTML 错误页。
+
 通用错误响应：
 
 ```json
@@ -61,9 +67,13 @@ Authorization: Bearer <token>
 
 说明：
 
+- `id` 最长 128 个字符；创建任务时不传则由后端生成。
+- `title` 必填，最长 120 个字符。
+- `subject` 必填，最长 40 个字符；值可以来自科目模板，也可以是用户自定义文本。
 - `priority` 可选值：`high`、`medium`、`low`。
-- `dueAt` 为空字符串时表示未排期任务。
-- `subject` 当前前端要求必填，后端保存为空字符串也兼容。
+- `dueAt` 为空字符串时表示未排期任务；非空时必须使用 `YYYY-MM-DDTHH:mm:ss`。
+- `note` 最长 4000 个字符。
+- `completed` 必须是 JSON 布尔值。
 
 ### ScheduleItem
 
@@ -364,7 +374,7 @@ POST /api/tasks
 状态码：
 
 - `201 Created`：创建成功。
-- `400 Bad Request`：标题缺失或优先级非法。
+- `400 Bad Request`：标题或科目缺失、字段超长、`dueAt` 格式非法、`priority` / `pool` 非法，或 `completed` 不是布尔值。
 - `401 Unauthorized`：未登录。
 - `409 Conflict`：任务 id 已存在。
 
@@ -388,7 +398,7 @@ PUT /api/tasks/{id}
 状态码：
 
 - `200 OK`：更新成功。
-- `400 Bad Request`：标题缺失或优先级非法。
+- `400 Bad Request`：标题或科目缺失、字段超长、`dueAt` 格式非法、`priority` / `pool` 非法，或 `completed` 不是布尔值。
 - `401 Unauthorized`：未登录。
 - `404 Not Found`：任务不存在或不属于当前用户。
 
@@ -822,6 +832,156 @@ DELETE /api/feedback/{id}
 ```
 
 说明：只能删除当前登录用户自己的反馈。
+
+## AI 助手接口
+
+AI 助手只生成待审批指令，不会在 `/api/ai/...` 接口中直接写入任务。客户端审批执行时仍调用普通任务接口，因此任务接口的后端校验是最终兜底。
+
+AI 上下文只包含当前用户未完成的 `pool=todo` 任务，最多返回给模型 200 条；如果实际数量超过 200，响应上下文中的 `taskSelection.truncated` 会提示模型追问用户缩小范围。
+
+### 非流式聊天
+
+```http
+POST /api/ai/chat
+Authorization: Bearer <token>
+Content-Type: application/json
+```
+
+请求：
+
+```json
+{
+  "message": "帮我创建一个数学任务，低优先级，先放到待安排DDL",
+  "history": [
+    { "role": "user", "content": "上一轮用户消息" },
+    { "role": "assistant", "content": "上一轮助手回复" }
+  ],
+  "clientNow": "2026-06-20T12:00:00.000Z",
+  "timezone": "Asia/Shanghai"
+}
+```
+
+响应：
+
+```json
+{
+  "ok": true,
+  "reply": "给用户看的回复",
+  "actions": [
+    {
+      "id": "ai-action-1",
+      "type": "create_task",
+      "summary": "创建任务：完成练习 / Mathematics / 待安排DDL / 低",
+      "task": {
+        "title": "完成练习",
+        "subject": "Mathematics",
+        "dueAt": "",
+        "priority": "low",
+        "note": ""
+      }
+    }
+  ],
+  "rejectedActions": []
+}
+```
+
+状态码：
+
+- `200 OK`：AI 返回已处理；`actions` 仍需客户端审批后再执行。
+- `400 Bad Request`：请求体非法、`message` 缺失或超过 2000 字符。
+- `401 Unauthorized`：未登录。
+- `429 Too Many Requests`：达到当前用户 AI token 限制。
+- `502 Bad Gateway`：DeepSeek 请求失败。
+- `503 Service Unavailable`：未配置 `DEEPSEEK_API_KEY`。
+
+### 流式聊天
+
+```http
+POST /api/ai/chat-stream
+Authorization: Bearer <token>
+Content-Type: application/json
+```
+
+请求体同 `/api/ai/chat`。响应使用 Server-Sent Events：
+
+```text
+event: delta
+data: {"text":"我先整理一下..."}
+
+event: done
+data: {"reply":"完整回复","actions":[],"rejectedActions":[]}
+```
+
+错误会以 SSE `error` 事件返回：
+
+```text
+event: error
+data: {"error":"DeepSeek request failed","message":"..."}
+```
+
+### AI 动作格式
+
+服务端只接受两类动作：
+
+- `create_task`：只能包含 `title`、`subject`、`dueAt`、`priority`、`note`，且最终创建为 `pool=todo`。
+- `update_task`：只能修改上下文中已有任务的 `title`、`subject`、`dueAt`、`priority`、`note`。
+
+服务端会拒绝删除任务、标记完成、修改每日安排、修改习惯、写入未知字段、使用上下文外任务 id、超长字段或非法日期。被拒绝的动作会出现在 `rejectedActions` 中；后端会尝试用修复提示让模型重新生成安全动作。
+
+## 管理员 AI Token 统计与限制
+
+以下接口都要求管理员登录。
+
+### 获取 AI 用量统计
+
+```http
+GET /api/admin/ai-usage/summary?view=7d&page=1&pageSize=50
+Authorization: Bearer <token>
+```
+
+`view` 可选：`6h`、`1d`、`7d`、`30d`。响应包含全局限制、趋势数据、当前页用户的有效限制和滚动窗口用量。
+
+### 更新全局限制
+
+```http
+PUT /api/admin/ai-usage/global-limit
+Authorization: Bearer <token>
+Content-Type: application/json
+```
+
+请求：
+
+```json
+{
+  "windowHours": 24,
+  "inputTokenLimit": 200000,
+  "outputTokenLimit": 50000
+}
+```
+
+### 更新或清除用户限制
+
+```http
+PUT /api/admin/users/{userId}/ai-token-limit
+DELETE /api/admin/users/{userId}/ai-token-limit
+```
+
+`PUT` 请求体同全局限制；`DELETE` 会让该用户重新使用全局限制。
+
+### 清除全部用户覆盖
+
+```http
+POST /api/admin/ai-usage/clear-user-limits
+```
+
+响应：
+
+```json
+{
+  "ok": true,
+  "deleted": 3
+}
+```
 
 ## 健康检查
 

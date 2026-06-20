@@ -103,6 +103,12 @@ AI_ACTION_LIMIT = 10
 AI_HISTORY_LIMIT = 20
 AI_CONTEXT_TASK_LIMIT = 200
 AI_TASK_FIELDS = {'title', 'subject', 'dueAt', 'priority', 'note'}
+MAX_JSON_BODY_BYTES = 5 * 1024 * 1024
+MAX_TASK_ID_LENGTH = 128
+MAX_TASK_TITLE_LENGTH = 120
+MAX_TASK_SUBJECT_LENGTH = 40
+MAX_TASK_DUE_AT_LENGTH = 32
+MAX_TASK_NOTE_LENGTH = 4000
 HABIT_SYNC_FUTURE_DAYS = 90
 MAX_HABIT_SYNC_FUTURE_DAYS = 365
 MAX_AVATAR_BYTES = 2 * 1024 * 1024
@@ -569,6 +575,28 @@ def init_db() -> None:
             conn.execute("ALTER TABLE tasks ADD COLUMN pool TEXT NOT NULL DEFAULT 'todo'")
         conn.execute('UPDATE tasks SET user_id = 1 WHERE user_id IS NULL OR user_id = 0')
         conn.execute("UPDATE tasks SET pool = 'todo' WHERE pool IS NULL OR pool = ''")
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_tasks_user_due_priority ON tasks(user_id, due_at, priority)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_tasks_user_pool_due ON tasks(user_id, pool, due_at)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_tasks_user_pool_completed_due ON tasks(user_id, pool, completed, due_at)')
+        conn.execute(
+            '''
+            CREATE INDEX IF NOT EXISTS idx_tasks_user_ai_context_order
+            ON tasks(
+                user_id,
+                pool,
+                completed,
+                due_at,
+                CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END,
+                title COLLATE NOCASE
+            )
+            '''
+        )
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_schedule_items_user_date_slot ON schedule_items(user_id, schedule_date, slot_key)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_schedule_items_user_task ON schedule_items(user_id, task_id)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_schedule_items_user_habit_date ON schedule_items(user_id, habit_id, schedule_date)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_habits_user_active_archived ON habits(user_id, active, archived)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_operation_logs_target_created ON operation_logs(target_user_id, created_at)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_feedback_user_created ON feedback(user_id, created_at)')
         conn.commit()
 
 
@@ -669,18 +697,13 @@ def compact_task_for_ai(task: dict) -> dict:
     }
 
 
-def ai_context_tasks(tasks: list[dict]) -> tuple[list[dict], dict]:
-    timeline_tasks = [
-        task for task in tasks
-        if not bool(task.get('completed')) and task.get('pool', 'todo') == 'todo'
-    ]
-    included_tasks = timeline_tasks[:AI_CONTEXT_TASK_LIMIT]
-    omitted_count = max(0, len(timeline_tasks) - len(included_tasks))
-    return included_tasks, {
+def ai_task_context_payload(included_tasks: list[dict], total_timeline_task_count: int) -> dict:
+    omitted_count = max(0, int(total_timeline_task_count) - len(included_tasks))
+    return {
         'taskSelection': {
             'status': 'incomplete_timeline_only',
             'pool': 'todo',
-            'totalIncompleteTimelineTaskCount': len(timeline_tasks),
+            'totalIncompleteTimelineTaskCount': int(total_timeline_task_count),
             'includedTaskCount': len(included_tasks),
             'omittedIncompleteTimelineTaskCount': omitted_count,
             'truncated': omitted_count > 0,
@@ -697,10 +720,32 @@ def ai_context_tasks(tasks: list[dict]) -> tuple[list[dict], dict]:
     }
 
 
+def ai_context_tasks(tasks: list[dict]) -> tuple[list[dict], dict]:
+    timeline_tasks = [
+        task for task in tasks
+        if not bool(task.get('completed')) and task.get('pool', 'todo') == 'todo'
+    ]
+    included_tasks = timeline_tasks[:AI_CONTEXT_TASK_LIMIT]
+    return included_tasks, ai_task_context_payload(included_tasks, len(timeline_tasks))
+
+
 def is_valid_ai_due_at(value: str) -> bool:
     if value == '':
         return True
     if not value.endswith(':00'):
+        return False
+    try:
+        datetime.strptime(value, '%Y-%m-%dT%H:%M:%S')
+        return True
+    except ValueError:
+        return False
+
+
+def is_valid_task_due_at(value: str) -> bool:
+    value = str(value or '').strip()
+    if value == '':
+        return True
+    if len(value) > MAX_TASK_DUE_AT_LENGTH:
         return False
     try:
         datetime.strptime(value, '%Y-%m-%dT%H:%M:%S')
@@ -1944,6 +1989,9 @@ def generate_managebac_oss_installer_url(config: ManageBacOssInstallerConfig) ->
 
 
 class TodoHandler(SimpleHTTPRequestHandler):
+    server_version = 'TodoListHTTP/1.0'
+    sys_version = ''
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(WEB_DIR), **kwargs)
 
@@ -2019,6 +2067,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return self.handle_create_habit()
         if path == '/api/feedback':
             return self.handle_create_feedback()
+        if path.startswith('/api/'):
+            return self.write_json({'error': 'not found'}, status=HTTPStatus.NOT_FOUND)
         self.send_error(HTTPStatus.NOT_FOUND, 'Not found')
 
     def do_PUT(self):
@@ -2058,6 +2108,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return self.handle_update_subject_template()
         if path.startswith('/api/schedule-day-slots/'):
             return self.handle_update_schedule_day_slots(path.rsplit('/', 1)[-1])
+        if path.startswith('/api/'):
+            return self.write_json({'error': 'not found'}, status=HTTPStatus.NOT_FOUND)
         self.send_error(HTTPStatus.NOT_FOUND, 'Not found')
 
     def do_DELETE(self):
@@ -2085,6 +2137,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return self.handle_reset_schedule_config()
         if path.startswith('/api/schedule-day-slots/'):
             return self.handle_reset_schedule_day(path.rsplit('/', 1)[-1])
+        if path.startswith('/api/'):
+            return self.write_json({'error': 'not found'}, status=HTTPStatus.NOT_FOUND)
         self.send_error(HTTPStatus.NOT_FOUND, 'Not found')
 
     def handle_avatar_file(self, path: str, send_body: bool = True):
@@ -2143,6 +2197,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
                     status=HTTPStatus.BAD_GATEWAY,
                 )
             with get_db() as conn:
+                conn.execute('BEGIN IMMEDIATE')
                 limit_status = installer_download_limit_status(conn, user_id)
                 if limit_status['exceeded']:
                     return self.write_json(installer_download_limit_error(limit_status), status=HTTPStatus.TOO_MANY_REQUESTS)
@@ -2181,6 +2236,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
             )
         filename = file_path.name
         with get_db() as conn:
+            conn.execute('BEGIN IMMEDIATE')
             limit_status = installer_download_limit_status(conn, user_id)
             if limit_status['exceeded']:
                 source.close()
@@ -2294,6 +2350,33 @@ class TodoHandler(SimpleHTTPRequestHandler):
         ).fetchall()
         return [public_task(row) for row in rows]
 
+    def fetch_ai_context_tasks_for_user(self, conn: sqlite3.Connection, user_id: int) -> tuple[list[dict], dict]:
+        total_row = conn.execute(
+            '''
+            SELECT COUNT(*) AS total
+            FROM tasks
+            WHERE user_id = ? AND pool = 'todo' AND completed = 0
+            ''',
+            (user_id,),
+        ).fetchone()
+        total_count = int(total_row['total'] or 0)
+        rows = conn.execute(
+            '''
+            SELECT id, user_id, title, subject, due_at, pool, priority, note, completed, created_at, updated_at
+            FROM tasks
+            WHERE user_id = ? AND pool = 'todo' AND completed = 0
+            ORDER BY due_at ASC, CASE priority
+                WHEN 'high' THEN 0
+                WHEN 'medium' THEN 1
+                ELSE 2
+            END ASC, title COLLATE NOCASE ASC
+            LIMIT ?
+            ''',
+            (user_id, AI_CONTEXT_TASK_LIMIT),
+        ).fetchall()
+        included_tasks = [public_task(row) for row in rows]
+        return included_tasks, ai_task_context_payload(included_tasks, total_count)
+
     def normalize_ai_history(self, raw_history: object) -> list[dict]:
         if not isinstance(raw_history, list):
             return []
@@ -2328,8 +2411,18 @@ class TodoHandler(SimpleHTTPRequestHandler):
         self.record_ai_usage_for_user(user_id, call_type, getattr(self, '_last_deepseek_usage', None))
         return content
 
-    def build_ai_messages(self, message: str, history: list[dict], tasks: list[dict], client_now: str, timezone_name: str, subject_names: list[str] | None = None) -> list[dict]:
-        _, task_context = ai_context_tasks(tasks)
+    def build_ai_messages(
+        self,
+        message: str,
+        history: list[dict],
+        tasks: list[dict],
+        client_now: str,
+        timezone_name: str,
+        subject_names: list[str] | None = None,
+        task_context: dict | None = None,
+    ) -> list[dict]:
+        if task_context is None:
+            _, task_context = ai_context_tasks(tasks)
         context = {
             'clientNow': client_now,
             'timezone': timezone_name,
@@ -2347,8 +2440,18 @@ class TodoHandler(SimpleHTTPRequestHandler):
             },
         ]
 
-    def build_ai_stream_messages(self, message: str, history: list[dict], tasks: list[dict], client_now: str, timezone_name: str, subject_names: list[str] | None = None) -> list[dict]:
-        _, task_context = ai_context_tasks(tasks)
+    def build_ai_stream_messages(
+        self,
+        message: str,
+        history: list[dict],
+        tasks: list[dict],
+        client_now: str,
+        timezone_name: str,
+        subject_names: list[str] | None = None,
+        task_context: dict | None = None,
+    ) -> list[dict]:
+        if task_context is None:
+            _, task_context = ai_context_tasks(tasks)
         context = {
             'clientNow': client_now,
             'timezone': timezone_name,
@@ -2416,8 +2519,10 @@ class TodoHandler(SimpleHTTPRequestHandler):
         raw_actions: object,
         rejected_actions: list[dict],
         subject_names: list[str] | None = None,
+        task_context: dict | None = None,
     ) -> list[dict]:
-        _, task_context = ai_context_tasks(tasks)
+        if task_context is None:
+            _, task_context = ai_context_tasks(tasks)
         context = {
             'clientNow': client_now,
             'timezone': timezone_name,
@@ -2455,6 +2560,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
         raw_actions: object,
         rejected_actions: list[dict],
         subject_names: list[str] | None = None,
+        task_context: dict | None = None,
     ) -> tuple[str, list[dict], list[dict]] | None:
         if not rejected_actions:
             return None
@@ -2468,13 +2574,14 @@ class TodoHandler(SimpleHTTPRequestHandler):
             raw_actions,
             rejected_actions,
             subject_names or [],
+            task_context,
         )
         self.ensure_ai_token_available(user_id)
         content = self.call_deepseek_chat_recorded(repair_messages, user_id, 'repair')
         repair_payload, parse_error = parse_ai_json_content(content)
         if parse_error:
             return None
-        visible_tasks, _ = ai_context_tasks(tasks)
+        visible_tasks = tasks
         repair_reply = str(repair_payload.get('reply', '') or '').strip()
         repair_actions, repair_rejected = normalize_ai_actions(repair_payload.get('actions'), visible_tasks, subject_names or [])
         if not repair_reply:
@@ -3798,10 +3905,18 @@ class TodoHandler(SimpleHTTPRequestHandler):
         timezone_name = str(payload.get('timezone', 'Asia/Shanghai') or 'Asia/Shanghai').strip()[:64]
         history = self.normalize_ai_history(payload.get('history'))
         with get_db() as conn:
-            tasks = self.fetch_tasks_for_user(conn, int(user['id']))
+            tasks, task_context = self.fetch_ai_context_tasks_for_user(conn, int(user['id']))
             subject_names = enabled_subject_names(get_subject_template_for_user(conn, int(user['id'])))
 
-        messages = self.build_ai_messages(message, history, tasks, client_now, timezone_name, subject_names)
+        messages = self.build_ai_messages(
+            message,
+            history,
+            tasks,
+            client_now,
+            timezone_name,
+            subject_names,
+            task_context=task_context,
+        )
         try:
             content = self.call_deepseek_chat_recorded(messages, int(user['id']), 'chat')
         except ValueError:
@@ -3845,6 +3960,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
                     raw_actions,
                     rejected,
                     subject_names,
+                    task_context=task_context,
                 )
             except RuntimeError as error:
                 repaired = None
@@ -3886,10 +4002,18 @@ class TodoHandler(SimpleHTTPRequestHandler):
         timezone_name = str(payload.get('timezone', 'Asia/Shanghai') or 'Asia/Shanghai').strip()[:64]
         history = self.normalize_ai_history(payload.get('history'))
         with get_db() as conn:
-            tasks = self.fetch_tasks_for_user(conn, int(user['id']))
+            tasks, task_context = self.fetch_ai_context_tasks_for_user(conn, int(user['id']))
             subject_names = enabled_subject_names(get_subject_template_for_user(conn, int(user['id'])))
 
-        messages = self.build_ai_stream_messages(message, history, tasks, client_now, timezone_name, subject_names)
+        messages = self.build_ai_stream_messages(
+            message,
+            history,
+            tasks,
+            client_now,
+            timezone_name,
+            subject_names,
+            task_context=task_context,
+        )
         self.start_sse()
         full_content = ''
         visible_buffer = ''
@@ -3926,7 +4050,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
                 getattr(self, '_last_deepseek_stream_usage', None),
             )
             reply, raw_actions, parse_error = parse_ai_stream_content(full_content)
-            visible_tasks, _ = ai_context_tasks(tasks)
+            visible_tasks = tasks
             actions, rejected = normalize_ai_actions(raw_actions, visible_tasks, subject_names)
             if parse_error:
                 rejected.append({'index': 0, 'reason': parse_error})
@@ -3945,6 +4069,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
                         raw_actions,
                         rejected,
                         subject_names,
+                        task_context=task_context,
                     )
                 except RuntimeError as error:
                     repaired = None
@@ -4027,11 +4152,25 @@ class TodoHandler(SimpleHTTPRequestHandler):
     def validate_task_payload(self, payload: dict, user_id: int, task_id: str | None = None):
         if not isinstance(payload, dict):
             return None, {'error': 'task must be an object'}
+        if 'completed' in payload and not isinstance(payload.get('completed'), bool):
+            return None, {'error': 'completed must be a boolean'}
         task = normalize_task({**payload, 'id': task_id or payload.get('id', '')}, user_id)
         if not task['id']:
             task['id'] = f"task-{int(time.time() * 1000)}-{secrets.token_hex(4)}"
+        if len(task['id']) > MAX_TASK_ID_LENGTH:
+            return None, {'error': 'task id is too long'}
         if not task['title']:
             return None, {'error': 'task title is required'}
+        if len(task['title']) > MAX_TASK_TITLE_LENGTH:
+            return None, {'error': 'task title is too long'}
+        if not task['subject']:
+            return None, {'error': 'subject is required'}
+        if len(task['subject']) > MAX_TASK_SUBJECT_LENGTH:
+            return None, {'error': 'subject is too long'}
+        if not is_valid_task_due_at(task['dueAt']):
+            return None, {'error': 'dueAt must be empty or YYYY-MM-DDTHH:mm:ss'}
+        if len(task['note']) > MAX_TASK_NOTE_LENGTH:
+            return None, {'error': 'note is too long'}
         if task['priority'] not in {'high', 'medium', 'low'}:
             return None, {'error': 'invalid priority'}
         if task['pool'] not in {'todo', 'arrangement', 'habit', 'schedule'}:
@@ -4169,6 +4308,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
     def normalize_habit_payload(self, payload: dict, user_id: int, habit_id: str | None = None):
         if not isinstance(payload, dict):
             return None, {'error': 'habit must be an object'}
+        if 'active' in payload and not isinstance(payload.get('active'), bool):
+            return None, {'error': 'active must be a boolean'}
         title = str(payload.get('title', '')).strip()
         subject = str(payload.get('subject', '')).strip()
         priority = str(payload.get('priority', 'medium')).strip() or 'medium'
@@ -4923,6 +5064,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
                     'sortOrder': existing['sort_order'],
                     'note': note,
                 }
+            if 'completed' in payload and not isinstance(payload.get('completed'), bool):
+                return self.write_json({'error': 'completed must be a boolean'}, status=HTTPStatus.BAD_REQUEST)
             completed = bool(payload.get('completed')) if 'completed' in payload else bool(existing['completed'])
             conn.execute(
                 """
@@ -5316,12 +5459,30 @@ class TodoHandler(SimpleHTTPRequestHandler):
             length = int(self.headers.get('Content-Length', '0'))
         except ValueError:
             return self.write_json({'error': 'invalid content length'}, status=HTTPStatus.BAD_REQUEST)
+        if length < 0:
+            return self.write_json({'error': 'invalid content length'}, status=HTTPStatus.BAD_REQUEST)
+        if length > MAX_JSON_BODY_BYTES:
+            self.close_connection = True
+            return self.write_json(
+                {'error': 'request body too large', 'maxBytes': MAX_JSON_BODY_BYTES},
+                status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+            )
         raw = self.rfile.read(length) if length > 0 else b''
         try:
-            return json.loads(raw.decode('utf-8') or '{}')
+            payload = json.loads(raw.decode('utf-8') or '{}')
         except json.JSONDecodeError:
             self.write_json({'error': 'invalid json'}, status=HTTPStatus.BAD_REQUEST)
             return None
+        if not isinstance(payload, dict):
+            self.write_json({'error': 'json body must be an object'}, status=HTTPStatus.BAD_REQUEST)
+            return None
+        return payload
+
+    def end_headers(self):
+        self.send_header('X-Content-Type-Options', 'nosniff')
+        self.send_header('Referrer-Policy', 'same-origin')
+        self.send_header('X-Frame-Options', 'DENY')
+        super().end_headers()
 
     def write_json(self, payload: dict, status: HTTPStatus = HTTPStatus.OK):
         body = json.dumps(payload, ensure_ascii=False).encode('utf-8')

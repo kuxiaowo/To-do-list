@@ -44,11 +44,13 @@ Helper 本地 API 只监听：
 127.0.0.1:27654
 ```
 
-默认允许本地开发网站：
+默认允许本地开发网站和正式站点：
 
 ```text
 http://localhost:8092
 http://127.0.0.1:8092
+https://nethub.wiki
+https://www.nethub.wiki
 ```
 
 远程网站上线时，需要在 Helper 运行环境中配置：

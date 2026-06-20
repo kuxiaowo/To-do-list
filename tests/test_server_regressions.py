@@ -123,10 +123,61 @@ class ServerRegressionTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn(b'app.js', body)
         self.assertIn(b'style.css', body)
+        self.assertEqual(headers.get('X-Content-Type-Options'), 'nosniff')
+        self.assertEqual(headers.get('X-Frame-Options'), 'DENY')
 
         status, headers, body = self.raw_request('GET', '/app.js')
         self.assertEqual(status, 200)
         self.assertIn(b'MANAGEBAC_INSTALLER_DOWNLOAD_URL', body)
+
+    def test_json_body_validation_and_api_not_found_contract(self):
+        status, payload = self.request('POST', '/api/auth/register', [])
+        self.assertEqual(status, 400, payload)
+        self.assertEqual(payload['error'], 'json body must be an object')
+
+        original_limit = server.MAX_JSON_BODY_BYTES
+        server.MAX_JSON_BODY_BYTES = 64
+        try:
+            status, payload = self.request('POST', '/api/auth/register', {
+                'name': 'Body Limit',
+                'nickname': 'body-limit',
+                'password': 'secret123',
+                'padding': 'x' * 100,
+            })
+        finally:
+            server.MAX_JSON_BODY_BYTES = original_limit
+        self.assertEqual(status, 413, payload)
+        self.assertEqual(payload['error'], 'request body too large')
+
+        status, payload = self.request('POST', '/api/no-such-endpoint', {})
+        self.assertEqual(status, 404, payload)
+        self.assertEqual(payload['error'], 'not found')
+
+    def test_task_payload_rejects_invalid_backend_only_values(self):
+        token, _ = self.register_user('task-validation')
+        valid_task = {
+            'id': 'task-validation-1',
+            'title': 'Valid task',
+            'subject': 'Math',
+            'dueAt': '2026-06-20T23:59:00',
+            'pool': 'todo',
+            'priority': 'medium',
+            'note': '',
+            'completed': False,
+        }
+
+        cases = [
+            ({**valid_task, 'id': 'task-title-too-long', 'title': 'x' * (server.MAX_TASK_TITLE_LENGTH + 1)}, 'task title is too long'),
+            ({**valid_task, 'id': 'task-subject-required', 'subject': ''}, 'subject is required'),
+            ({**valid_task, 'id': 'task-subject-too-long', 'subject': 'x' * (server.MAX_TASK_SUBJECT_LENGTH + 1)}, 'subject is too long'),
+            ({**valid_task, 'id': 'task-invalid-due', 'dueAt': 'not-a-date'}, 'dueAt must be empty or YYYY-MM-DDTHH:mm:ss'),
+            ({**valid_task, 'id': 'task-string-completed', 'completed': 'false'}, 'completed must be a boolean'),
+        ]
+        for payload, error in cases:
+            with self.subTest(error=error):
+                status, body = self.request('POST', '/api/tasks', payload, token=token)
+                self.assertEqual(status, 400, body)
+                self.assertEqual(body['error'], error)
 
     def make_admin(self, user_id):
         conn = server.get_db()
@@ -292,6 +343,27 @@ class ServerRegressionTests(unittest.TestCase):
         self.assertIn('taskPlacement', context)
         self.assertIn('待安排DDL', context_json)
         self.assertIn('dueAt 为空字符串', context_json)
+
+    def test_fetch_ai_context_tasks_uses_database_limit_and_truncation(self):
+        token, user = self.register_user('ai-context-query')
+        limit = server.AI_CONTEXT_TASK_LIMIT
+        for index in range(limit + 3):
+            self.insert_task_direct(user['id'], f'ai-visible-{index:03d}', f'Visible {index:03d}')
+        self.insert_task_direct(user['id'], 'ai-completed', 'Completed', completed=True)
+        self.insert_task_direct(user['id'], 'ai-arrangement', 'Arrangement', pool='arrangement')
+
+        with server.get_db() as conn:
+            tasks, context = server.TodoHandler.fetch_ai_context_tasks_for_user(None, conn, user['id'])
+
+        self.assertEqual(len(tasks), limit)
+        self.assertTrue(all(task['pool'] == 'todo' and not task['completed'] for task in tasks))
+        self.assertEqual(context['taskSelection']['totalIncompleteTimelineTaskCount'], limit + 3)
+        self.assertEqual(context['taskSelection']['includedTaskCount'], limit)
+        self.assertEqual(context['taskSelection']['omittedIncompleteTimelineTaskCount'], 3)
+        self.assertTrue(context['taskSelection']['truncated'])
+        context_json = json.dumps(context, ensure_ascii=False)
+        self.assertNotIn('ai-completed', context_json)
+        self.assertNotIn('ai-arrangement', context_json)
 
     def test_ai_prompts_explain_unscheduled_ddl_placement(self):
         prompts = [
@@ -1371,6 +1443,57 @@ class ServerRegressionTests(unittest.TestCase):
                 sys.modules.pop('alibabacloud_oss_v2', None)
             else:
                 sys.modules['alibabacloud_oss_v2'] = original_module
+
+    def test_installer_download_limit_is_atomic_for_concurrent_oss_requests(self):
+        student_token, student = self.register_user('installer-race-student')
+        admin_token, admin = self.register_user('installer-race-admin')
+        self.make_admin(admin['id'])
+
+        status, body = self.request('PUT', '/api/admin/installer-downloads/global-limit', {
+            'windowHours': 24,
+            'linkLimit': 1,
+        }, token=admin_token)
+        self.assertEqual(status, 200, body)
+
+        config = server.ManageBacOssInstallerConfig(
+            access_key_id='ak',
+            access_key_secret='secret',
+            region='cn-test',
+            bucket='todolis-oss',
+            key='managebac-sync-helper/latest.exe',
+            endpoint='',
+            expires_seconds=60,
+            filename='ManageBac Helper.exe',
+        )
+        original_get_config = server.get_managebac_oss_installer_config
+        original_generate = server.generate_managebac_oss_installer_url
+        generate_barrier = threading.Barrier(2)
+
+        def fake_generate(_config):
+            try:
+                generate_barrier.wait(timeout=3)
+            except threading.BrokenBarrierError:
+                pass
+            return 'https://signed.example/managebac-sync-helper/latest.exe'
+
+        try:
+            server.get_managebac_oss_installer_config = lambda: config
+            server.generate_managebac_oss_installer_url = fake_generate
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                futures = [
+                    executor.submit(self.request, 'GET', '/api/managebac-helper/installer', token=student_token),
+                    executor.submit(self.request, 'GET', '/api/managebac-helper/installer', token=student_token),
+                ]
+                results = [future.result(timeout=10) for future in futures]
+        finally:
+            server.get_managebac_oss_installer_config = original_get_config
+            server.generate_managebac_oss_installer_url = original_generate
+
+        self.assertEqual(sorted(status for status, _body in results), [200, 429], results)
+        rows = self.installer_download_rows()
+        self.assertEqual(len(rows), 1, results)
+        self.assertEqual(rows[0]['user_id'], student['id'])
+        self.assertEqual(rows[0]['source'], 'oss')
 
     def test_ai_usage_admin_endpoints_require_admin(self):
         token, _ = self.register_user('ai-usage-normal-user')

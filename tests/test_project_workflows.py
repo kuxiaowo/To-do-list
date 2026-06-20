@@ -11,6 +11,12 @@ from pathlib import Path
 
 import server
 
+WEB_DIR = Path('web')
+INDEX_HTML_PATH = WEB_DIR / 'index.html'
+APP_JS_PATH = WEB_DIR / 'app.js'
+STYLE_CSS_PATH = WEB_DIR / 'style.css'
+API_DOC_PATH = Path('docs') / 'API.md'
+
 
 class ProjectWorkflowTests(unittest.TestCase):
     def setUp(self):
@@ -432,9 +438,9 @@ class ProjectWorkflowTests(unittest.TestCase):
         self.assertGreaterEqual(payload['totalVisits'], 1)
         self.assertTrue(payload['recentVisits'])
 
-        app_js = Path('app.js').read_text(encoding='utf-8')
-        index_html = Path('index.html').read_text(encoding='utf-8')
-        style_css = Path('style.css').read_text(encoding='utf-8')
+        app_js = APP_JS_PATH.read_text(encoding='utf-8')
+        index_html = INDEX_HTML_PATH.read_text(encoding='utf-8')
+        style_css = STYLE_CSS_PATH.read_text(encoding='utf-8')
         for marker in [
             'settingsDialogVisible',
             'aiApprovalVisible',
@@ -449,7 +455,7 @@ class ProjectWorkflowTests(unittest.TestCase):
         self.assertIn('[data-theme="dark"]', style_css)
 
     def test_api_documentation_mentions_core_endpoints(self):
-        api_doc = Path('API.md').read_text(encoding='utf-8')
+        api_doc = API_DOC_PATH.read_text(encoding='utf-8')
         user_guide = Path('docs/USER_GUIDE.md').read_text(encoding='utf-8')
         deploy_script = Path('deploy-first-run.sh').read_text(encoding='utf-8')
 

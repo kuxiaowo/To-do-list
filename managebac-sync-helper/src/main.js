@@ -5,11 +5,11 @@ const path = require("node:path");
 const { URL } = require("node:url");
 
 const { parseManageBacTasks } = require("./managebacParser");
+const { TARGET_ORIGIN, isAllowedManageBacWindowUrl } = require("./urlPolicy");
 
 const PROTOCOL = "managebac-sync";
 const HOST = "127.0.0.1";
 const PORT = 27654;
-const TARGET_ORIGIN = "https://sdgj.managebac.cn";
 const TASKS_URL = `${TARGET_ORIGIN}/student/tasks_and_deadlines`;
 const PARTITION = "persist:managebac-sync-helper";
 const TOKEN_TTL_MS = 10 * 60 * 1000;
@@ -312,7 +312,7 @@ function createLoginWindow() {
   });
 
   loginWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (url.startsWith(TARGET_ORIGIN) || url.startsWith("https://assets.managebac.cn")) {
+    if (isAllowedManageBacWindowUrl(url)) {
       return { action: "allow" };
     }
     shell.openExternal(url);

@@ -38,7 +38,7 @@
 ├── deploy-first-run.sh  # Linux 首次部署脚本
 ├── requirements.txt     # 可选 OSS 下载依赖
 ├── .env.example         # 环境变量示例
-├── API.md               # API 接口文档
+├── docs/                # API、用户手册和安全说明
 ├── LICENSE              # MIT 许可证
 ├── .gitignore           # 忽略 data/ 运行时数据目录
 └── README.md
@@ -236,11 +236,13 @@ your-domain.com {
 
 ## API 文档
 
-完整接口说明见 [API.md](./API.md)。
+完整接口说明见 [API.md](./docs/API.md)。
 
 面向普通用户和管理员的功能说明见 [用户功能手册](./docs/USER_GUIDE.md)。
 
 ManageBac 本地 Helper 的唤起和本地 API 说明见 [ManageBac 同步接入说明](./docs/MANAGEBAC_SYNC.md)。
+
+安全边界、部署注意事项和已知剩余风险见 [安全说明](./docs/SECURITY.md)。
 
 需要登录的接口通过请求头传入 token：
 
@@ -271,6 +273,16 @@ data/todo-list.db
 - `web/vendor/element-plus.css`
 
 因此部署环境不需要访问外部 CDN。以后升级 Vue 或 Element Plus 时，替换 `web/vendor/` 中对应文件即可。
+
+运行测试：
+
+```powershell
+python -m pytest -q
+cd managebac-sync-helper
+npm test
+```
+
+后端测试会使用随机端口，不占用默认 `8092`。ManageBac Helper 的 `npm test` 只运行解析器单元测试，不启动本地 `27654` API。
 
 ## 许可证
 
