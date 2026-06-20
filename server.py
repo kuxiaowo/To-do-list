@@ -22,10 +22,37 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
-from ai_prompts import AI_CHAT_SYSTEM_PROMPT, AI_REPAIR_SYSTEM_PROMPT, AI_STREAM_SYSTEM_PROMPT
-
 BASE_DIR = Path(__file__).resolve().parent
 WEB_DIR = BASE_DIR / 'web'
+AI_PROMPTS_PATH = BASE_DIR / 'ai_prompts.json'
+AI_PROMPT_KEYS = (
+    'AI_CHAT_SYSTEM_PROMPT',
+    'AI_STREAM_SYSTEM_PROMPT',
+    'AI_REPAIR_SYSTEM_PROMPT',
+)
+
+
+def load_ai_prompts(path: Path | None = None) -> dict[str, str]:
+    prompts_path = path or AI_PROMPTS_PATH
+    with prompts_path.open(encoding='utf-8') as file:
+        prompts = json.load(file)
+
+    missing_or_invalid = [
+        key for key in AI_PROMPT_KEYS
+        if not isinstance(prompts.get(key), str) or not prompts[key].strip()
+    ]
+    if missing_or_invalid:
+        names = ', '.join(missing_or_invalid)
+        raise RuntimeError(f'Missing AI prompt(s) in {prompts_path.name}: {names}')
+
+    return {key: prompts[key].strip() for key in AI_PROMPT_KEYS}
+
+
+_AI_PROMPTS = load_ai_prompts()
+
+AI_CHAT_SYSTEM_PROMPT = _AI_PROMPTS['AI_CHAT_SYSTEM_PROMPT']
+AI_STREAM_SYSTEM_PROMPT = _AI_PROMPTS['AI_STREAM_SYSTEM_PROMPT']
+AI_REPAIR_SYSTEM_PROMPT = _AI_PROMPTS['AI_REPAIR_SYSTEM_PROMPT']
 
 
 def load_dotenv(path: Path | None = None, *, override: bool = False) -> None:
