@@ -207,6 +207,98 @@ POST /api/auth/logout
 }
 ```
 
+## ManageBac Helper 安装包下载
+
+### 获取安装包下载
+
+```http
+GET /api/managebac-helper/installer
+Authorization: Bearer <token>
+```
+
+行为：
+
+- 必须登录。
+- 配置 OSS 时，返回一次短期预签名下载 URL。
+- 未配置 OSS 时，返回本地安装包文件流。
+- 每次成功生成 OSS URL 或发送本地安装包都会计入下载统计。
+
+OSS 响应：
+
+```json
+{
+  "ok": true,
+  "source": "oss",
+  "url": "https://...",
+  "expiresSeconds": 600,
+  "limit": {
+    "windowHours": 24,
+    "linkLimit": 5,
+    "source": "global",
+    "hasOverride": false
+  },
+  "usage": {
+    "linkCount": 1
+  }
+}
+```
+
+状态码：
+
+- `200 OK`：返回 OSS URL 或本地文件流。
+- `401 Unauthorized`：未登录。
+- `429 Too Many Requests`：下载链接生成次数达到当前用户限制。
+
+### 管理员查看下载统计
+
+```http
+GET /api/admin/installer-downloads/summary?view=7d&page=1&pageSize=50
+```
+
+`view` 可选：`6h`、`1d`、`7d`、`30d`。
+
+### 管理员更新全局下载限制
+
+```http
+PUT /api/admin/installer-downloads/global-limit
+```
+
+请求：
+
+```json
+{
+  "windowHours": 24,
+  "linkLimit": 5
+}
+```
+
+### 管理员更新单用户下载限制
+
+```http
+PUT /api/admin/users/{userId}/installer-download-limit
+```
+
+请求：
+
+```json
+{
+  "windowHours": 24,
+  "linkLimit": 10
+}
+```
+
+### 管理员清除单用户下载限制
+
+```http
+DELETE /api/admin/users/{userId}/installer-download-limit
+```
+
+### 管理员清除全部单用户下载限制
+
+```http
+POST /api/admin/installer-downloads/clear-user-limits
+```
+
 ## 任务接口
 
 ### 获取任务列表

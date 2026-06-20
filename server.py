@@ -15,6 +15,7 @@ import sqlite3
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -60,9 +61,12 @@ SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
 DEFAULT_FEEDBACK_LIMIT_PER_USER = 10
 FEEDBACK_LIMIT_SETTING_KEY = 'feedback_limit_per_user'
 AI_TOKEN_LIMIT_SETTING_KEY = 'ai_token_limit_global'
+INSTALLER_DOWNLOAD_LIMIT_SETTING_KEY = 'managebac_installer_download_limit_global'
 DEFAULT_AI_TOKEN_WINDOW_HOURS = 24
 DEFAULT_AI_INPUT_TOKEN_LIMIT = 200_000
 DEFAULT_AI_OUTPUT_TOKEN_LIMIT = 50_000
+DEFAULT_INSTALLER_DOWNLOAD_WINDOW_HOURS = 24
+DEFAULT_INSTALLER_DOWNLOAD_LINK_LIMIT = 5
 TRUSTED_PROXY_IPS = {'127.0.0.1', '::1'}
 DEEPSEEK_API_URL = 'https://api.deepseek.com/chat/completions'
 DEFAULT_DEEPSEEK_MODEL = 'deepseek-v4-flash'
@@ -84,6 +88,18 @@ DEFAULT_AVATAR_COLOR = '#6366f1'
 STATIC_FILE_PATHS = {'/index.html', '/app.js', '/style.css'}
 STATIC_DIRECTORY_PREFIXES = ('/vendor/', '/assets/')
 MANAGEBAC_HELPER_DIR = BASE_DIR / 'managebac-sync-helper'
+DEFAULT_OSS_SIGN_EXPIRES_SECONDS = 10 * 60
+MAX_OSS_SIGN_EXPIRES_SECONDS = 7 * 24 * 60 * 60
+MANAGEBAC_OSS_INSTALLER_ENV_NAMES = [
+    'ALIYUN_OSS_ACCESS_KEY_ID',
+    'ALIYUN_OSS_ACCESS_KEY_SECRET',
+    'ALIYUN_OSS_REGION',
+    'ALIYUN_OSS_BUCKET',
+    'ALIYUN_OSS_INSTALLER_KEY',
+    'ALIYUN_OSS_ENDPOINT',
+    'ALIYUN_OSS_INSTALLER_FILENAME',
+    'ALIYUN_OSS_SIGN_EXPIRES_SECONDS',
+]
 DEFAULT_SUBJECTS = [
     'Chinese',
     'Mathematics',
@@ -428,6 +444,35 @@ def init_db() -> None:
         )
         conn.execute(
             '''
+            CREATE TABLE IF NOT EXISTS installer_download_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                source TEXT NOT NULL,
+                object_key TEXT NOT NULL DEFAULT '',
+                filename TEXT NOT NULL DEFAULT '',
+                ip TEXT NOT NULL DEFAULT '',
+                user_agent TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            '''
+        )
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_installer_download_logs_user_created ON installer_download_logs(user_id, created_at)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_installer_download_logs_created_at ON installer_download_logs(created_at)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_installer_download_logs_ip ON installer_download_logs(ip)')
+        conn.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS installer_download_limits (
+                user_id INTEGER PRIMARY KEY,
+                window_hours INTEGER NOT NULL,
+                link_limit INTEGER NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            '''
+        )
+        conn.execute(
+            '''
             INSERT OR IGNORE INTO app_settings (key, value, updated_at)
             VALUES (?, ?, ?)
             ''',
@@ -444,6 +489,20 @@ def init_db() -> None:
                     'windowHours': DEFAULT_AI_TOKEN_WINDOW_HOURS,
                     'inputTokenLimit': DEFAULT_AI_INPUT_TOKEN_LIMIT,
                     'outputTokenLimit': DEFAULT_AI_OUTPUT_TOKEN_LIMIT,
+                }, ensure_ascii=False),
+                now_iso(),
+            ),
+        )
+        conn.execute(
+            '''
+            INSERT OR IGNORE INTO app_settings (key, value, updated_at)
+            VALUES (?, ?, ?)
+            ''',
+            (
+                INSTALLER_DOWNLOAD_LIMIT_SETTING_KEY,
+                json.dumps({
+                    'windowHours': DEFAULT_INSTALLER_DOWNLOAD_WINDOW_HOURS,
+                    'linkLimit': DEFAULT_INSTALLER_DOWNLOAD_LINK_LIMIT,
                 }, ensure_ascii=False),
                 now_iso(),
             ),
@@ -1527,6 +1586,166 @@ class AiTokenLimitExceeded(Exception):
         self.payload = payload
 
 
+def default_installer_download_limit() -> dict:
+    return {
+        'windowHours': DEFAULT_INSTALLER_DOWNLOAD_WINDOW_HOURS,
+        'linkLimit': DEFAULT_INSTALLER_DOWNLOAD_LINK_LIMIT,
+    }
+
+
+def normalize_installer_download_limit(raw: object) -> tuple[dict | None, str | None]:
+    if not isinstance(raw, dict):
+        return None, 'limit must be an object'
+    try:
+        window_hours = int(raw.get('windowHours'))
+        link_limit = int(raw.get('linkLimit'))
+    except (TypeError, ValueError):
+        return None, 'windowHours and linkLimit must be integers'
+    if window_hours < 1 or window_hours > 24 * 365:
+        return None, 'windowHours must be between 1 and 8760'
+    if link_limit < 1 or link_limit > 1_000_000:
+        return None, 'linkLimit must be between 1 and 1000000'
+    return {'windowHours': window_hours, 'linkLimit': link_limit}, None
+
+
+def get_installer_global_download_limit(conn: sqlite3.Connection) -> dict:
+    row = conn.execute('SELECT value FROM app_settings WHERE key = ?', (INSTALLER_DOWNLOAD_LIMIT_SETTING_KEY,)).fetchone()
+    if not row:
+        return default_installer_download_limit()
+    try:
+        payload = json.loads(row['value'])
+    except (TypeError, json.JSONDecodeError):
+        return default_installer_download_limit()
+    limit, error = normalize_installer_download_limit(payload)
+    return default_installer_download_limit() if error else limit
+
+
+def set_installer_global_download_limit(conn: sqlite3.Connection, limit: dict) -> None:
+    conn.execute(
+        '''
+        INSERT INTO app_settings (key, value, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+        ''',
+        (INSTALLER_DOWNLOAD_LIMIT_SETTING_KEY, json.dumps(limit, ensure_ascii=False), now_iso()),
+    )
+
+
+def get_installer_user_download_limit(conn: sqlite3.Connection, user_id: int) -> dict | None:
+    row = conn.execute(
+        '''
+        SELECT window_hours, link_limit, updated_at
+        FROM installer_download_limits
+        WHERE user_id = ?
+        ''',
+        (user_id,),
+    ).fetchone()
+    if not row:
+        return None
+    return {
+        'windowHours': int(row['window_hours']),
+        'linkLimit': int(row['link_limit']),
+        'updatedAt': row['updated_at'],
+    }
+
+
+def set_installer_user_download_limit(conn: sqlite3.Connection, user_id: int, limit: dict) -> None:
+    conn.execute(
+        '''
+        INSERT INTO installer_download_limits
+        (user_id, window_hours, link_limit, updated_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET
+            window_hours = excluded.window_hours,
+            link_limit = excluded.link_limit,
+            updated_at = excluded.updated_at
+        ''',
+        (user_id, limit['windowHours'], limit['linkLimit'], now_iso()),
+    )
+
+
+def effective_installer_download_limit(conn: sqlite3.Connection, user_id: int) -> dict:
+    user_limit = get_installer_user_download_limit(conn, user_id)
+    if user_limit:
+        return {**user_limit, 'source': 'user', 'hasOverride': True}
+    return {**get_installer_global_download_limit(conn), 'source': 'global', 'hasOverride': False}
+
+
+def installer_download_window_start(window_hours: int) -> str:
+    start = datetime.now(timezone.utc) - timedelta(hours=window_hours)
+    return start.strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def installer_download_totals_since(conn: sqlite3.Connection, user_id: int | None, start_key: str) -> dict:
+    params: list[object] = [start_key]
+    where = 'created_at >= ?'
+    if user_id is not None:
+        where += ' AND user_id = ?'
+        params.append(user_id)
+    row = conn.execute(
+        f'''
+        SELECT COUNT(*) AS link_count
+        FROM installer_download_logs
+        WHERE {where}
+        ''',
+        tuple(params),
+    ).fetchone()
+    return {'linkCount': int(row['link_count'] or 0)}
+
+
+def installer_download_limit_status(conn: sqlite3.Connection, user_id: int) -> dict:
+    limit = effective_installer_download_limit(conn, user_id)
+    usage = installer_download_totals_since(conn, user_id, installer_download_window_start(limit['windowHours']))
+    return {
+        'limit': limit,
+        'usage': usage,
+        'exceeded': usage['linkCount'] >= limit['linkLimit'],
+    }
+
+
+def installer_download_limit_error(status: dict) -> dict:
+    limit = status['limit']
+    usage = status['usage']
+    return {
+        'error': 'installer download limit exceeded',
+        'message': (
+            f"安装包下载链接生成次数已达到限制：最近 {limit['windowHours']} 小时已用 "
+            f"{usage['linkCount']} / {limit['linkLimit']} 次。"
+        ),
+        'windowHours': limit['windowHours'],
+        'linkLimit': limit['linkLimit'],
+        'currentLinkCount': usage['linkCount'],
+    }
+
+
+def record_installer_download(
+    conn: sqlite3.Connection,
+    user_id: int,
+    source: str,
+    object_key: str,
+    filename: str,
+    ip: str,
+    user_agent: str,
+) -> dict:
+    conn.execute(
+        '''
+        INSERT INTO installer_download_logs
+        (user_id, source, object_key, filename, ip, user_agent, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''',
+        (
+            user_id,
+            str(source or '')[:20],
+            str(object_key or '')[:1000],
+            str(filename or '')[:500],
+            str(ip or '')[:80],
+            str(user_agent or '')[:1000],
+            now_iso(),
+        ),
+    )
+    return installer_download_limit_status(conn, user_id)
+
+
 def normalize_ip(value: str) -> str:
     value = str(value).strip()
     if not value:
@@ -1586,6 +1805,116 @@ def find_managebac_installer() -> Path | None:
     return None
 
 
+@dataclass(frozen=True)
+class ManageBacOssInstallerConfig:
+    access_key_id: str
+    access_key_secret: str
+    region: str
+    bucket: str
+    key: str
+    endpoint: str
+    expires_seconds: int
+    filename: str
+
+
+class ManageBacOssConfigError(RuntimeError):
+    pass
+
+
+class ManageBacOssDependencyError(RuntimeError):
+    pass
+
+
+def read_env_value(name: str) -> str:
+    return os.environ.get(name, '').strip()
+
+
+def configured_managebac_oss_values() -> dict[str, str]:
+    return {name: read_env_value(name) for name in MANAGEBAC_OSS_INSTALLER_ENV_NAMES}
+
+
+def get_managebac_oss_installer_config() -> ManageBacOssInstallerConfig | None:
+    values = configured_managebac_oss_values()
+    required_names = [
+        'ALIYUN_OSS_ACCESS_KEY_ID',
+        'ALIYUN_OSS_ACCESS_KEY_SECRET',
+        'ALIYUN_OSS_REGION',
+        'ALIYUN_OSS_BUCKET',
+        'ALIYUN_OSS_INSTALLER_KEY',
+    ]
+    if not any(values.values()):
+        return None
+
+    missing = [name for name in required_names if not values[name]]
+    if missing:
+        raise ManageBacOssConfigError(f'Missing OSS environment variables: {", ".join(missing)}')
+
+    raw_key = values['ALIYUN_OSS_INSTALLER_KEY']
+    key = raw_key.lstrip('/')
+    if not key:
+        raise ManageBacOssConfigError('ALIYUN_OSS_INSTALLER_KEY cannot be empty')
+    filename = values['ALIYUN_OSS_INSTALLER_FILENAME'] or Path(key).name or 'managebac-sync-helper.exe'
+
+    raw_expires = values['ALIYUN_OSS_SIGN_EXPIRES_SECONDS']
+    if raw_expires:
+        try:
+            expires_seconds = int(raw_expires)
+        except ValueError as exc:
+            raise ManageBacOssConfigError('ALIYUN_OSS_SIGN_EXPIRES_SECONDS must be an integer') from exc
+        if expires_seconds < 1 or expires_seconds > MAX_OSS_SIGN_EXPIRES_SECONDS:
+            raise ManageBacOssConfigError(
+                f'ALIYUN_OSS_SIGN_EXPIRES_SECONDS must be between 1 and {MAX_OSS_SIGN_EXPIRES_SECONDS}'
+            )
+    else:
+        expires_seconds = DEFAULT_OSS_SIGN_EXPIRES_SECONDS
+
+    return ManageBacOssInstallerConfig(
+        access_key_id=values['ALIYUN_OSS_ACCESS_KEY_ID'],
+        access_key_secret=values['ALIYUN_OSS_ACCESS_KEY_SECRET'],
+        region=values['ALIYUN_OSS_REGION'],
+        bucket=values['ALIYUN_OSS_BUCKET'],
+        key=key,
+        endpoint=values['ALIYUN_OSS_ENDPOINT'],
+        expires_seconds=expires_seconds,
+        filename=filename,
+    )
+
+
+def content_disposition_attachment(filename: str) -> str:
+    ascii_name = ''.join(ch if 32 <= ord(ch) < 127 and ch not in {'"', '\\'} else '_' for ch in filename)
+    return f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(filename)}"
+
+
+def generate_managebac_oss_installer_url(config: ManageBacOssInstallerConfig) -> str:
+    try:
+        import alibabacloud_oss_v2 as oss
+    except ImportError as exc:
+        raise ManageBacOssDependencyError(
+            'Missing Python dependency: alibabacloud-oss-v2. Run: pip install -r requirements.txt'
+        ) from exc
+
+    credentials_provider = oss.credentials.StaticCredentialsProvider(
+        access_key_id=config.access_key_id,
+        access_key_secret=config.access_key_secret,
+    )
+    oss_config = oss.config.load_default()
+    oss_config.credentials_provider = credentials_provider
+    oss_config.region = config.region
+    if config.endpoint:
+        oss_config.endpoint = config.endpoint
+
+    client = oss.Client(oss_config)
+    presigned = client.presign(
+        oss.GetObjectRequest(
+            bucket=config.bucket,
+            key=config.key,
+            response_content_disposition=content_disposition_attachment(config.filename),
+        ),
+        expires=timedelta(seconds=config.expires_seconds),
+    )
+    return presigned.url
+
+
 class TodoHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(BASE_DIR), **kwargs)
@@ -1640,6 +1969,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return self.handle_create_visit()
         if path == '/api/admin/ai-usage/clear-user-limits':
             return self.handle_admin_clear_all_ai_token_limits()
+        if path == '/api/admin/installer-downloads/clear-user-limits':
+            return self.handle_admin_clear_all_installer_download_limits()
         if path == '/api/auth/register':
             return self.handle_auth_register()
         if path == '/api/auth/login':
@@ -1672,9 +2003,13 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return self.handle_auth_update_avatar_color()
         if path == '/api/admin/ai-usage/global-limit':
             return self.handle_admin_update_ai_global_limit()
+        if path == '/api/admin/installer-downloads/global-limit':
+            return self.handle_admin_update_installer_download_global_limit()
         parts = path.strip('/').split('/')
         if len(parts) == 5 and parts[:3] == ['api', 'admin', 'users'] and parts[4] == 'ai-token-limit':
             return self.handle_admin_update_user_ai_token_limit(parts[3])
+        if len(parts) == 5 and parts[:3] == ['api', 'admin', 'users'] and parts[4] == 'installer-download-limit':
+            return self.handle_admin_update_user_installer_download_limit(parts[3])
         if path == '/api/admin/feedback-settings':
             return self.handle_admin_update_feedback_settings()
         if path.startswith('/api/admin/feedback/') and path.endswith('/reply'):
@@ -1704,6 +2039,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
         parts = path.strip('/').split('/')
         if len(parts) == 5 and parts[:3] == ['api', 'admin', 'users'] and parts[4] == 'ai-token-limit':
             return self.handle_admin_clear_user_ai_token_limit(parts[3])
+        if len(parts) == 5 and parts[:3] == ['api', 'admin', 'users'] and parts[4] == 'installer-download-limit':
+            return self.handle_admin_clear_user_installer_download_limit(parts[3])
         if path.startswith('/api/feedback/'):
             return self.handle_delete_feedback(path.rsplit('/', 1)[-1])
         if path == '/api/auth/avatar':
@@ -1747,27 +2084,97 @@ class TodoHandler(SimpleHTTPRequestHandler):
             self.wfile.write(raw)
 
     def handle_managebac_installer(self, send_body: bool = True):
+        if not send_body:
+            user = self.current_user()
+            self.send_response(HTTPStatus.NO_CONTENT if user else HTTPStatus.UNAUTHORIZED)
+            self.send_header('Cache-Control', 'no-store')
+            self.end_headers()
+            return
+
+        user = self.require_user()
+        if not user:
+            return
+        user_id = int(user['id'])
+        with get_db() as conn:
+            limit_status = installer_download_limit_status(conn, user_id)
+        if limit_status['exceeded']:
+            return self.write_json(installer_download_limit_error(limit_status), status=HTTPStatus.TOO_MANY_REQUESTS)
+
+        try:
+            oss_config = get_managebac_oss_installer_config()
+        except ManageBacOssConfigError as error:
+            return self.write_json({'error': 'oss config error', 'message': str(error)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+        if oss_config:
+            try:
+                signed_url = generate_managebac_oss_installer_url(oss_config)
+            except ManageBacOssDependencyError as error:
+                return self.write_json({'error': 'oss dependency missing', 'message': str(error)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            except Exception:
+                return self.write_json(
+                    {'error': 'oss presign failed', 'message': '安装包下载链接生成失败。'},
+                    status=HTTPStatus.BAD_GATEWAY,
+                )
+            with get_db() as conn:
+                limit_status = installer_download_limit_status(conn, user_id)
+                if limit_status['exceeded']:
+                    return self.write_json(installer_download_limit_error(limit_status), status=HTTPStatus.TOO_MANY_REQUESTS)
+                next_status = record_installer_download(
+                    conn,
+                    user_id,
+                    'oss',
+                    oss_config.key,
+                    oss_config.filename,
+                    self.request_ip(),
+                    str(self.headers.get('User-Agent', '')),
+                )
+                conn.commit()
+            return self.write_json({
+                'ok': True,
+                'source': 'oss',
+                'url': signed_url,
+                'expiresSeconds': oss_config.expires_seconds,
+                'limit': next_status['limit'],
+                'usage': next_status['usage'],
+            })
+
         file_path = find_managebac_installer()
         if not file_path or not file_path.is_file():
-            self.send_error(HTTPStatus.NOT_FOUND, 'ManageBac installer not found')
-            return
+            return self.write_json(
+                {'error': 'installer not found', 'message': 'ManageBac 安装包不存在。'},
+                status=HTTPStatus.NOT_FOUND,
+            )
         try:
             size = file_path.stat().st_size
-            source = file_path.open('rb') if send_body else None
+            source = file_path.open('rb')
         except OSError:
-            self.send_error(HTTPStatus.NOT_FOUND, 'ManageBac installer not found')
-            return
+            return self.write_json(
+                {'error': 'installer not found', 'message': 'ManageBac 安装包不存在。'},
+                status=HTTPStatus.NOT_FOUND,
+            )
         filename = file_path.name
-        ascii_name = ''.join(ch if 32 <= ord(ch) < 127 and ch not in {'"', '\\'} else '_' for ch in filename)
+        with get_db() as conn:
+            limit_status = installer_download_limit_status(conn, user_id)
+            if limit_status['exceeded']:
+                source.close()
+                return self.write_json(installer_download_limit_error(limit_status), status=HTTPStatus.TOO_MANY_REQUESTS)
+            record_installer_download(
+                conn,
+                user_id,
+                'local',
+                str(file_path.relative_to(BASE_DIR)) if file_path.is_relative_to(BASE_DIR) else file_path.name,
+                filename,
+                self.request_ip(),
+                str(self.headers.get('User-Agent', '')),
+            )
+            conn.commit()
         self.send_response(HTTPStatus.OK)
         self.send_header('Content-Type', 'application/vnd.microsoft.portable-executable')
         self.send_header('Content-Length', str(size))
-        self.send_header('Content-Disposition', f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(filename)}")
+        self.send_header('Content-Disposition', content_disposition_attachment(filename))
         self.send_header('Cache-Control', 'no-store')
         self.end_headers()
-        if source:
-            with source:
-                self.copyfile(source, self.wfile)
+        with source:
+            self.copyfile(source, self.wfile)
 
     def current_user(self):
         """Resolve the bearer token and slide the session expiration forward."""
@@ -2180,6 +2587,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return self.handle_admin_traffic_summary()
         if parts == ['api', 'admin', 'ai-usage', 'summary']:
             return self.handle_admin_ai_usage_summary()
+        if parts == ['api', 'admin', 'installer-downloads', 'summary']:
+            return self.handle_admin_installer_downloads_summary()
         if len(parts) == 5 and parts[:3] == ['api', 'admin', 'users']:
             try:
                 target_user_id = int(parts[3])
@@ -2636,6 +3045,236 @@ class TodoHandler(SimpleHTTPRequestHandler):
                 int(admin['id']),
                 'admin.ai_token.user_limits_clear_all',
                 'ai_token_limit',
+                'all',
+                {'deleted': int(deleted or 0)},
+            )
+            conn.commit()
+        return self.write_json({'ok': True, 'deleted': int(deleted or 0)})
+
+    def handle_admin_installer_downloads_summary(self):
+        query = parse_qs(urlparse(self.path).query)
+        usage_view = str(query.get('view', ['7d'])[0]).strip()
+        if usage_view not in {'30d', '7d', '1d', '6h'}:
+            return self.write_json({'error': 'invalid usage view'}, status=HTTPStatus.BAD_REQUEST)
+        try:
+            page = max(1, int(query.get('page', ['1'])[0]))
+            page_size = min(100, max(1, int(query.get('pageSize', ['50'])[0])))
+        except ValueError:
+            return self.write_json({'error': 'invalid pagination'}, status=HTTPStatus.BAD_REQUEST)
+        offset = (page - 1) * page_size
+
+        now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0, tzinfo=None)
+        today_key = now.date().isoformat()
+        if usage_view == '30d':
+            series_unit = 'day'
+            bucket_count = 30
+            start_dt = datetime.combine(now.date() - timedelta(days=bucket_count - 1), datetime.min.time())
+        elif usage_view == '7d':
+            series_unit = 'day'
+            bucket_count = 7
+            start_dt = datetime.combine(now.date() - timedelta(days=bucket_count - 1), datetime.min.time())
+        elif usage_view == '1d':
+            series_unit = 'hour'
+            bucket_count = 24
+            start_dt = now - timedelta(hours=bucket_count - 1)
+        else:
+            series_unit = 'hour'
+            bucket_count = 6
+            start_dt = now - timedelta(hours=bucket_count - 1)
+        start_key = start_dt.strftime('%Y-%m-%dT%H:%M:%SZ')
+
+        with get_db() as conn:
+            global_limit = get_installer_global_download_limit(conn)
+            total_row = conn.execute(
+                '''
+                SELECT COUNT(*) AS links, COUNT(DISTINCT user_id) AS users
+                FROM installer_download_logs
+                '''
+            ).fetchone()
+            today_row = conn.execute(
+                '''
+                SELECT COUNT(*) AS links, COUNT(DISTINCT user_id) AS users
+                FROM installer_download_logs
+                WHERE substr(created_at, 1, 10) = ?
+                ''',
+                (today_key,),
+            ).fetchone()
+            trend_rows = conn.execute(
+                '''
+                SELECT created_at
+                FROM installer_download_logs
+                WHERE created_at >= ?
+                ORDER BY created_at ASC
+                ''',
+                (start_key,),
+            ).fetchall()
+            users_total = conn.execute('SELECT COUNT(*) FROM users').fetchone()[0]
+            user_rows = conn.execute(
+                '''
+                SELECT users.id, users.name, users.nickname, users.role,
+                       MAX(installer_download_logs.created_at) AS last_generated_at,
+                       COUNT(installer_download_logs.id) AS total_links
+                FROM users
+                LEFT JOIN installer_download_logs ON installer_download_logs.user_id = users.id
+                GROUP BY users.id
+                ORDER BY
+                    CASE WHEN MAX(installer_download_logs.created_at) IS NULL THEN 1 ELSE 0 END ASC,
+                    MAX(installer_download_logs.created_at) DESC,
+                    users.id ASC
+                LIMIT ? OFFSET ?
+                ''',
+                (page_size, offset),
+            ).fetchall()
+
+            user_payload = []
+            for row in user_rows:
+                limit = effective_installer_download_limit(conn, int(row['id']))
+                usage = installer_download_totals_since(conn, int(row['id']), installer_download_window_start(limit['windowHours']))
+                user_payload.append({
+                    'user': {
+                        'id': row['id'],
+                        'name': row['name'],
+                        'nickname': row['nickname'],
+                        'role': row['role'],
+                    },
+                    'effectiveLimit': limit,
+                    'hasOverride': bool(limit.get('hasOverride')),
+                    'source': limit.get('source', 'global'),
+                    'windowUsage': usage,
+                    'totalLinks': int(row['total_links'] or 0),
+                    'lastGeneratedAt': row['last_generated_at'],
+                })
+
+        trend_by_bucket = {}
+        for row in trend_rows:
+            try:
+                created_at = datetime.strptime(row['created_at'], '%Y-%m-%dT%H:%M:%SZ')
+            except (TypeError, ValueError):
+                continue
+            if series_unit == 'day':
+                bucket_key = created_at.date().isoformat()
+            else:
+                bucket_key = created_at.replace(minute=0, second=0, microsecond=0).strftime('%Y-%m-%dT%H:00:00Z')
+            trend_by_bucket[bucket_key] = trend_by_bucket.get(bucket_key, 0) + 1
+
+        trend_series = []
+        for bucket_offset in range(bucket_count):
+            bucket_dt = start_dt + (timedelta(days=bucket_offset) if series_unit == 'day' else timedelta(hours=bucket_offset))
+            if series_unit == 'day':
+                bucket_key = bucket_dt.date().isoformat()
+            else:
+                bucket_key = bucket_dt.strftime('%Y-%m-%dT%H:00:00Z')
+            trend_series.append({'date': bucket_key, 'linkCount': trend_by_bucket.get(bucket_key, 0)})
+
+        return self.write_json({
+            'usageView': usage_view,
+            'seriesUnit': series_unit,
+            'globalLimit': global_limit,
+            'totalLinks': int(total_row['links'] or 0),
+            'totalUsers': int(total_row['users'] or 0),
+            'todayLinks': int(today_row['links'] or 0),
+            'todayUsers': int(today_row['users'] or 0),
+            'trendSeries': trend_series,
+            'users': user_payload,
+            'usersTotal': users_total,
+            'page': page,
+            'pageSize': page_size,
+        })
+
+    def handle_admin_update_installer_download_global_limit(self):
+        admin = self.require_admin()
+        if not admin:
+            return
+        payload = self.read_json_body()
+        if payload is None:
+            return
+        limit, error = normalize_installer_download_limit(payload)
+        if error:
+            return self.write_json({'error': error}, status=HTTPStatus.BAD_REQUEST)
+        with get_db() as conn:
+            set_installer_global_download_limit(conn, limit)
+            self.log_operation(
+                conn,
+                int(admin['id']),
+                int(admin['id']),
+                'admin.installer_download.global_limit_update',
+                'installer_download_limit',
+                'global',
+                {'limit': limit},
+            )
+            conn.commit()
+        return self.write_json({'ok': True, 'globalLimit': limit})
+
+    def handle_admin_update_user_installer_download_limit(self, user_id_text: str):
+        admin = self.require_admin()
+        if not admin:
+            return
+        try:
+            user_id = int(user_id_text)
+        except ValueError:
+            return self.write_json({'error': 'invalid user id'}, status=HTTPStatus.BAD_REQUEST)
+        payload = self.read_json_body()
+        if payload is None:
+            return
+        limit, error = normalize_installer_download_limit(payload)
+        if error:
+            return self.write_json({'error': error}, status=HTTPStatus.BAD_REQUEST)
+        with get_db() as conn:
+            user_row = self.ensure_user_exists(conn, user_id)
+            if not user_row:
+                return self.write_json({'error': 'user not found'}, status=HTTPStatus.NOT_FOUND)
+            set_installer_user_download_limit(conn, user_id, limit)
+            effective_limit = effective_installer_download_limit(conn, user_id)
+            self.log_operation(
+                conn,
+                int(admin['id']),
+                user_id,
+                'admin.installer_download.user_limit_update',
+                'installer_download_limit',
+                str(user_id),
+                {'limit': limit},
+            )
+            conn.commit()
+        return self.write_json({'ok': True, 'userId': user_id, 'effectiveLimit': effective_limit})
+
+    def handle_admin_clear_user_installer_download_limit(self, user_id_text: str):
+        admin = self.require_admin()
+        if not admin:
+            return
+        try:
+            user_id = int(user_id_text)
+        except ValueError:
+            return self.write_json({'error': 'invalid user id'}, status=HTTPStatus.BAD_REQUEST)
+        with get_db() as conn:
+            user_row = self.ensure_user_exists(conn, user_id)
+            if not user_row:
+                return self.write_json({'error': 'user not found'}, status=HTTPStatus.NOT_FOUND)
+            conn.execute('DELETE FROM installer_download_limits WHERE user_id = ?', (user_id,))
+            effective_limit = effective_installer_download_limit(conn, user_id)
+            self.log_operation(
+                conn,
+                int(admin['id']),
+                user_id,
+                'admin.installer_download.user_limit_clear',
+                'installer_download_limit',
+                str(user_id),
+                {},
+            )
+            conn.commit()
+        return self.write_json({'ok': True, 'userId': user_id, 'effectiveLimit': effective_limit})
+
+    def handle_admin_clear_all_installer_download_limits(self):
+        admin = self.require_admin()
+        if not admin:
+            return
+        with get_db() as conn:
+            deleted = conn.execute('DELETE FROM installer_download_limits').rowcount
+            self.log_operation(
+                conn,
+                int(admin['id']),
+                int(admin['id']),
+                'admin.installer_download.user_limits_clear_all',
+                'installer_download_limit',
                 'all',
                 {'deleted': int(deleted or 0)},
             )

@@ -453,6 +453,7 @@
           <button class="admin-nav-button" :class="{ active: adminSection === 'feedback' }" type="button" @click="switchAdminSection('feedback')">用户反馈</button>
           <button class="admin-nav-button" :class="{ active: adminSection === 'traffic' }" type="button" @click="switchAdminSection('traffic')">流量统计</button>
           <button class="admin-nav-button" :class="{ active: adminSection === 'aiUsage' }" type="button" @click="switchAdminSection('aiUsage')">Token 使用情况</button>
+          <button class="admin-nav-button" :class="{ active: adminSection === 'installerDownloads' }" type="button" @click="switchAdminSection('installerDownloads')">下载统计</button>
           <button class="admin-nav-button" :class="{ active: adminSection === 'timeline' }" type="button" @click="switchAdminSection('timeline')">用户时间表</button>
         </nav>
         <div class="admin-sidebar-footer">
@@ -967,6 +968,179 @@
               :page-size="adminAiUsagePageSize"
               :current-page="adminAiUsagePage"
               @current-change="loadAdminAiUsage"
+            ></el-pagination>
+          </div>
+        </section>
+
+        <section v-else-if="adminSection === 'installerDownloads'" class="admin-panel">
+          <div class="admin-panel-header">
+            <div>
+              <h2>下载统计</h2>
+              <p>统计 ManageBac Helper 安装包下载链接生成次数，并按滚动窗口限制每个用户的生成频率。</p>
+            </div>
+            <el-button plain @click="loadAdminInstallerDownloads(adminInstallerDownloadsPage)">刷新统计</el-button>
+          </div>
+
+          <div class="traffic-metrics">
+            <article v-for="metric in installerDownloadMetricCards" :key="metric.label" class="traffic-metric">
+              <div class="traffic-metric-label">{{ metric.label }}</div>
+              <div class="traffic-metric-value">{{ metric.value }}</div>
+            </article>
+          </div>
+
+          <div class="traffic-grid">
+            <section class="traffic-chart-panel">
+              <div class="traffic-section-title">
+                <span>{{ installerDownloadChartTitle }}</span>
+                <div class="traffic-chart-actions">
+                  <div class="traffic-view-switch" aria-label="切换下载统计时间范围">
+                    <button
+                      v-for="option in adminTrafficViewOptions"
+                      :key="option.value"
+                      type="button"
+                      :class="{ active: adminInstallerDownloadsView === option.value }"
+                      @click="switchAdminInstallerDownloadsView(option.value)"
+                    >
+                      {{ option.label }}
+                    </button>
+                  </div>
+                  <span>峰值 {{ formatTokenCount(installerDownloadMaxLinks) }} 次</span>
+                </div>
+              </div>
+              <div v-if="installerDownloadChartPoints" class="traffic-chart" @mouseleave="hideInstallerDownloadPoint">
+                <svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-label="下载链接生成趋势折线图">
+                  <polyline class="traffic-chart-line installer-download-line" :points="installerDownloadChartPoints"></polyline>
+                  <g v-for="point in installerDownloadChartPointItems" :key="point.date">
+                    <circle
+                      class="traffic-chart-dot installer-download-dot"
+                      :cx="point.x"
+                      :cy="point.y"
+                      r="1.1"
+                    ></circle>
+                    <circle
+                      class="traffic-chart-hit"
+                      :cx="point.x"
+                      :cy="point.y"
+                      r="5"
+                      @mouseenter="showInstallerDownloadPoint(point)"
+                      @mousemove="showInstallerDownloadPoint(point)"
+                    ></circle>
+                  </g>
+                </svg>
+                <div v-if="adminInstallerDownloadsHoverPoint" class="traffic-chart-tooltip" :style="installerDownloadHoverStyle">
+                  <div class="traffic-tooltip-time">{{ formatTrafficTooltipTime(adminInstallerDownloadsHoverPoint.date) }}</div>
+                  <div>生成 {{ formatTokenCount(adminInstallerDownloadsHoverPoint.linkCount) }} 次</div>
+                </div>
+                <div class="traffic-chart-labels">
+                  <span v-for="item in installerDownloadChartLabels" :key="item.date">{{ formatTrafficDate(item.date) }}</span>
+                </div>
+              </div>
+              <div v-else class="empty-column">暂无下载链接生成趋势。</div>
+            </section>
+
+            <section class="traffic-top-panel ai-limit-panel">
+              <div class="traffic-section-title">
+                <span>全局限制</span>
+                <span>{{ installerDownloadLimitText(adminInstallerDownloads.globalLimit) }}</span>
+              </div>
+              <div class="ai-limit-form">
+                <label>
+                  <span>窗口小时数</span>
+                  <el-input-number
+                    v-model="adminInstallerDownloadGlobalLimitDraft.windowHours"
+                    :min="1"
+                    :max="8760"
+                    :step="1"
+                    step-strictly
+                    controls-position="right"
+                  ></el-input-number>
+                </label>
+                <label>
+                  <span>生成次数上限</span>
+                  <el-input-number
+                    v-model="adminInstallerDownloadGlobalLimitDraft.linkLimit"
+                    :min="1"
+                    :max="1000000"
+                    :step="1"
+                    step-strictly
+                    controls-position="right"
+                  ></el-input-number>
+                </label>
+              </div>
+              <div class="ai-limit-actions">
+                <el-button type="primary" plain @click="saveAdminInstallerDownloadGlobalLimit">保存全局限制</el-button>
+                <el-button type="warning" plain @click="clearAllAdminInstallerDownloadUserLimits">统一全局</el-button>
+              </div>
+            </section>
+          </div>
+
+          <el-table :data="adminInstallerDownloads.users" style="width: 100%;">
+            <el-table-column label="用户" min-width="180">
+              <template #default="{ row }">
+                {{ row.user ? `${row.user.name}（${row.user.nickname}）` : '—' }}
+              </template>
+            </el-table-column>
+            <el-table-column label="窗口内生成" min-width="150">
+              <template #default="{ row }">
+                <div>{{ installerDownloadWindowUsageText(row.windowUsage) }}</div>
+                <div class="traffic-muted">累计 {{ formatTokenCount(row.totalLinks || 0) }} 次</div>
+              </template>
+            </el-table-column>
+            <el-table-column label="有效限制" min-width="180">
+              <template #default="{ row }">{{ installerDownloadLimitText(row.effectiveLimit) }}</template>
+            </el-table-column>
+            <el-table-column label="来源" width="110">
+              <template #default="{ row }">
+                <el-tag :type="aiLimitSourceType(row)" effect="plain">{{ aiLimitSourceLabel(row) }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="最近生成" min-width="160">
+              <template #default="{ row }">{{ formatDateTime(row.lastGeneratedAt) }}</template>
+            </el-table-column>
+            <el-table-column label="单用户限制" min-width="340" fixed="right">
+              <template #default="{ row }">
+                <div
+                  v-if="row.user && adminInstallerDownloadUserLimitDrafts[String(row.user.id)]"
+                  class="ai-user-limit-editor"
+                >
+                  <div class="ai-user-limit-fields installer-download-limit-fields">
+                    <el-input-number
+                      v-model="adminInstallerDownloadUserLimitDrafts[String(row.user.id)].windowHours"
+                      size="small"
+                      :min="1"
+                      :max="8760"
+                      :step="1"
+                      step-strictly
+                      controls-position="right"
+                      aria-label="窗口小时数"
+                    ></el-input-number>
+                    <el-input-number
+                      v-model="adminInstallerDownloadUserLimitDrafts[String(row.user.id)].linkLimit"
+                      size="small"
+                      :min="1"
+                      :max="1000000"
+                      :step="1"
+                      step-strictly
+                      controls-position="right"
+                      aria-label="生成次数上限"
+                    ></el-input-number>
+                  </div>
+                  <div class="ai-user-limit-actions">
+                    <el-button size="small" type="primary" plain @click="saveAdminInstallerDownloadUserLimit(row)">保存</el-button>
+                    <el-button size="small" plain :disabled="!row.hasOverride" @click="clearAdminInstallerDownloadUserLimit(row)">使用全局</el-button>
+                  </div>
+                </div>
+              </template>
+            </el-table-column>
+          </el-table>
+          <div class="admin-pagination">
+            <el-pagination
+              background
+              layout="prev, pager, next, total"
+              :total="adminInstallerDownloadsUsersTotal"
+              :page-size="adminInstallerDownloadsPageSize"
+              :current-page="adminInstallerDownloadsPage"
+              @current-change="loadAdminInstallerDownloads"
             ></el-pagination>
           </div>
         </section>

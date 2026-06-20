@@ -2795,6 +2795,14 @@ body.is-schedule-touch-dragging * {
   fill: #f97316;
 }
 
+.installer-download-line {
+  stroke: #10b981;
+}
+
+.installer-download-dot {
+  fill: #10b981;
+}
+
 .traffic-chart-tooltip {
   position: absolute;
   z-index: 2;
@@ -2911,6 +2919,10 @@ body.is-schedule-touch-dragging * {
 
 .ai-user-limit-fields .el-input-number {
   width: 100%;
+}
+
+.installer-download-limit-fields {
+  grid-template-columns: repeat(2, minmax(96px, 1fr));
 }
 
 .traffic-ip-list {

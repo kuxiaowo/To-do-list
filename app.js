@@ -333,6 +333,29 @@ createApp({
         trendSeries: [],
         users: []
       },
+      adminInstallerDownloadsView: '7d',
+      adminInstallerDownloadsHoverPoint: null,
+      adminInstallerDownloadsUsersTotal: 0,
+      adminInstallerDownloadsPage: 1,
+      adminInstallerDownloadsPageSize: 50,
+      adminInstallerDownloadGlobalLimitDraft: {
+        windowHours: 24,
+        linkLimit: 5
+      },
+      adminInstallerDownloadUserLimitDrafts: {},
+      adminInstallerDownloads: {
+        seriesUnit: 'day',
+        globalLimit: {
+          windowHours: 24,
+          linkLimit: 5
+        },
+        totalLinks: 0,
+        totalUsers: 0,
+        todayLinks: 0,
+        todayUsers: 0,
+        trendSeries: [],
+        users: []
+      },
       adminLoading: false,
       adminTimelineLoadedUserId: '',
       guideVisible: false,
@@ -591,6 +614,67 @@ createApp({
       return {
         left: `${this.adminAiUsageHoverPoint.x}%`,
         top: `${this.adminAiUsageHoverPoint.y}%`
+      };
+    },
+    installerDownloadMetricCards() {
+      return [
+        { label: '总生成次数', value: this.formatTokenCount(this.adminInstallerDownloads.totalLinks) },
+        { label: '今日生成次数', value: this.formatTokenCount(this.adminInstallerDownloads.todayLinks) },
+        { label: '使用用户数', value: this.formatTokenCount(this.adminInstallerDownloads.totalUsers) },
+        { label: '今日使用用户', value: this.formatTokenCount(this.adminInstallerDownloads.todayUsers) }
+      ];
+    },
+    installerDownloadSeries() {
+      return Array.isArray(this.adminInstallerDownloads.trendSeries) ? this.adminInstallerDownloads.trendSeries : [];
+    },
+    installerDownloadChartTitle() {
+      const labels = {
+        '30d': '近 30 天生成趋势',
+        '7d': '近 7 天生成趋势',
+        '1d': '近 24 小时生成趋势',
+        '6h': '近 6 小时生成趋势'
+      };
+      return labels[this.adminInstallerDownloadsView] || '生成趋势';
+    },
+    installerDownloadChartPointItems() {
+      const series = this.installerDownloadSeries;
+      if (!series.length) return [];
+      const maxLinks = Math.max(1, ...series.map(item => Number(item.linkCount || 0)));
+      return series.map((item, index) => {
+        const linkCount = Number(item.linkCount || 0);
+        const x = series.length === 1 ? 50 : (index / (series.length - 1)) * 100;
+        const y = 92 - (linkCount / maxLinks) * 76;
+        return {
+          ...item,
+          x,
+          y,
+          linkCount
+        };
+      });
+    },
+    installerDownloadChartPoints() {
+      if (!this.installerDownloadChartPointItems.length) return '';
+      return this.installerDownloadChartPointItems.map(point => `${point.x.toFixed(2)},${point.y.toFixed(2)}`).join(' ');
+    },
+    installerDownloadChartLabels() {
+      const series = this.installerDownloadSeries;
+      if (!series.length) return [];
+      if (this.adminInstallerDownloadsView === '6h' || this.adminInstallerDownloadsView === '7d') return series;
+      const step = this.adminInstallerDownloadsView === '1d' ? 3 : 5;
+      const labels = series.filter((item, index) => index % step === 0);
+      const last = series[series.length - 1];
+      if (labels[labels.length - 1] !== last) labels.push(last);
+      return labels;
+    },
+    installerDownloadMaxLinks() {
+      const series = this.installerDownloadSeries;
+      return Math.max(0, ...series.map(item => Number(item.linkCount || 0)));
+    },
+    installerDownloadHoverStyle() {
+      if (!this.adminInstallerDownloadsHoverPoint) return {};
+      return {
+        left: `${this.adminInstallerDownloadsHoverPoint.x}%`,
+        top: `${this.adminInstallerDownloadsHoverPoint.y}%`
       };
     },
     showAiAssistant() {
@@ -1243,8 +1327,58 @@ createApp({
         console.error('连接 ManageBac Helper 失败：', error);
       }
     },
-    downloadManageBacInstaller() {
-      window.location.assign(MANAGEBAC_INSTALLER_DOWNLOAD_URL);
+    contentDispositionFilename(disposition) {
+      const value = String(disposition || '');
+      const encodedMatch = value.match(/filename\*=UTF-8''([^;]+)/i);
+      if (encodedMatch) {
+        try {
+          return decodeURIComponent(encodedMatch[1]);
+        } catch (error) {
+          return encodedMatch[1];
+        }
+      }
+      const plainMatch = value.match(/filename="([^"]+)"/i) || value.match(/filename=([^;]+)/i);
+      return plainMatch ? plainMatch[1].trim() : 'managebac-sync-helper.exe';
+    },
+    async downloadManageBacInstaller() {
+      if (!this.currentUser) {
+        ElementPlus.ElMessage.warning('请先登录或注册，再下载安装包。');
+        return;
+      }
+      try {
+        const response = await fetch(MANAGEBAC_INSTALLER_DOWNLOAD_URL, {
+          method: 'GET',
+          cache: 'no-store',
+          headers: {
+            ...this.authHeaders(),
+            Accept: 'application/json, application/vnd.microsoft.portable-executable'
+          }
+        });
+        const contentType = response.headers.get('Content-Type') || '';
+        if (!response.ok) {
+          const payload = contentType.includes('application/json') ? await response.json().catch(() => ({})) : {};
+          throw new Error(payload.message || payload.error || '安装包下载请求失败');
+        }
+        if (contentType.includes('application/json')) {
+          const payload = await response.json();
+          if (!payload.url) throw new Error('后端没有返回下载链接。');
+          window.location.assign(payload.url);
+          return;
+        }
+
+        const blob = await response.blob();
+        const filename = this.contentDispositionFilename(response.headers.get('Content-Disposition'));
+        const objectUrl = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = objectUrl;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+      } catch (error) {
+        ElementPlus.ElMessage.error(`安装包下载失败：${error.message}`);
+      }
     },
     async openManageBacLogin() {
       try {
@@ -1915,6 +2049,7 @@ createApp({
       if (this.adminSection === 'feedback') await this.loadAdminFeedback(1);
       if (this.adminSection === 'traffic') await this.loadAdminTraffic();
       if (this.adminSection === 'aiUsage') await this.loadAdminAiUsage();
+      if (this.adminSection === 'installerDownloads') await this.loadAdminInstallerDownloads();
       await this.recordVisit('admin');
     },
     async exitAdminMode() {
@@ -1934,6 +2069,7 @@ createApp({
       if (section === 'feedback') await this.loadAdminFeedback(1);
       if (section === 'traffic') await this.loadAdminTraffic();
       if (section === 'aiUsage') await this.loadAdminAiUsage();
+      if (section === 'installerDownloads') await this.loadAdminInstallerDownloads();
     },
     async recordVisit(page) {
       try {
@@ -2296,6 +2432,163 @@ createApp({
         }
       }).catch(() => {});
     },
+    normalizeInstallerDownloadLimitDraft(limit) {
+      const windowHours = Number(limit && limit.windowHours);
+      const linkLimit = Number(limit && limit.linkLimit);
+      if (!Number.isInteger(windowHours) || windowHours < 1 || windowHours > 8760) {
+        throw new Error('窗口小时数必须是 1 到 8760 之间的整数。');
+      }
+      if (!Number.isInteger(linkLimit) || linkLimit < 1 || linkLimit > 1000000) {
+        throw new Error('生成次数上限必须是 1 到 1000000 之间的整数。');
+      }
+      return { windowHours, linkLimit };
+    },
+    installerDownloadLimitDraftFromLimit(limit) {
+      return {
+        windowHours: Number(limit && limit.windowHours ? limit.windowHours : 24),
+        linkLimit: Number(limit && limit.linkLimit ? limit.linkLimit : 5)
+      };
+    },
+    async loadAdminInstallerDownloads(page = this.adminInstallerDownloadsPage) {
+      if (!this.isAdmin) return;
+      const nextPage = Number(page);
+      const safePage = Number.isFinite(nextPage) && nextPage > 0 ? Math.floor(nextPage) : this.adminInstallerDownloadsPage;
+      this.adminLoading = true;
+      try {
+        const url = `${ADMIN_API}/installer-downloads/summary?view=${encodeURIComponent(this.adminInstallerDownloadsView)}&page=${safePage}&pageSize=${this.adminInstallerDownloadsPageSize}`;
+        const payload = await this.apiJson(url, { cache: 'no-store' });
+        const globalLimit = this.installerDownloadLimitDraftFromLimit(payload.globalLimit);
+        const users = Array.isArray(payload.users) ? payload.users : [];
+        this.adminInstallerDownloads = {
+          seriesUnit: payload.seriesUnit || 'day',
+          globalLimit,
+          totalLinks: Number(payload.totalLinks || 0),
+          totalUsers: Number(payload.totalUsers || 0),
+          todayLinks: Number(payload.todayLinks || 0),
+          todayUsers: Number(payload.todayUsers || 0),
+          trendSeries: Array.isArray(payload.trendSeries) ? payload.trendSeries : [],
+          users
+        };
+        this.adminInstallerDownloadGlobalLimitDraft = this.installerDownloadLimitDraftFromLimit(globalLimit);
+        this.adminInstallerDownloadUserLimitDrafts = users.reduce((drafts, row) => {
+          const id = row && row.user ? String(row.user.id) : '';
+          if (!id) return drafts;
+          drafts[id] = this.installerDownloadLimitDraftFromLimit(row.effectiveLimit || globalLimit);
+          return drafts;
+        }, {});
+        this.adminInstallerDownloadsUsersTotal = Number(payload.usersTotal || 0);
+        this.adminInstallerDownloadsPage = Number(payload.page || safePage);
+        this.adminInstallerDownloadsHoverPoint = null;
+      } catch (error) {
+        ElementPlus.ElMessage.error(`下载统计读取失败：${error.message}`);
+      } finally {
+        this.adminLoading = false;
+      }
+    },
+    async switchAdminInstallerDownloadsView(view) {
+      if (view === this.adminInstallerDownloadsView) return;
+      this.adminInstallerDownloadsView = view;
+      this.adminInstallerDownloadsHoverPoint = null;
+      await this.loadAdminInstallerDownloads(this.adminInstallerDownloadsPage);
+    },
+    showInstallerDownloadPoint(point) {
+      this.adminInstallerDownloadsHoverPoint = point;
+    },
+    hideInstallerDownloadPoint() {
+      this.adminInstallerDownloadsHoverPoint = null;
+    },
+    installerDownloadLimitText(limit) {
+      const safe = this.installerDownloadLimitDraftFromLimit(limit);
+      return `${safe.windowHours} 小时 · ${this.formatTokenCount(safe.linkLimit)} 次`;
+    },
+    installerDownloadWindowUsageText(usage) {
+      const safe = usage || {};
+      return `${this.formatTokenCount(safe.linkCount)} 次`;
+    },
+    async saveAdminInstallerDownloadGlobalLimit() {
+      if (!this.isAdmin) return;
+      let limit;
+      try {
+        limit = this.normalizeInstallerDownloadLimitDraft(this.adminInstallerDownloadGlobalLimitDraft);
+      } catch (error) {
+        ElementPlus.ElMessage.warning(error.message);
+        return;
+      }
+      this.adminLoading = true;
+      try {
+        await this.apiJson(`${ADMIN_API}/installer-downloads/global-limit`, {
+          method: 'PUT',
+          body: JSON.stringify(limit)
+        });
+        ElementPlus.ElMessage.success('全局下载限制已保存。');
+        await this.loadAdminInstallerDownloads(this.adminInstallerDownloadsPage);
+      } catch (error) {
+        ElementPlus.ElMessage.error(`全局下载限制保存失败：${error.message}`);
+      } finally {
+        this.adminLoading = false;
+      }
+    },
+    async saveAdminInstallerDownloadUserLimit(row) {
+      if (!this.isAdmin || !row || !row.user) return;
+      const userId = String(row.user.id);
+      let limit;
+      try {
+        limit = this.normalizeInstallerDownloadLimitDraft(this.adminInstallerDownloadUserLimitDrafts[userId]);
+      } catch (error) {
+        ElementPlus.ElMessage.warning(error.message);
+        return;
+      }
+      this.adminLoading = true;
+      try {
+        await this.apiJson(`${ADMIN_API}/users/${encodeURIComponent(userId)}/installer-download-limit`, {
+          method: 'PUT',
+          body: JSON.stringify(limit)
+        });
+        ElementPlus.ElMessage.success('用户下载限制已保存。');
+        await this.loadAdminInstallerDownloads(this.adminInstallerDownloadsPage);
+      } catch (error) {
+        ElementPlus.ElMessage.error(`用户下载限制保存失败：${error.message}`);
+      } finally {
+        this.adminLoading = false;
+      }
+    },
+    async clearAdminInstallerDownloadUserLimit(row) {
+      if (!this.isAdmin || !row || !row.user) return;
+      const userId = String(row.user.id);
+      this.adminLoading = true;
+      try {
+        await this.apiJson(`${ADMIN_API}/users/${encodeURIComponent(userId)}/installer-download-limit`, { method: 'DELETE' });
+        ElementPlus.ElMessage.success('该用户已恢复全局下载限制。');
+        await this.loadAdminInstallerDownloads(this.adminInstallerDownloadsPage);
+      } catch (error) {
+        ElementPlus.ElMessage.error(`恢复全局下载限制失败：${error.message}`);
+      } finally {
+        this.adminLoading = false;
+      }
+    },
+    async clearAllAdminInstallerDownloadUserLimits() {
+      if (!this.isAdmin) return;
+      ElementPlus.ElMessageBox.confirm(
+        '确定清除所有用户个人下载限制，让所有用户重新使用全局设置？',
+        '统一全局限制',
+        {
+          confirmButtonText: '统一全局',
+          cancelButtonText: '取消',
+          type: 'warning'
+        }
+      ).then(async () => {
+        this.adminLoading = true;
+        try {
+          await this.apiJson(`${ADMIN_API}/installer-downloads/clear-user-limits`, { method: 'POST' });
+          ElementPlus.ElMessage.success('所有用户已恢复全局下载限制。');
+          await this.loadAdminInstallerDownloads(this.adminInstallerDownloadsPage);
+        } catch (error) {
+          ElementPlus.ElMessage.error(`统一全局失败：${error.message}`);
+        } finally {
+          this.adminLoading = false;
+        }
+      }).catch(() => {});
+    },
     async saveAdminFeedbackLimit() {
       if (!this.isAdmin) return;
       const feedbackLimitPerUser = Number(this.adminFeedbackLimitDraft);
@@ -2438,7 +2731,11 @@ createApp({
         'admin.ai_token.global_limit_update': '修改 AI 全局 Token 限制',
         'admin.ai_token.user_limit_update': '修改用户 AI Token 限制',
         'admin.ai_token.user_limit_clear': '清除用户 AI Token 覆盖',
-        'admin.ai_token.user_limits_clear_all': '清除全部 AI Token 覆盖'
+        'admin.ai_token.user_limits_clear_all': '清除全部 AI Token 覆盖',
+        'admin.installer_download.global_limit_update': '修改安装包下载全局限制',
+        'admin.installer_download.user_limit_update': '修改用户安装包下载限制',
+        'admin.installer_download.user_limit_clear': '清除用户安装包下载覆盖',
+        'admin.installer_download.user_limits_clear_all': '清除全部安装包下载覆盖'
       };
       return labels[action] || action;
     },
@@ -2985,6 +3282,28 @@ createApp({
         todayPromptTokens: 0,
         todayCompletionTokens: 0,
         todayCalls: 0,
+        trendSeries: [],
+        users: []
+      };
+      this.adminInstallerDownloadsView = '7d';
+      this.adminInstallerDownloadsHoverPoint = null;
+      this.adminInstallerDownloadsUsersTotal = 0;
+      this.adminInstallerDownloadsPage = 1;
+      this.adminInstallerDownloadGlobalLimitDraft = {
+        windowHours: 24,
+        linkLimit: 5
+      };
+      this.adminInstallerDownloadUserLimitDrafts = {};
+      this.adminInstallerDownloads = {
+        seriesUnit: 'day',
+        globalLimit: {
+          windowHours: 24,
+          linkLimit: 5
+        },
+        totalLinks: 0,
+        totalUsers: 0,
+        todayLinks: 0,
+        todayUsers: 0,
         trendSeries: [],
         users: []
       };

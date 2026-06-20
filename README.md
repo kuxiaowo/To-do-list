@@ -1,6 +1,6 @@
 # 待办清单时间线
 
-一个面向学习任务管理的待办清单 Web 应用。项目使用静态前端、Python 标准库 HTTP 服务和 SQLite 数据库存储，不需要 Node.js 构建流程，也不依赖第三方 Python 包。
+一个面向学习任务管理的待办清单 Web 应用。项目使用静态前端、Python 标准库 HTTP 服务和 SQLite 数据库存储，不需要 Node.js 构建流程；如启用 OSS 安装包下载，需要安装 `requirements.txt` 中的 Python 依赖。
 
 ## 功能
 
@@ -19,7 +19,7 @@
 ## 技术栈
 
 - 前端：Vue 3、Element Plus，本地静态文件加载。
-- 后端：Python 标准库 `http.server` + `sqlite3`。
+- 后端：Python 标准库 `http.server` + `sqlite3`；OSS 预签名下载使用 `alibabacloud-oss-v2`。
 - 数据库：SQLite，默认写入 `data/todo-list.db`。
 - 部署：可直接运行 `server.py`，也可使用 `deploy-first-run.sh` 创建 systemd 用户服务。
 
@@ -34,6 +34,7 @@
 ├── server.py            # 静态文件服务、API 服务和 SQLite 初始化
 ├── managebac-sync-helper/ # ManageBac 本地 Helper
 ├── deploy-first-run.sh  # Linux 首次部署脚本
+├── requirements.txt     # 可选 OSS 下载依赖
 ├── .env.example         # 环境变量示例
 ├── API.md               # API 接口文档
 ├── LICENSE              # MIT 许可证
@@ -55,6 +56,14 @@ data/
 ```bash
 python server.py
 ```
+
+如果需要启用 ManageBac Helper 安装包的 OSS 预签名下载，先安装可选依赖：
+
+```bash
+pip install -r requirements.txt
+```
+
+安装包下载接口需要用户登录。管理员后台的“下载统计”页可以查看生成次数，并配置全局或单用户的滚动窗口限制。
 
 默认监听：
 

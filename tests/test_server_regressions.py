@@ -3,8 +3,10 @@ import base64
 import json
 import os
 import sqlite3
+import sys
 import tempfile
 import threading
+import types
 import unittest
 import urllib.error
 import urllib.request
@@ -128,6 +130,19 @@ class ServerRegressionTests(unittest.TestCase):
                        total_tokens, prompt_cache_hit_tokens, prompt_cache_miss_tokens,
                        reasoning_tokens, created_at
                 FROM ai_usage_logs
+                ORDER BY id ASC
+                '''
+            ).fetchall()
+        finally:
+            conn.close()
+
+    def installer_download_rows(self):
+        conn = server.get_db()
+        try:
+            return conn.execute(
+                '''
+                SELECT user_id, source, object_key, filename, ip, created_at
+                FROM installer_download_logs
                 ORDER BY id ASC
                 '''
             ).fetchall()
@@ -393,6 +408,96 @@ class ServerRegressionTests(unittest.TestCase):
                     os.environ.pop(key, None)
                 else:
                     os.environ[key] = value
+
+    def test_managebac_oss_installer_config_reads_minimal_download_settings(self):
+        keys = server.MANAGEBAC_OSS_INSTALLER_ENV_NAMES
+        original = {key: os.environ.get(key) for key in keys}
+        try:
+            for key in keys:
+                os.environ.pop(key, None)
+            self.assertIsNone(server.get_managebac_oss_installer_config())
+
+            os.environ['ALIYUN_OSS_BUCKET'] = 'todolis-oss'
+            with self.assertRaises(server.ManageBacOssConfigError):
+                server.get_managebac_oss_installer_config()
+
+            os.environ['ALIYUN_OSS_ACCESS_KEY_ID'] = 'ak'
+            os.environ['ALIYUN_OSS_ACCESS_KEY_SECRET'] = 'secret'
+            os.environ['ALIYUN_OSS_REGION'] = 'cn-hangzhou'
+            os.environ['ALIYUN_OSS_INSTALLER_KEY'] = '/managebac-sync-helper/latest.exe'
+            os.environ['ALIYUN_OSS_ENDPOINT'] = 'https://oss-cn-hangzhou.aliyuncs.com'
+            os.environ['ALIYUN_OSS_SIGN_EXPIRES_SECONDS'] = '300'
+
+            config = server.get_managebac_oss_installer_config()
+
+            self.assertIsNotNone(config)
+            self.assertEqual(config.bucket, 'todolis-oss')
+            self.assertEqual(config.key, 'managebac-sync-helper/latest.exe')
+            self.assertEqual(config.filename, 'latest.exe')
+            self.assertEqual(config.expires_seconds, 300)
+        finally:
+            for key, value in original.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+    def test_managebac_oss_installer_url_uses_get_object_presign(self):
+        captured = {}
+
+        class FakeStaticCredentialsProvider:
+            def __init__(self, access_key_id, access_key_secret):
+                captured['access_key_id'] = access_key_id
+                captured['access_key_secret'] = access_key_secret
+
+        class FakeGetObjectRequest:
+            def __init__(self, **kwargs):
+                self.__dict__.update(kwargs)
+
+        class FakeClient:
+            def __init__(self, config):
+                captured['config'] = config
+
+            def presign(self, request, expires):
+                captured['request'] = request
+                captured['expires'] = expires
+                return types.SimpleNamespace(url='https://signed.example/download')
+
+        fake_oss = types.SimpleNamespace(
+            credentials=types.SimpleNamespace(StaticCredentialsProvider=FakeStaticCredentialsProvider),
+            config=types.SimpleNamespace(load_default=lambda: types.SimpleNamespace()),
+            Client=FakeClient,
+            GetObjectRequest=FakeGetObjectRequest,
+        )
+        original_module = sys.modules.get('alibabacloud_oss_v2')
+        sys.modules['alibabacloud_oss_v2'] = fake_oss
+        try:
+            config = server.ManageBacOssInstallerConfig(
+                access_key_id='ak',
+                access_key_secret='secret',
+                region='cn-hangzhou',
+                bucket='todolis-oss',
+                key='managebac-sync-helper/latest.exe',
+                endpoint='https://oss-cn-hangzhou.aliyuncs.com',
+                expires_seconds=600,
+                filename='ManageBac Helper.exe',
+            )
+
+            url = server.generate_managebac_oss_installer_url(config)
+
+            self.assertEqual(url, 'https://signed.example/download')
+            self.assertEqual(captured['access_key_id'], 'ak')
+            self.assertEqual(captured['config'].region, 'cn-hangzhou')
+            self.assertEqual(captured['config'].endpoint, 'https://oss-cn-hangzhou.aliyuncs.com')
+            self.assertEqual(captured['request'].bucket, 'todolis-oss')
+            self.assertEqual(captured['request'].key, 'managebac-sync-helper/latest.exe')
+            self.assertIn('attachment', captured['request'].response_content_disposition)
+            self.assertEqual(captured['expires'].total_seconds(), 600)
+        finally:
+            if original_module is None:
+                sys.modules.pop('alibabacloud_oss_v2', None)
+            else:
+                sys.modules['alibabacloud_oss_v2'] = original_module
 
     def avatar_payload(self, raw=None, filename='avatar.png', content_type='image/png'):
         png = base64.b64decode(
@@ -1135,6 +1240,117 @@ class ServerRegressionTests(unittest.TestCase):
         self.assertEqual(body.get('dimension'), 'output')
         self.assertEqual(len(calls), 0)
 
+    def test_installer_download_limits_global_override_and_summary(self):
+        student_token, student = self.register_user('installer-limit-student')
+        admin_token, admin = self.register_user('installer-limit-admin')
+        self.make_admin(admin['id'])
+        original_env = {key: os.environ.get(key) for key in server.MANAGEBAC_OSS_INSTALLER_ENV_NAMES}
+        original_module = sys.modules.get('alibabacloud_oss_v2')
+
+        class FakeStaticCredentialsProvider:
+            def __init__(self, access_key_id, access_key_secret):
+                self.access_key_id = access_key_id
+                self.access_key_secret = access_key_secret
+
+        class FakeGetObjectRequest:
+            def __init__(self, **kwargs):
+                self.__dict__.update(kwargs)
+
+        class FakeClient:
+            def __init__(self, config):
+                self.config = config
+
+            def presign(self, request, expires):
+                return types.SimpleNamespace(url=f'https://signed.example/{request.key}?expires={int(expires.total_seconds())}')
+
+        fake_oss = types.SimpleNamespace(
+            credentials=types.SimpleNamespace(StaticCredentialsProvider=FakeStaticCredentialsProvider),
+            config=types.SimpleNamespace(load_default=lambda: types.SimpleNamespace()),
+            Client=FakeClient,
+            GetObjectRequest=FakeGetObjectRequest,
+        )
+        try:
+            sys.modules['alibabacloud_oss_v2'] = fake_oss
+            for key in server.MANAGEBAC_OSS_INSTALLER_ENV_NAMES:
+                os.environ.pop(key, None)
+            os.environ['ALIYUN_OSS_ACCESS_KEY_ID'] = 'ak'
+            os.environ['ALIYUN_OSS_ACCESS_KEY_SECRET'] = 'secret'
+            os.environ['ALIYUN_OSS_REGION'] = 'cn-chengdu'
+            os.environ['ALIYUN_OSS_ENDPOINT'] = 'https://oss-cn-chengdu.aliyuncs.com'
+            os.environ['ALIYUN_OSS_BUCKET'] = 'todolis-oss'
+            os.environ['ALIYUN_OSS_INSTALLER_KEY'] = 'managebac-sync-helper/latest.exe'
+            os.environ['ALIYUN_OSS_INSTALLER_FILENAME'] = 'ManageBac Helper.exe'
+            os.environ['ALIYUN_OSS_SIGN_EXPIRES_SECONDS'] = '60'
+
+            status, body = self.request('GET', '/api/managebac-helper/installer')
+            self.assertEqual(status, 401, body)
+
+            status, body = self.request('PUT', '/api/admin/installer-downloads/global-limit', {
+                'windowHours': 24,
+                'linkLimit': 1,
+            }, token=admin_token)
+            self.assertEqual(status, 200, body)
+
+            status, body = self.request('GET', '/api/managebac-helper/installer', token=student_token)
+            self.assertEqual(status, 200, body)
+            self.assertEqual(body['source'], 'oss')
+            self.assertIn('https://signed.example/managebac-sync-helper/latest.exe', body['url'])
+            self.assertEqual(body['usage']['linkCount'], 1)
+
+            rows = self.installer_download_rows()
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]['user_id'], student['id'])
+            self.assertEqual(rows[0]['source'], 'oss')
+            self.assertEqual(rows[0]['object_key'], 'managebac-sync-helper/latest.exe')
+
+            status, body = self.request('GET', '/api/managebac-helper/installer', token=student_token)
+            self.assertEqual(status, 429, body)
+            self.assertEqual(body['currentLinkCount'], 1)
+
+            status, body = self.request('PUT', f"/api/admin/users/{student['id']}/installer-download-limit", {
+                'windowHours': 24,
+                'linkLimit': 2,
+            }, token=admin_token)
+            self.assertEqual(status, 200, body)
+
+            status, body = self.request('GET', '/api/managebac-helper/installer', token=student_token)
+            self.assertEqual(status, 200, body)
+            self.assertEqual(body['usage']['linkCount'], 2)
+
+            status, body = self.request('GET', '/api/admin/installer-downloads/summary?view=7d&page=1&pageSize=50', token=admin_token)
+            self.assertEqual(status, 200, body)
+            self.assertEqual(body['totalLinks'], 2)
+            rows_by_id = {row['user']['id']: row for row in body['users']}
+            self.assertTrue(rows_by_id[student['id']]['hasOverride'])
+            self.assertEqual(rows_by_id[student['id']]['windowUsage']['linkCount'], 2)
+
+            status, body = self.request('DELETE', f"/api/admin/users/{student['id']}/installer-download-limit", token=admin_token)
+            self.assertEqual(status, 200, body)
+            status, body = self.request('GET', '/api/managebac-helper/installer', token=student_token)
+            self.assertEqual(status, 429, body)
+
+            status, body = self.request('PUT', f"/api/admin/users/{student['id']}/installer-download-limit", {
+                'windowHours': 24,
+                'linkLimit': 3,
+            }, token=admin_token)
+            self.assertEqual(status, 200, body)
+            status, body = self.request('POST', '/api/admin/installer-downloads/clear-user-limits', token=admin_token)
+            self.assertEqual(status, 200, body)
+            status, body = self.request('GET', '/api/admin/installer-downloads/summary?view=7d&page=1&pageSize=50', token=admin_token)
+            self.assertEqual(status, 200, body)
+            rows_by_id = {row['user']['id']: row for row in body['users']}
+            self.assertFalse(rows_by_id[student['id']]['hasOverride'])
+        finally:
+            for key, value in original_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+            if original_module is None:
+                sys.modules.pop('alibabacloud_oss_v2', None)
+            else:
+                sys.modules['alibabacloud_oss_v2'] = original_module
+
     def test_ai_usage_admin_endpoints_require_admin(self):
         token, _ = self.register_user('ai-usage-normal-user')
 
@@ -1147,6 +1363,15 @@ class ServerRegressionTests(unittest.TestCase):
         }, token=token)
         self.assertEqual(status, 403, body)
         status, body = self.request('POST', '/api/admin/ai-usage/clear-user-limits', token=token)
+        self.assertEqual(status, 403, body)
+        status, body = self.request('GET', '/api/admin/installer-downloads/summary', token=token)
+        self.assertEqual(status, 403, body)
+        status, body = self.request('PUT', '/api/admin/installer-downloads/global-limit', {
+            'windowHours': 24,
+            'linkLimit': 5,
+        }, token=token)
+        self.assertEqual(status, 403, body)
+        status, body = self.request('POST', '/api/admin/installer-downloads/clear-user-limits', token=token)
         self.assertEqual(status, 403, body)
 
     def test_foreign_keys_are_enforced_on_new_connections(self):
@@ -1454,6 +1679,24 @@ class ServerRegressionTests(unittest.TestCase):
         self.assertIn("`${ADMIN_API}/ai-usage/clear-user-limits`", app_js)
         self.assertIn('.ai-usage-output-line', style_css)
         self.assertIn('.ai-user-limit-editor', style_css)
+
+    def test_admin_installer_download_frontend_scaffold(self):
+        index_html = Path('index.html').read_text(encoding='utf-8')
+        app_js = Path('app.js').read_text(encoding='utf-8')
+        style_css = Path('style.css').read_text(encoding='utf-8')
+
+        self.assertIn("adminSection === 'installerDownloads'", index_html)
+        self.assertIn('下载统计', index_html)
+        self.assertIn('saveAdminInstallerDownloadGlobalLimit', index_html)
+        self.assertIn('saveAdminInstallerDownloadUserLimit(row)', index_html)
+        self.assertIn('clearAllAdminInstallerDownloadUserLimits', index_html)
+        self.assertIn('loadAdminInstallerDownloads', app_js)
+        self.assertIn("`${ADMIN_API}/installer-downloads/summary", app_js)
+        self.assertIn("`${ADMIN_API}/installer-downloads/global-limit`", app_js)
+        self.assertIn("`${ADMIN_API}/installer-downloads/clear-user-limits`", app_js)
+        self.assertIn('contentDispositionFilename', app_js)
+        self.assertIn('.installer-download-line', style_css)
+        self.assertIn('.installer-download-limit-fields', style_css)
 
 
 if __name__ == '__main__':

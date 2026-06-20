@@ -41,6 +41,8 @@ function configuredOrigins() {
   return new Set([
     "http://localhost:8092",
     "http://127.0.0.1:8092",
+    "https://nethub.wiki",
+    "https://www.nethub.wiki",
     ...configured
   ]);
 }
