@@ -393,6 +393,12 @@ class ServerRegressionTests(unittest.TestCase):
         self.assertIn('不要补默认 medium', server.AI_REPAIR_SYSTEM_PROMPT)
 
 
+    def test_ai_prompts_are_loaded_from_json_file(self):
+        prompts = json.loads((server.BASE_DIR / 'ai_prompts.json').read_text(encoding='utf-8'))
+        self.assertEqual(prompts['AI_CHAT_SYSTEM_PROMPT'].strip(), server.AI_CHAT_SYSTEM_PROMPT)
+        self.assertEqual(prompts['AI_STREAM_SYSTEM_PROMPT'].strip(), server.AI_STREAM_SYSTEM_PROMPT)
+        self.assertEqual(prompts['AI_REPAIR_SYSTEM_PROMPT'].strip(), server.AI_REPAIR_SYSTEM_PROMPT)
+
     def test_dotenv_loader_sets_missing_values_without_overriding_existing_env(self):
         keys = ['DOTENV_TEST_KEY', 'DOTENV_EXISTING_KEY', 'DOTENV_QUOTED_KEY']
         original = {key: os.environ.get(key) for key in keys}

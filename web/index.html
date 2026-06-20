@@ -12,7 +12,7 @@
       document.documentElement.dataset.theme = savedTheme === 'dark' ? 'dark' : 'light';
     })();
   </script>
-  <link rel="stylesheet" href="./style.css?v=calendar-jump-20260616-3" />
+  <link rel="stylesheet" href="./style.css?v=managebac-help-20260620-1" />
 </head>
 <body>
   <div id="app" v-cloak>
@@ -1541,7 +1541,34 @@
     >
       <template #header>
         <div class="managebac-dialog-header">
-          <span>同步 ManageBac</span>
+          <div class="managebac-dialog-title">
+            <span>同步 ManageBac</span>
+            <el-popover
+              placement="bottom-start"
+              trigger="click"
+              width="360"
+              popper-class="ai-help-popover"
+            >
+              <template #reference>
+                <button class="ai-help-button managebac-help-button" type="button" title="ManageBac 同步说明">?</button>
+              </template>
+              <div class="ai-help-content">
+                <div class="ai-help-title">ManageBac 同步说明</div>
+                <div class="ai-help-section">
+                  <div class="ai-help-section-title">这个辅助程序做什么</div>
+                  <p>它是 nethub.wiki 的本地 Helper，用来打开 ManageBac 登录窗口、读取你自己账号下的任务页面，并把页面解析成可预览的任务列表。</p>
+                </div>
+                <div class="ai-help-section">
+                  <div class="ai-help-section-title">Windows 弹窗怎么处理</div>
+                  <p>点击同步时，浏览器或 Windows 可能询问是否打开本地应用；如果你正在 nethub.wiki 上操作，可以确认打开。安装包未签名时可能出现“未知发布者”，这是签名提示，不代表 Helper 会读取密码。</p>
+                </div>
+                <div class="ai-help-section">
+                  <div class="ai-help-section-title">技术路线</div>
+                  <p>网页通过 managebac-sync://wake 唤起 Helper；Helper 只监听 127.0.0.1 本地接口；登录 cookie 存在 Helper 独立浏览器环境；Helper 返回解析后的任务，网页负责预览、科目识别和确认导入。</p>
+                </div>
+              </div>
+            </el-popover>
+          </div>
           <el-button plain size="small" @click="downloadManageBacInstaller">下载安装包</el-button>
         </div>
       </template>
