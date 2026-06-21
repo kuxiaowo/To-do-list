@@ -108,6 +108,55 @@ body {
   transition: grid-template-columns 0.2s ease;
 }
 
+.site-credit {
+  grid-column: 1 / -1;
+  border-top: 1px solid var(--line);
+  display: flex;
+  justify-content: center;
+  padding: 2px 0 0;
+}
+
+.app-shell.sidebar-collapsed > .site-credit {
+  grid-column: 1;
+}
+
+.site-credit-inner {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 34px;
+  padding: 3px 8px;
+  color: var(--muted);
+}
+
+.site-credit-logo {
+  width: 32px;
+  height: 24px;
+  object-fit: contain;
+  display: block;
+  flex: 0 0 auto;
+}
+
+.site-credit-copy {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.site-credit-copy span {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.site-credit-copy strong {
+  color: var(--text-strong);
+  font-size: 0.82rem;
+  font-weight: 900;
+}
+
 .app-shell.sidebar-collapsed {
   grid-template-columns: minmax(0, 1fr);
 }
