@@ -1469,12 +1469,6 @@ createApp({
           String(existing.subject || '').trim() === String(task.subject || '').trim();
       });
     },
-    manageBacImportNote(task) {
-      const lines = [task.note || `ManageBac: ${task.sourceId || ''}`];
-      if (task.rawCourseName) lines.push(`ManageBac 课程：${task.rawCourseName}`);
-      if (task.sourceUrl) lines.push(`ManageBac 链接：${task.sourceUrl}`);
-      return lines.filter(Boolean).join('\n');
-    },
     async importManageBacTasks() {
       if (!this.currentUser) {
         ElementPlus.ElMessage.warning('请先登录或注册，再导入任务。');
@@ -1505,7 +1499,7 @@ createApp({
             dueAt: String(task.dueAt || '').trim(),
             pool: 'todo',
             priority: ['high', 'medium', 'low'].includes(task.priority) ? task.priority : 'medium',
-            note: this.manageBacImportNote(task),
+            note: '',
             completed: false
           };
           const savedTask = await this.createTaskOnServer(payload);
