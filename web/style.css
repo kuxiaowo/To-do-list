@@ -2684,6 +2684,20 @@ body.is-schedule-touch-dragging * {
   line-height: 1;
 }
 
+.compact-metrics {
+  gap: 10px;
+  margin: 12px 0;
+}
+
+.compact-metrics .traffic-metric {
+  padding: 10px 12px;
+}
+
+.compact-metrics .traffic-metric-value {
+  margin-top: 6px;
+  font-size: 1.35rem;
+}
+
 .traffic-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.4fr) minmax(260px, 0.6fr);
@@ -2767,6 +2781,24 @@ body.is-schedule-touch-dragging * {
   background:
     linear-gradient(to top, var(--brand-soft), transparent),
     repeating-linear-gradient(to bottom, transparent, transparent 37px, var(--line) 38px);
+}
+
+.compact-analytics-grid {
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.compact-analytics-grid .traffic-chart-panel,
+.compact-analytics-grid .traffic-top-panel {
+  padding: 12px;
+}
+
+.compact-analytics-grid .traffic-chart {
+  min-height: 172px;
+}
+
+.compact-analytics-grid .traffic-chart svg {
+  height: 140px;
 }
 
 .traffic-chart-line {

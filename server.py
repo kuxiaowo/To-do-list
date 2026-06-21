@@ -3002,7 +3002,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
                 SELECT
                     COUNT(*) AS calls,
                     COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
-                    COALESCE(SUM(completion_tokens), 0) AS completion_tokens
+                    COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
+                    COALESCE(SUM(total_tokens), 0) AS total_tokens
                 FROM ai_usage_logs
                 '''
             ).fetchone()
@@ -3011,7 +3012,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
                 SELECT
                     COUNT(*) AS calls,
                     COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
-                    COALESCE(SUM(completion_tokens), 0) AS completion_tokens
+                    COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
+                    COALESCE(SUM(total_tokens), 0) AS total_tokens
                 FROM ai_usage_logs
                 WHERE substr(created_at, 1, 10) = ?
                 ''',
@@ -3102,9 +3104,11 @@ class TodoHandler(SimpleHTTPRequestHandler):
             'globalLimit': global_limit,
             'totalPromptTokens': int(total_row['prompt_tokens'] or 0),
             'totalCompletionTokens': int(total_row['completion_tokens'] or 0),
+            'totalTokens': int(total_row['total_tokens'] or 0),
             'totalCalls': int(total_row['calls'] or 0),
             'todayPromptTokens': int(today_row['prompt_tokens'] or 0),
             'todayCompletionTokens': int(today_row['completion_tokens'] or 0),
+            'todayTotalTokens': int(today_row['total_tokens'] or 0),
             'todayCalls': int(today_row['calls'] or 0),
             'trendSeries': trend_series,
             'users': user_payload,

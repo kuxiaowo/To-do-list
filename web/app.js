@@ -311,7 +311,7 @@ createApp({
       adminAiUsageHoverPoint: null,
       adminAiUsageUsersTotal: 0,
       adminAiUsagePage: 1,
-      adminAiUsagePageSize: 10,
+      adminAiUsagePageSize: 6,
       adminAiGlobalLimitDraft: {
         windowHours: 24,
         inputTokenLimit: 200000,
@@ -327,9 +327,11 @@ createApp({
         },
         totalPromptTokens: 0,
         totalCompletionTokens: 0,
+        totalTokens: 0,
         totalCalls: 0,
         todayPromptTokens: 0,
         todayCompletionTokens: 0,
+        todayTotalTokens: 0,
         todayCalls: 0,
         trendSeries: [],
         users: []
@@ -338,7 +340,7 @@ createApp({
       adminInstallerDownloadsHoverPoint: null,
       adminInstallerDownloadsUsersTotal: 0,
       adminInstallerDownloadsPage: 1,
-      adminInstallerDownloadsPageSize: 10,
+      adminInstallerDownloadsPageSize: 6,
       adminInstallerDownloadGlobalLimitDraft: {
         windowHours: 24,
         linkLimit: 5
@@ -539,10 +541,10 @@ createApp({
     },
     aiUsageMetricCards() {
       return [
-        { label: '全站输入 token', value: this.formatTokenCount(this.adminAiUsage.totalPromptTokens) },
-        { label: '全站输出 token', value: this.formatTokenCount(this.adminAiUsage.totalCompletionTokens) },
-        { label: '总调用次数', value: this.formatTokenCount(this.adminAiUsage.totalCalls) },
-        { label: '今日输入 / 输出', value: `${this.formatTokenCount(this.adminAiUsage.todayPromptTokens)} / ${this.formatTokenCount(this.adminAiUsage.todayCompletionTokens)}` }
+        { label: '累计 token', value: this.formatTokenCount(this.adminAiUsage.totalTokens) },
+        { label: '累计输入 / 输出', value: `${this.formatTokenCount(this.adminAiUsage.totalPromptTokens)} / ${this.formatTokenCount(this.adminAiUsage.totalCompletionTokens)}` },
+        { label: '今日 token', value: this.formatTokenCount(this.adminAiUsage.todayTotalTokens) },
+        { label: '调用总计', value: this.formatTokenCount(this.adminAiUsage.totalCalls) }
       ];
     },
     aiUsageSeries() {
@@ -619,10 +621,10 @@ createApp({
     },
     installerDownloadMetricCards() {
       return [
-        { label: '总生成次数', value: this.formatTokenCount(this.adminInstallerDownloads.totalLinks) },
-        { label: '今日生成次数', value: this.formatTokenCount(this.adminInstallerDownloads.todayLinks) },
-        { label: '使用用户数', value: this.formatTokenCount(this.adminInstallerDownloads.totalUsers) },
-        { label: '今日使用用户', value: this.formatTokenCount(this.adminInstallerDownloads.todayUsers) }
+        { label: '累计生成', value: this.formatTokenCount(this.adminInstallerDownloads.totalLinks) },
+        { label: '今日生成', value: this.formatTokenCount(this.adminInstallerDownloads.todayLinks) },
+        { label: '累计用户', value: this.formatTokenCount(this.adminInstallerDownloads.totalUsers) },
+        { label: '今日用户', value: this.formatTokenCount(this.adminInstallerDownloads.todayUsers) }
       ];
     },
     installerDownloadSeries() {
@@ -2311,9 +2313,11 @@ createApp({
           globalLimit,
           totalPromptTokens: Number(payload.totalPromptTokens || 0),
           totalCompletionTokens: Number(payload.totalCompletionTokens || 0),
+          totalTokens: Number(payload.totalTokens || (Number(payload.totalPromptTokens || 0) + Number(payload.totalCompletionTokens || 0))),
           totalCalls: Number(payload.totalCalls || 0),
           todayPromptTokens: Number(payload.todayPromptTokens || 0),
           todayCompletionTokens: Number(payload.todayCompletionTokens || 0),
+          todayTotalTokens: Number(payload.todayTotalTokens || (Number(payload.todayPromptTokens || 0) + Number(payload.todayCompletionTokens || 0))),
           todayCalls: Number(payload.todayCalls || 0),
           trendSeries: Array.isArray(payload.trendSeries) ? payload.trendSeries : [],
           users
@@ -3297,9 +3301,11 @@ createApp({
         },
         totalPromptTokens: 0,
         totalCompletionTokens: 0,
+        totalTokens: 0,
         totalCalls: 0,
         todayPromptTokens: 0,
         todayCompletionTokens: 0,
+        todayTotalTokens: 0,
         todayCalls: 0,
         trendSeries: [],
         users: []

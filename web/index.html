@@ -785,14 +785,14 @@
             <el-button plain @click="loadAdminAiUsage(adminAiUsagePage)">刷新统计</el-button>
           </div>
 
-          <div class="traffic-metrics">
+          <div class="traffic-metrics compact-metrics">
             <article v-for="metric in aiUsageMetricCards" :key="metric.label" class="traffic-metric">
               <div class="traffic-metric-label">{{ metric.label }}</div>
               <div class="traffic-metric-value">{{ metric.value }}</div>
             </article>
           </div>
 
-          <div class="traffic-grid">
+          <div class="traffic-grid compact-analytics-grid">
             <section class="traffic-chart-panel">
               <div class="traffic-section-title">
                 <span>{{ aiUsageChartTitle }}</span>
@@ -1000,14 +1000,14 @@
             <el-button plain @click="loadAdminInstallerDownloads(adminInstallerDownloadsPage)">刷新统计</el-button>
           </div>
 
-          <div class="traffic-metrics">
+          <div class="traffic-metrics compact-metrics">
             <article v-for="metric in installerDownloadMetricCards" :key="metric.label" class="traffic-metric">
               <div class="traffic-metric-label">{{ metric.label }}</div>
               <div class="traffic-metric-value">{{ metric.value }}</div>
             </article>
           </div>
 
-          <div class="traffic-grid">
+          <div class="traffic-grid compact-analytics-grid">
             <section class="traffic-chart-panel">
               <div class="traffic-section-title">
                 <span>{{ installerDownloadChartTitle }}</span>
