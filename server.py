@@ -2021,8 +2021,6 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return self.write_json({'ok': True})
         if path.startswith('/api/'):
             return self.write_json({'error': 'not found'}, status=HTTPStatus.NOT_FOUND)
-        if path in {'/', '/index.html'}:
-            self.record_visit('home', path)
         if not is_allowed_static_path(path):
             self.send_error(HTTPStatus.NOT_FOUND, 'Not found')
             return
@@ -2787,7 +2785,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
         if payload is None:
             return
         page = str(payload.get('page', '')).strip()
-        if page not in {'admin'}:
+        if page not in {'home', 'admin'}:
             return self.write_json({'error': 'invalid page'}, status=HTTPStatus.BAD_REQUEST)
         user = self.current_user()
         visit_path = str(payload.get('path', '')).strip() or urlparse(self.path).path
@@ -2805,6 +2803,24 @@ class TodoHandler(SimpleHTTPRequestHandler):
         except ValueError:
             return self.write_json({'error': 'invalid pagination'}, status=HTTPStatus.BAD_REQUEST)
         offset = (page - 1) * page_size
+
+        user_filter = str(query.get('userId', ['all'])[0]).strip() or 'all'
+        visit_filter_sql = ''
+        visit_filter_params = []
+        if user_filter == 'all':
+            pass
+        elif user_filter == 'anonymous':
+            visit_filter_sql = ' AND visit_logs.user_id IS NULL'
+        else:
+            try:
+                target_user_id = int(user_filter)
+            except ValueError:
+                return self.write_json({'error': 'invalid user filter'}, status=HTTPStatus.BAD_REQUEST)
+            if target_user_id <= 0:
+                return self.write_json({'error': 'invalid user filter'}, status=HTTPStatus.BAD_REQUEST)
+            user_filter = str(target_user_id)
+            visit_filter_sql = ' AND visit_logs.user_id = ?'
+            visit_filter_params = [target_user_id]
 
         now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0, tzinfo=None)
         today = now.date()
@@ -2828,48 +2844,58 @@ class TodoHandler(SimpleHTTPRequestHandler):
         start_key = start_dt.strftime('%Y-%m-%dT%H:%M:%SZ')
 
         with get_db() as conn:
-            total_visits = conn.execute('SELECT COUNT(*) FROM visit_logs').fetchone()[0]
-            today_visits = conn.execute(
-                "SELECT COUNT(*) FROM visit_logs WHERE substr(created_at, 1, 10) = ?",
-                (today_key,),
+            total_visits = conn.execute(
+                f'SELECT COUNT(*) FROM visit_logs WHERE 1 = 1{visit_filter_sql}',
+                visit_filter_params,
             ).fetchone()[0]
-            unique_ips = conn.execute("SELECT COUNT(DISTINCT NULLIF(ip, '')) FROM visit_logs").fetchone()[0]
+            today_visits = conn.execute(
+                f"SELECT COUNT(*) FROM visit_logs WHERE substr(created_at, 1, 10) = ?{visit_filter_sql}",
+                [today_key, *visit_filter_params],
+            ).fetchone()[0]
+            unique_ips = conn.execute(
+                f"SELECT COUNT(DISTINCT NULLIF(ip, '')) FROM visit_logs WHERE 1 = 1{visit_filter_sql}",
+                visit_filter_params,
+            ).fetchone()[0]
             today_unique_ips = conn.execute(
-                "SELECT COUNT(DISTINCT NULLIF(ip, '')) FROM visit_logs WHERE substr(created_at, 1, 10) = ?",
-                (today_key,),
+                f"SELECT COUNT(DISTINCT NULLIF(ip, '')) FROM visit_logs WHERE substr(created_at, 1, 10) = ?{visit_filter_sql}",
+                [today_key, *visit_filter_params],
             ).fetchone()[0]
             trend_rows = conn.execute(
-                '''
+                f'''
                 SELECT ip, created_at
                 FROM visit_logs
-                WHERE created_at >= ?
+                WHERE created_at >= ?{visit_filter_sql}
                 ORDER BY created_at ASC
                 ''',
-                (start_key,),
+                [start_key, *visit_filter_params],
             ).fetchall()
             top_rows = conn.execute(
-                '''
+                f'''
                 SELECT ip, COUNT(*) AS visits, MAX(created_at) AS last_visit_at
                 FROM visit_logs
-                WHERE ip != '' AND created_at >= ?
+                WHERE ip != '' AND created_at >= ?{visit_filter_sql}
                 GROUP BY ip
                 ORDER BY visits DESC, last_visit_at DESC
                 LIMIT 10
                 ''',
-                (start_key,),
+                [start_key, *visit_filter_params],
             ).fetchall()
-            recent_total = conn.execute('SELECT COUNT(*) FROM visit_logs').fetchone()[0]
+            recent_total = conn.execute(
+                f'SELECT COUNT(*) FROM visit_logs WHERE 1 = 1{visit_filter_sql}',
+                visit_filter_params,
+            ).fetchone()[0]
             recent_rows = conn.execute(
-                '''
+                f'''
                 SELECT visit_logs.id, visit_logs.ip, visit_logs.page, visit_logs.path,
                        visit_logs.user_id, visit_logs.user_agent, visit_logs.referer,
                        visit_logs.created_at, users.name AS user_name, users.nickname AS user_nickname
                 FROM visit_logs
                 LEFT JOIN users ON users.id = visit_logs.user_id
+                WHERE 1 = 1{visit_filter_sql}
                 ORDER BY visit_logs.created_at DESC, visit_logs.id DESC
                 LIMIT ? OFFSET ?
                 ''',
-                (page_size, offset),
+                [*visit_filter_params, page_size, offset],
             ).fetchall()
 
         trend_by_bucket = {}
@@ -2903,6 +2929,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
 
         return self.write_json({
             'trafficView': traffic_view,
+            'userFilter': user_filter,
             'seriesUnit': series_unit,
             'totalVisits': total_visits,
             'todayVisits': today_visits,

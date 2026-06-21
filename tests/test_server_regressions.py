@@ -1740,9 +1740,9 @@ class ServerRegressionTests(unittest.TestCase):
         index_html = INDEX_HTML_PATH.read_text(encoding='utf-8')
         app_js = APP_JS_PATH.read_text(encoding='utf-8')
 
-        self.assertIn('没有截止时间时会显示在“待安排DDL”', index_html)
-        self.assertIn('留空则放入待安排DDL', index_html)
-        self.assertIn(": '待安排DDL'", app_js)
+        self.assertIn('没有截止时间时会显示在“待定截止时间”', index_html)
+        self.assertIn('留空则放入待定截止时间', index_html)
+        self.assertIn(": '待定截止时间'", app_js)
 
     def test_ai_frontend_entry_only_renders_on_ddl_page(self):
         index_html = INDEX_HTML_PATH.read_text(encoding='utf-8')

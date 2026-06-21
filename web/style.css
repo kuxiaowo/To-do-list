@@ -2605,6 +2605,10 @@ body.is-schedule-touch-dragging * {
   margin: 0;
 }
 
+.traffic-filter-row {
+  margin-top: 14px;
+}
+
 .admin-user-avatar {
   width: 38px;
   height: 38px;

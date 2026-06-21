@@ -285,6 +285,7 @@ createApp({
       adminFeedbackActive: null,
       adminFeedbackReply: '',
       adminTrafficView: '7d',
+      adminTrafficUserFilter: 'all',
       adminTrafficHoverPoint: null,
       adminTrafficRecentTotal: 0,
       adminTrafficRecentPage: 1,
@@ -374,27 +375,27 @@ createApp({
           key: 'add-task',
           target: 'add-task',
           title: '从这里新增任务',
-          text: '在这里新增带DDL或是弹性的任务安排。',
+          text: '在这里新增有截止时间或暂时待定的任务。',
           page: 'ddl'
         },
         {
           key: 'task-pool',
           target: 'task-pool',
-          title: '左侧是待安排任务池',
-          text: '没有想好截止时间的任务会先放在这里，想好之后在设置截止时间也不迟。',
+          title: '左侧是待定截止时间',
+          text: '还没确定截止时间的任务会先放在这里，想好之后再设置也不迟。',
           page: 'ddl'
         },
         {
           key: 'page-nav',
           target: 'page-nav',
           title: '两个核心视图',
-          text: 'DDL 日期时间线用于看截止日期，每日安排用于把任务拆到具体时间格子里执行。',
+          text: 'DDL 时间线用于看截止日期，每日安排用于把任务拆到具体时间段里执行。',
           page: null
         },
         {
           key: 'ddl-timeline',
           target: 'ddl-timeline',
-          title: 'DDL 会按日期展开',
+          title: 'DDL 按日期展开',
           text: '带截止时间的任务会自动落到对应日期列。可以用定位今天、快捷定位、后一周快速移动。',
           page: 'ddl'
         },
@@ -402,7 +403,7 @@ createApp({
           key: 'switch-daily',
           target: 'daily-tab',
           title: '切到每日安排',
-          text: '请点击上方“每日安排”页签，进入每天的时间格子视图。',
+          text: '请点击上方“每日安排”页签，进入每天的时间段视图。',
           page: 'ddl',
           waitForPage: 'daily',
           allowTargetClick: true
@@ -410,15 +411,15 @@ createApp({
         {
           key: 'daily-tools',
           target: 'daily-tools',
-          title: '每日安排使用时间格子',
-          text: '你可以维护一周模板，也可以只编辑某一天的时间格子，让安排贴合当天节奏。',
+          title: '每日安排使用时间段',
+          text: '你可以维护一周模板，也可以只编辑某一天的时间段，让安排贴合当天节奏。',
           page: 'daily'
         },
         {
           key: 'ddl-dock',
           target: 'ddl-dock',
           title: '把 DDL 拖进每天的计划',
-          text: '每日安排底部会显示按时间排序的 DDL。可以拖到上方时间格子生成安排，也可以点击打开详情修改或标记完成。',
+          text: '底部是已设置截止时间的任务。拖到上方时间段后，就会变成当天安排。',
           page: 'daily'
         },
         {
@@ -998,6 +999,7 @@ createApp({
     this.setDdlCalendarMonth(this.currentViewDateKey);
     document.addEventListener('click', this.closeAccountMenu);
     await this.loadCurrentUser();
+    await this.recordVisit('home');
     await this.loadSubjectTemplate();
     await this.loadScheduleConfig();
     await this.loadTasks();
@@ -1776,7 +1778,7 @@ createApp({
     },
     aiFormatFieldValue(field, value) {
       if (field === 'priority') return this.priorityLabel(value || 'medium');
-      if (field === 'dueAt') return value ? String(value).replace('T', ' ').slice(0, 16) : '待安排DDL';
+      if (field === 'dueAt') return value ? String(value).replace('T', ' ').slice(0, 16) : '待定截止时间';
       return value === '' || value === null || value === undefined ? '空' : String(value);
     },
     aiActionPreviewFields(action) {
@@ -2146,7 +2148,7 @@ createApp({
         return;
       }
       ElementPlus.ElMessageBox.confirm(
-        `确定删除用户「${user.name}（${user.nickname}）」？该用户的任务、每日安排、时间格子配置和登录会话都会被删除。`,
+        `确定删除用户「${user.name}（${user.nickname}）」？该用户的任务、每日安排、时间段配置和登录会话都会被删除。`,
         '删除用户',
         {
           confirmButtonText: '删除',
@@ -2225,8 +2227,17 @@ createApp({
       const safePage = Number.isFinite(nextPage) && nextPage > 0 ? Math.floor(nextPage) : this.adminTrafficRecentPage;
       this.adminLoading = true;
       try {
-        const url = `${ADMIN_API}/traffic/summary?view=${encodeURIComponent(this.adminTrafficView)}&page=${safePage}&pageSize=${this.adminTrafficRecentPageSize}`;
+        const params = new URLSearchParams({
+          view: this.adminTrafficView,
+          page: String(safePage),
+          pageSize: String(this.adminTrafficRecentPageSize)
+        });
+        if (this.adminTrafficUserFilter && this.adminTrafficUserFilter !== 'all') {
+          params.set('userId', this.adminTrafficUserFilter);
+        }
+        const url = `${ADMIN_API}/traffic/summary?${params.toString()}`;
         const payload = await this.apiJson(url, { cache: 'no-store' });
+        this.adminTrafficUserFilter = payload.userFilter || this.adminTrafficUserFilter || 'all';
         this.adminTraffic = {
           seriesUnit: payload.seriesUnit || 'day',
           totalVisits: Number(payload.totalVisits || 0),
@@ -2251,6 +2262,11 @@ createApp({
       this.adminTrafficView = view;
       this.adminTrafficHoverPoint = null;
       await this.loadAdminTraffic(this.adminTrafficRecentPage);
+    },
+    async handleAdminTrafficUserFilterChange() {
+      this.adminTrafficHoverPoint = null;
+      this.adminTrafficRecentPage = 1;
+      await this.loadAdminTraffic(1);
     },
     showTrafficPoint(point) {
       this.adminTrafficHoverPoint = point;
@@ -2715,9 +2731,9 @@ createApp({
         'schedule_item.reopen': '取消完成每日安排',
         'schedule_item.delete': '删除每日安排',
         'schedule_config.template_update': '更新一周模板',
-        'schedule_config.day_update': '更新单日时间格子',
-        'schedule_config.day_reset': '重置单日时间格子',
-        'schedule_config.reset': '重置全部时间格子',
+        'schedule_config.day_update': '更新单日时间段',
+        'schedule_config.day_reset': '重置单日时间段',
+        'schedule_config.reset': '重置全部时间段',
         'admin.user.delete': '删除用户',
         'admin.user.update': '更新用户',
         'user.nickname.update': '修改昵称',
@@ -2802,6 +2818,7 @@ createApp({
         await this.loadTasks();
         await this.loadHabits();
         await this.loadScheduleItems();
+        await this.recordVisit('home');
         ElementPlus.ElMessage.success('登录成功。');
       } catch (error) {
         ElementPlus.ElMessage.error(`登录失败：${error.message}`);
@@ -2822,6 +2839,7 @@ createApp({
         await this.loadTasks();
         await this.loadHabits();
         await this.loadScheduleItems();
+        await this.recordVisit('home');
         ElementPlus.ElMessage.success('注册成功，已自动登录。');
       } catch (error) {
         ElementPlus.ElMessage.error(`注册失败：${error.message}`);
@@ -3245,6 +3263,7 @@ createApp({
       this.adminFeedbackActive = null;
       this.adminFeedbackReply = '';
       this.adminTrafficView = '7d';
+      this.adminTrafficUserFilter = 'all';
       this.adminTrafficHoverPoint = null;
       this.adminTrafficRecentTotal = 0;
       this.adminTrafficRecentPage = 1;
@@ -3389,7 +3408,7 @@ createApp({
         this.scheduleTemplateVersions = Array.isArray(payload.templateVersions) ? payload.templateVersions : [];
         this.scheduleDayOverrides = payload.dayOverrides && typeof payload.dayOverrides === 'object' ? payload.dayOverrides : {};
       } catch (error) {
-        console.error('读取时间格子配置失败：', error);
+        console.error('读取时间段配置失败：', error);
         this.defaultWeekSlots = this.cloneSlots(DEFAULT_WEEK_SLOTS);
         this.scheduleTemplateVersions = [];
         this.scheduleDayOverrides = {};
@@ -3818,7 +3837,7 @@ createApp({
       if (!task) return;
       const remaining = slot.duration - this.slotUsedMinutes(day.key, slot.key);
       if (remaining <= 0) {
-        ElementPlus.ElMessage.warning('这个时间格子已经排满了。');
+        ElementPlus.ElMessage.warning('这个时间段已经排满了。');
         this.clearScheduleDragState();
         return;
       }
@@ -4007,7 +4026,7 @@ createApp({
     openDaySlotEditor(day) {
       if (this.adminMode) return;
       if (!this.currentUser) {
-        ElementPlus.ElMessage.warning('请先登录或注册，再修改时间格子。');
+        ElementPlus.ElMessage.warning('请先登录或注册，再修改时间段。');
         return;
       }
       this.slotEditorMode = 'day';
@@ -4018,7 +4037,7 @@ createApp({
     openWeekSlotEditor() {
       if (this.adminMode) return;
       if (!this.currentUser) {
-        ElementPlus.ElMessage.warning('请先登录或注册，再修改时间格子。');
+        ElementPlus.ElMessage.warning('请先登录或注册，再修改时间段。');
         return;
       }
       const dateKey = this.pageViewDateKeys.daily || this.currentViewDateKey || this.formatDateKey(new Date());
@@ -4158,7 +4177,7 @@ createApp({
             method: 'PUT',
             body: JSON.stringify({ slots: this.slotEditorSlots })
           });
-          ElementPlus.ElMessage.success('当天时间格子已保存。');
+          ElementPlus.ElMessage.success('当天时间段已保存。');
         } else {
           this.slotEditorWeekSlots = ['0', '1', '2', '3', '4', '5', '6'].reduce((week, key) => {
             week[key] = this.sortSlots(this.slotEditorWeekSlots[key] || []);
@@ -4179,10 +4198,10 @@ createApp({
     resetDaySlots(day) {
       if (this.adminMode) return;
       if (!this.currentUser) {
-        ElementPlus.ElMessage.warning('请先登录或注册，再重置时间格子。');
+        ElementPlus.ElMessage.warning('请先登录或注册，再重置时间段。');
         return;
       }
-      ElementPlus.ElMessageBox.confirm(`重置 ${day.label} 的时间格子？`, '重置当天', {
+      ElementPlus.ElMessageBox.confirm(`重置 ${day.label} 的时间段？`, '重置当天', {
         confirmButtonText: '重置',
         cancelButtonText: '取消',
         type: 'warning'
@@ -4199,10 +4218,10 @@ createApp({
     resetAllScheduleConfig() {
       if (this.adminMode) return;
       if (!this.currentUser) {
-        ElementPlus.ElMessage.warning('请先登录或注册，再重置时间格子。');
+        ElementPlus.ElMessage.warning('请先登录或注册，再重置时间段。');
         return;
       }
-      ElementPlus.ElMessageBox.confirm('重置全部时间格子设置？所有单日自定义和一周模板都会恢复为系统默认。', '重置全部', {
+      ElementPlus.ElMessageBox.confirm('重置全部时间段设置？所有单日自定义和一周模板都会恢复为系统默认。', '重置全部', {
         confirmButtonText: '重置全部',
         cancelButtonText: '取消',
         type: 'warning'
@@ -4210,7 +4229,7 @@ createApp({
         try {
           await this.apiJson(SCHEDULE_CONFIG_API, { method: 'DELETE' });
           await this.loadScheduleConfig();
-          ElementPlus.ElMessage.success('全部时间格子已恢复为默认模板。');
+          ElementPlus.ElMessage.success('全部时间段已恢复为默认模板。');
         } catch (error) {
           ElementPlus.ElMessage.error(error.message);
         }
@@ -4412,7 +4431,7 @@ createApp({
       const title = this.habitForm.title.trim();
       const subject = this.habitForm.subject.trim();
       if (!title || !subject || !this.habitForm.weekdays.length || !this.habitForm.slotKeyBase || !this.habitForm.startDate) {
-        ElementPlus.ElMessage.warning('请填写标题、科目、星期、时间格子和开始日期。');
+        ElementPlus.ElMessage.warning('请填写标题、科目、星期、时间段和开始日期。');
         return;
       }
       const payload = {
@@ -4540,7 +4559,7 @@ createApp({
     openPoolTaskCreateDialog() {
       if (this.adminMode) return;
       if (!this.currentUser) {
-        ElementPlus.ElMessage.warning('请先登录或注册，再新增临时任务池任务。');
+        ElementPlus.ElMessage.warning('请先登录或注册，再新增临时任务。');
         return;
       }
       this.dialogMode = 'create';

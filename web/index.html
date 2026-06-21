@@ -28,7 +28,7 @@
         </div>
         <button class="sidebar-peek-button" :class="{ 'is-expanded-control': !sidebarCollapsed }" type="button" :title="sidebarCollapsed ? '展开侧栏' : '收起侧栏'" @click="sidebarCollapsed = !sidebarCollapsed">
           <span class="sidebar-peek-icon">{{ sidebarCollapsed ? '›' : '‹' }}</span>
-          <span v-if="sidebarCollapsed" class="sidebar-peek-text">{{ showTaskPoolSection ? (activePage === 'daily' ? '任务池' : '待安排') : '侧栏' }}</span>
+          <span v-if="sidebarCollapsed" class="sidebar-peek-text">{{ showTaskPoolSection ? (activePage === 'daily' ? '临时' : '待定') : '侧栏' }}</span>
           <span v-if="sidebarCollapsed && showTaskPoolSection" class="sidebar-peek-count">{{ unscheduledCount }}</span>
         </button>
         <div class="summary-panel-content">
@@ -63,10 +63,10 @@
 
         <section v-if="showTaskPoolSection" class="summary-section">
           <h3>
-            <span>{{ activePage === 'daily' ? '临时任务池' : '待安排DDL' }}</span>
+            <span>{{ activePage === 'daily' ? '临时任务' : '待定截止时间' }}</span>
             <span class="day-subtitle">{{ unscheduledCount }} 项</span>
           </h3>
-          <p class="summary-subtitle">{{ activePage === 'daily' ? '临时或长期任务，不从属于有DDL的任务' : '还没想好截止日期的任务' }}</p>
+          <p class="summary-subtitle">{{ activePage === 'daily' ? '没有截止日期，但需要安排到某天完成的事。' : '还没确定截止时间的任务。' }}</p>
           <div class="summary-card" data-guide="task-pool">
             <div class="summary-card-header">
               <div class="summary-card-title">按优先级排序</div>
@@ -107,7 +107,7 @@
               </div>
             </template>
             <div v-else class="summary-empty">
-              {{ activePage === 'daily' ? '任务池是空的' : '待安排DDL是空的' }}
+              {{ activePage === 'daily' ? '暂无临时任务。' : '暂无待定截止时间的任务。' }}
             </div>
           </div>
         </section>
@@ -117,7 +117,7 @@
             <span>习惯池</span>
             <span class="day-subtitle">{{ habitCount }} 项</span>
           </h3>
-          <p class="summary-subtitle">按星期和时间格子自动同步到每日安排。</p>
+          <p class="summary-subtitle">按星期和时间段自动同步到每日安排。</p>
           <div v-if="habitSyncConflicts.length" class="habit-conflict-banner">
             有 {{ habitSyncConflicts.length }} 个习惯日期未能同步。
           </div>
@@ -152,10 +152,10 @@
         <div class="timeline-header">
           <div class="timeline-title">
             <div class="page-nav" data-guide="page-nav">
-              <button class="page-nav-button" :class="{ active: activePage === 'ddl' }" type="button" @click="switchPage('ddl')">DDL日期时间线</button>
+              <button class="page-nav-button" :class="{ active: activePage === 'ddl' }" type="button" @click="switchPage('ddl')">DDL 时间线</button>
               <button class="page-nav-button" :class="{ active: activePage === 'daily' }" type="button" data-guide="daily-tab" @click="switchPage('daily')">每日安排</button>
             </div>
-            <p>{{ activePage === 'ddl' ? '任务自动按截至日期排序' : '把左侧临时任务池、习惯池或下方 DDL 同步到每天的时间栏里。' }}</p>
+            <p>{{ activePage === 'ddl' ? '按截止日期自动排序' : '把临时任务、习惯或截止任务拖进每天的时间段。' }}</p>
           </div>
           <div class="timeline-header-actions">
             <div class="toolbar-row theme-toggle-row">
@@ -327,8 +327,8 @@
         <div v-else-if="activePage === 'daily'" class="daily-board">
           <div class="daily-tools" data-guide="daily-tools">
             <div>
-              <div class="daily-tools-title">时间格子</div>
-              <div class="daily-tools-subtitle">模板会从当前查看日期开始影响之后未单独自定义的日期。</div>
+              <div class="daily-tools-title">每日时间段</div>
+              <div class="daily-tools-subtitle">编辑一周模板，也可以单独调整某一天。</div>
             </div>
             <div class="daily-tools-actions">
               <el-button plain :disabled="!currentUser" @click="openWeekSlotEditor">编辑一周模板</el-button>
@@ -412,8 +412,8 @@
 
           <div class="ddl-dock" data-guide="ddl-dock">
             <div class="ddl-dock-header">
-              <div class="card-title">按时间排序的 DDL</div>
-              <span class="day-subtitle">可重复拖动同一个 DDL</span>
+              <div class="card-title">待安排的截止任务</div>
+              <span class="day-subtitle">可拖到多个时间段</span>
             </div>
             <div class="ddl-list" v-if="ddlTasks.length">
               <article
@@ -434,7 +434,7 @@
                 </div>
               </article>
             </div>
-            <div v-else class="empty-column">暂无带 DDL 时间的任务。</div>
+            <div v-else class="empty-column">暂无已设置截止时间的任务。</div>
           </div>
         </div>
 
@@ -652,6 +652,25 @@
               <p>统计主页和管理员后台的页面访问，不包含静态资源和普通 API 请求。</p>
             </div>
             <el-button plain @click="loadAdminTraffic(adminTrafficRecentPage)">刷新统计</el-button>
+          </div>
+
+          <div class="admin-selector-row traffic-filter-row">
+            <el-select
+              v-model="adminTrafficUserFilter"
+              filterable
+              placeholder="筛选用户"
+              style="width: min(420px, 100%);"
+              @change="handleAdminTrafficUserFilterChange"
+            >
+              <el-option label="全部访问" value="all"></el-option>
+              <el-option label="匿名访问" value="anonymous"></el-option>
+              <el-option
+                v-for="user in adminUserOptions"
+                :key="user.id"
+                :label="user.label"
+                :value="String(user.id)"
+              ></el-option>
+            </el-select>
           </div>
 
           <div class="traffic-metrics">
@@ -1166,7 +1185,7 @@
               <div class="summary-header">
                 <div>
                   <h1 class="summary-title">{{ selectedAdminUser.name }}</h1>
-                  <p class="summary-subtitle">{{ selectedAdminUser.nickname }} 的只读任务池。</p>
+                  <p class="summary-subtitle">{{ selectedAdminUser.nickname }} 的只读任务区。</p>
                 </div>
               </div>
               <div class="toolbar">
@@ -1192,10 +1211,10 @@
               </div>
               <section v-if="showTaskPoolSection" class="summary-section">
                 <h3>
-                  <span>{{ activePage === 'daily' ? '临时任务池' : '待安排DDL' }}</span>
+                  <span>{{ activePage === 'daily' ? '临时任务' : '待定截止时间' }}</span>
                   <span class="day-subtitle">{{ unscheduledCount }} 项</span>
                 </h3>
-                <p class="summary-subtitle">{{ activePage === 'daily' ? '临时或长期任务，不从属于有DDL的任务' : '还没想好截止日期的任务' }}</p>
+                <p class="summary-subtitle">{{ activePage === 'daily' ? '没有截止日期，但需要安排到某天完成的事。' : '还没确定截止时间的任务。' }}</p>
                 <div class="summary-card">
                   <div class="summary-card-header">
                     <div class="summary-card-title">按优先级排序</div>
@@ -1218,7 +1237,7 @@
                     </div>
                   </div>
                   <div v-else class="summary-empty">
-                    {{ activePage === 'daily' ? '任务池是空的' : '待安排DDL是空的' }}
+                    {{ activePage === 'daily' ? '暂无临时任务。' : '暂无待定截止时间的任务。' }}
                   </div>
                 </div>
               </section>
@@ -1227,7 +1246,7 @@
                   <span>习惯池</span>
                   <span class="day-subtitle">{{ habitCount }} 项</span>
                 </h3>
-                <p class="summary-subtitle">按星期和时间格子自动同步到每日安排。</p>
+                <p class="summary-subtitle">按星期和时间段自动同步到每日安排。</p>
                 <div v-if="habitSyncConflicts.length" class="habit-conflict-banner">
                   有 {{ habitSyncConflicts.length }} 个习惯日期未能同步。
                 </div>
@@ -1261,7 +1280,7 @@
               <div class="timeline-header">
                 <div class="timeline-title">
                   <div class="page-nav">
-                    <button class="page-nav-button" :class="{ active: activePage === 'ddl' }" type="button" @click="switchPage('ddl')">DDL日期时间线</button>
+                    <button class="page-nav-button" :class="{ active: activePage === 'ddl' }" type="button" @click="switchPage('ddl')">DDL 时间线</button>
                     <button class="page-nav-button" :class="{ active: activePage === 'daily' }" type="button" @click="switchPage('daily')">每日安排</button>
                   </div>
                   <p>只读查看 {{ selectedAdminUser.name }} 的时间表。</p>
@@ -1343,7 +1362,7 @@
               <div v-else class="daily-board">
                 <div class="daily-tools">
                   <div>
-                    <div class="daily-tools-title">时间格子</div>
+                    <div class="daily-tools-title">每日时间段</div>
                     <div class="daily-tools-subtitle">后台只读展示模板和单日自定义。</div>
                   </div>
                   <el-tag type="info" effect="plain">只读</el-tag>
@@ -1383,7 +1402,7 @@
                 </div>
                 <div class="ddl-dock">
                   <div class="ddl-dock-header">
-                    <div class="card-title">按时间排序的 DDL</div>
+                    <div class="card-title">待安排的截止任务</div>
                     <span class="day-subtitle">后台只读</span>
                   </div>
                   <div class="ddl-list" v-if="ddlTasks.length">
@@ -1395,7 +1414,7 @@
                       </div>
                     </article>
                   </div>
-                  <div v-else class="empty-column">暂无带 DDL 时间的任务。</div>
+                  <div v-else class="empty-column">暂无已设置截止时间的任务。</div>
                 </div>
               </div>
             </main>
@@ -1481,11 +1500,11 @@
                 <div class="ai-help-title">AI 助手会怎样处理</div>
                 <div class="ai-help-section">
                   <div class="ai-help-section-title">可以做</div>
-                  <p>创建任务、修改任务详情、总结最近待办。没有截止时间时会显示在“待安排DDL”。</p>
+                  <p>创建任务、修改任务详情、总结最近待办。没有截止时间时会显示在“待定截止时间”。</p>
                 </div>
                 <div class="ai-help-section">
                   <div class="ai-help-section-title">不会做</div>
-                  <p>不会直接执行；不会删除任务、标记完成、修改每日安排、时间格子或习惯。</p>
+                  <p>不会直接执行；不会删除任务、标记完成、修改每日安排、时间段或习惯。</p>
                 </div>
                 <div class="ai-help-section">
                   <div class="ai-help-section-title">会参考</div>
@@ -1692,15 +1711,15 @@
         </div>
         <div class="settings-row">
           <div>
-            <div class="settings-row-title">待安排DDL</div>
-            <div class="settings-row-desc">控制左侧待安排 DDL 区域显示。</div>
+            <div class="settings-row-title">待定截止时间</div>
+            <div class="settings-row-desc">控制左侧待定截止时间区域显示。</div>
           </div>
           <el-switch v-model="appSettings.showUnscheduledDdl" @change="saveAppSettings"></el-switch>
         </div>
         <div class="settings-row">
           <div>
-            <div class="settings-row-title">临时任务池</div>
-            <div class="settings-row-desc">控制每日安排页左侧临时任务池显示。</div>
+            <div class="settings-row-title">临时任务</div>
+            <div class="settings-row-desc">控制每日安排页左侧临时任务区域显示。</div>
           </div>
           <el-switch v-model="appSettings.showArrangementPool" @change="saveAppSettings"></el-switch>
         </div>
@@ -1794,7 +1813,7 @@
                     :disabled="aiActionLocked(action)"
                     :maxlength="field.field === 'title' ? 80 : undefined"
                     :show-word-limit="field.field === 'title'"
-                    :placeholder="field.field === 'dueAt' ? '留空则放入待安排DDL，或 YYYY-MM-DDTHH:mm:00' : field.label"
+                    :placeholder="field.field === 'dueAt' ? '留空则放入待定截止时间，或 YYYY-MM-DDTHH:mm:00' : field.label"
                   ></el-input>
                 </template>
                 <div v-if="action.type === 'update_task'" class="ai-field-before">
@@ -2143,11 +2162,11 @@
         </el-form-item>
 
         <el-form-item v-if="isArrangementDialog" label="时间安排">
-          <el-tag type="info" effect="plain">放入临时任务池</el-tag>
+          <el-tag type="info" effect="plain">放入临时任务</el-tag>
         </el-form-item>
 
         <el-form-item v-else label="时间安排">
-          <el-switch v-model="form.unscheduled" :active-text="activePage === 'daily' ? '先放入临时任务池' : '先放入待安排DDL'" inactive-text="设置截止时间"></el-switch>
+          <el-switch v-model="form.unscheduled" :active-text="activePage === 'daily' ? '先放入临时任务' : '先放入待定截止时间'" inactive-text="设置截止时间"></el-switch>
         </el-form-item>
 
         <el-form-item label="截止日期" v-if="!isArrangementDialog && !form.unscheduled">
@@ -2259,11 +2278,11 @@
           </el-form-item>
         </div>
 
-        <el-form-item label="时间格子">
+        <el-form-item label="时间段">
           <div class="form-field-stack">
             <el-select
               v-model="habitForm.slotKeyBase"
-              placeholder="选择时间格子"
+              placeholder="选择时间段"
               style="width: 100%;"
               @change="handleHabitSlotChange"
             >
@@ -2275,7 +2294,7 @@
               ></el-option>
             </el-select>
             <div class="day-subtitle">
-              只显示所选星期中都存在且开始、结束时间一致的时间格子；不同日期时间不同，需要拆成多个习惯。
+              只显示所选星期中都存在且开始、结束时间一致的时间段；不同日期时间不同，需要拆成多个习惯。
             </div>
           </div>
         </el-form-item>
@@ -2363,13 +2382,13 @@
 
     <el-dialog
       v-model="slotEditorVisible"
-      :title="slotEditorMode === 'day' ? '编辑当天时间格子' : '编辑一周模板'"
+      :title="slotEditorMode === 'day' ? '编辑当天时间段' : '编辑一周模板'"
       width="min(94vw, 760px)"
       destroy-on-close
     >
       <div class="slot-editor">
         <div class="slot-editor-hint" v-if="slotEditorMode === 'day'">
-          {{ slotEditorDate }} 的时间格子，只影响这一天。
+          {{ slotEditorDate }} 的时间段，只影响这一天。
         </div>
         <div class="slot-editor-hint" v-else>
           从 {{ slotEditorDate }} 开始，未单独自定义的日期会使用这个一周模板。
@@ -2386,10 +2405,10 @@
             <el-input v-model="slot.end" placeholder="结束 HH:mm" maxlength="5"></el-input>
             <el-button type="danger" plain @click="removeEditorSlot(index)">删除</el-button>
           </div>
-          <div v-if="!activeEditorSlots().length" class="empty-column">暂无时间格子。</div>
+          <div v-if="!activeEditorSlots().length" class="empty-column">暂无时间段。</div>
         </div>
 
-        <el-button plain @click="addEditorSlot">新增时间格子</el-button>
+        <el-button plain @click="addEditorSlot">新增时间段</el-button>
       </div>
 
       <template #footer>
