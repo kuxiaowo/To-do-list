@@ -919,7 +919,7 @@
             <el-table-column label="窗口内用量" min-width="180">
               <template #default="{ row }">
                 <div>{{ aiWindowUsageText(row.windowUsage) }}</div>
-                <div class="traffic-muted">调用 {{ formatTokenCount(row.windowUsage ? row.windowUsage.calls : 0) }} 次</div>
+                <div class="traffic-muted">总 {{ aiUserTotalUsageText(row.totalUsage) }} · 窗口 {{ formatTokenCount(row.windowUsage ? row.windowUsage.calls : 0) }} 次</div>
               </template>
             </el-table-column>
             <el-table-column label="有效限制" min-width="220">

@@ -311,7 +311,7 @@ createApp({
       adminAiUsageHoverPoint: null,
       adminAiUsageUsersTotal: 0,
       adminAiUsagePage: 1,
-      adminAiUsagePageSize: 6,
+      adminAiUsagePageSize: 10,
       adminAiGlobalLimitDraft: {
         windowHours: 24,
         inputTokenLimit: 200000,
@@ -340,7 +340,7 @@ createApp({
       adminInstallerDownloadsHoverPoint: null,
       adminInstallerDownloadsUsersTotal: 0,
       adminInstallerDownloadsPage: 1,
-      adminInstallerDownloadsPageSize: 6,
+      adminInstallerDownloadsPageSize: 10,
       adminInstallerDownloadGlobalLimitDraft: {
         windowHours: 24,
         linkLimit: 5
@@ -541,10 +541,10 @@ createApp({
     },
     aiUsageMetricCards() {
       return [
-        { label: '累计 token', value: this.formatTokenCount(this.adminAiUsage.totalTokens) },
         { label: '累计输入 / 输出', value: `${this.formatTokenCount(this.adminAiUsage.totalPromptTokens)} / ${this.formatTokenCount(this.adminAiUsage.totalCompletionTokens)}` },
-        { label: '今日 token', value: this.formatTokenCount(this.adminAiUsage.todayTotalTokens) },
-        { label: '调用总计', value: this.formatTokenCount(this.adminAiUsage.totalCalls) }
+        { label: '今日输入 / 输出', value: `${this.formatTokenCount(this.adminAiUsage.todayPromptTokens)} / ${this.formatTokenCount(this.adminAiUsage.todayCompletionTokens)}` },
+        { label: '调用总计', value: this.formatTokenCount(this.adminAiUsage.totalCalls) },
+        { label: '今日调用', value: this.formatTokenCount(this.adminAiUsage.todayCalls) }
       ];
     },
     aiUsageSeries() {
@@ -2367,6 +2367,10 @@ createApp({
     aiWindowUsageText(usage) {
       const safe = usage || {};
       return `输入 ${this.formatTokenCount(safe.promptTokens)} / 输出 ${this.formatTokenCount(safe.completionTokens)}`;
+    },
+    aiUserTotalUsageText(usage) {
+      const safe = usage || {};
+      return this.formatTokenCount(safe.totalTokens);
     },
     async saveAdminAiGlobalLimit() {
       if (!this.isAdmin) return;

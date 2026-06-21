@@ -3031,7 +3031,12 @@ class TodoHandler(SimpleHTTPRequestHandler):
             users_total = conn.execute('SELECT COUNT(*) FROM users').fetchone()[0]
             user_rows = conn.execute(
                 '''
-                SELECT users.id, users.name, users.nickname, users.role, MAX(ai_usage_logs.created_at) AS last_used_at
+                SELECT users.id, users.name, users.nickname, users.role,
+                       MAX(ai_usage_logs.created_at) AS last_used_at,
+                       COUNT(ai_usage_logs.id) AS total_calls,
+                       COALESCE(SUM(ai_usage_logs.prompt_tokens), 0) AS total_prompt_tokens,
+                       COALESCE(SUM(ai_usage_logs.completion_tokens), 0) AS total_completion_tokens,
+                       COALESCE(SUM(ai_usage_logs.total_tokens), 0) AS total_tokens
                 FROM users
                 LEFT JOIN ai_usage_logs ON ai_usage_logs.user_id = users.id
                 GROUP BY users.id
@@ -3059,6 +3064,12 @@ class TodoHandler(SimpleHTTPRequestHandler):
                     'hasOverride': bool(limit.get('hasOverride')),
                     'source': limit.get('source', 'global'),
                     'windowUsage': usage,
+                    'totalUsage': {
+                        'calls': int(row['total_calls'] or 0),
+                        'promptTokens': int(row['total_prompt_tokens'] or 0),
+                        'completionTokens': int(row['total_completion_tokens'] or 0),
+                        'totalTokens': int(row['total_tokens'] or 0),
+                    },
                     'lastUsedAt': row['last_used_at'],
                 })
 
