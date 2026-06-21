@@ -268,7 +268,7 @@ createApp({
       adminSection: 'users',
       adminUsers: [],
       adminUsersPage: 1,
-      adminUsersPageSize: 20,
+      adminUsersPageSize: 10,
       adminSelectedUserId: '',
       adminEditingUserId: '',
       adminEditingName: '',
@@ -311,7 +311,7 @@ createApp({
       adminAiUsageHoverPoint: null,
       adminAiUsageUsersTotal: 0,
       adminAiUsagePage: 1,
-      adminAiUsagePageSize: 50,
+      adminAiUsagePageSize: 10,
       adminAiGlobalLimitDraft: {
         windowHours: 24,
         inputTokenLimit: 200000,
@@ -338,7 +338,7 @@ createApp({
       adminInstallerDownloadsHoverPoint: null,
       adminInstallerDownloadsUsersTotal: 0,
       adminInstallerDownloadsPage: 1,
-      adminInstallerDownloadsPageSize: 50,
+      adminInstallerDownloadsPageSize: 10,
       adminInstallerDownloadGlobalLimitDraft: {
         windowHours: 24,
         linkLimit: 5

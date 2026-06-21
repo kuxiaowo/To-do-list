@@ -2876,7 +2876,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
                 WHERE ip != '' AND created_at >= ?{visit_filter_sql}
                 GROUP BY ip
                 ORDER BY visits DESC, last_visit_at DESC
-                LIMIT 10
+                LIMIT 5
                 ''',
                 [start_key, *visit_filter_params],
             ).fetchall()
@@ -2970,7 +2970,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return self.write_json({'error': 'invalid usage view'}, status=HTTPStatus.BAD_REQUEST)
         try:
             page = max(1, int(query.get('page', ['1'])[0]))
-            page_size = min(100, max(1, int(query.get('pageSize', ['50'])[0])))
+            page_size = min(10, max(1, int(query.get('pageSize', ['10'])[0])))
         except ValueError:
             return self.write_json({'error': 'invalid pagination'}, status=HTTPStatus.BAD_REQUEST)
         offset = (page - 1) * page_size
@@ -3220,7 +3220,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return self.write_json({'error': 'invalid usage view'}, status=HTTPStatus.BAD_REQUEST)
         try:
             page = max(1, int(query.get('page', ['1'])[0]))
-            page_size = min(100, max(1, int(query.get('pageSize', ['50'])[0])))
+            page_size = min(10, max(1, int(query.get('pageSize', ['10'])[0])))
         except ValueError:
             return self.write_json({'error': 'invalid pagination'}, status=HTTPStatus.BAD_REQUEST)
         offset = (page - 1) * page_size

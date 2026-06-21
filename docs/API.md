@@ -262,7 +262,7 @@ OSS 响应：
 ### 管理员查看下载统计
 
 ```http
-GET /api/admin/installer-downloads/summary?view=7d&page=1&pageSize=50
+GET /api/admin/installer-downloads/summary?view=7d&page=1&pageSize=10
 ```
 
 `view` 可选：`6h`、`1d`、`7d`、`30d`。
@@ -935,7 +935,7 @@ data: {"error":"DeepSeek request failed","message":"..."}
 ### 获取 AI 用量统计
 
 ```http
-GET /api/admin/ai-usage/summary?view=7d&page=1&pageSize=50
+GET /api/admin/ai-usage/summary?view=7d&page=1&pageSize=10
 Authorization: Bearer <token>
 ```
 

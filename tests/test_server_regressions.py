@@ -1259,6 +1259,7 @@ class ServerRegressionTests(unittest.TestCase):
 
             status, body = self.request('GET', '/api/admin/ai-usage/summary?view=7d&page=1&pageSize=50', token=admin_token)
             self.assertEqual(status, 200, body)
+            self.assertEqual(body['pageSize'], 10)
             rows_by_id = {row['user']['id']: row for row in body['users']}
             self.assertTrue(rows_by_id[student['id']]['hasOverride'])
             self.assertEqual(rows_by_id[student['id']]['windowUsage']['promptTokens'], 7)
@@ -1278,6 +1279,7 @@ class ServerRegressionTests(unittest.TestCase):
             self.assertEqual(status, 200, body)
             status, body = self.request('GET', '/api/admin/ai-usage/summary?view=7d&page=1&pageSize=50', token=admin_token)
             self.assertEqual(status, 200, body)
+            self.assertEqual(body['pageSize'], 10)
             rows_by_id = {row['user']['id']: row for row in body['users']}
             self.assertFalse(rows_by_id[student['id']]['hasOverride'])
 
@@ -1420,6 +1422,7 @@ class ServerRegressionTests(unittest.TestCase):
 
             status, body = self.request('GET', '/api/admin/installer-downloads/summary?view=7d&page=1&pageSize=50', token=admin_token)
             self.assertEqual(status, 200, body)
+            self.assertEqual(body['pageSize'], 10)
             self.assertEqual(body['totalLinks'], 2)
             rows_by_id = {row['user']['id']: row for row in body['users']}
             self.assertTrue(rows_by_id[student['id']]['hasOverride'])
@@ -1439,6 +1442,7 @@ class ServerRegressionTests(unittest.TestCase):
             self.assertEqual(status, 200, body)
             status, body = self.request('GET', '/api/admin/installer-downloads/summary?view=7d&page=1&pageSize=50', token=admin_token)
             self.assertEqual(status, 200, body)
+            self.assertEqual(body['pageSize'], 10)
             rows_by_id = {row['user']['id']: row for row in body['users']}
             self.assertFalse(rows_by_id[student['id']]['hasOverride'])
         finally:
@@ -1810,7 +1814,7 @@ class ServerRegressionTests(unittest.TestCase):
         self.assertIn(':page-size="adminUsersPageSize"', index_html)
         self.assertIn('adminUserAvatarText(user)', app_js)
         self.assertIn('adminUserAvatarStyle(user)', app_js)
-        self.assertIn('adminUsersPageSize: 20', app_js)
+        self.assertIn('adminUsersPageSize: 10', app_js)
         self.assertIn('paginatedAdminUsers()', app_js)
         self.assertIn('.admin-user-avatar', style_css)
         self.assertIn('border-radius: 50%;', style_css)
@@ -1826,6 +1830,7 @@ class ServerRegressionTests(unittest.TestCase):
         self.assertIn('saveAdminAiUserLimit(row)', index_html)
         self.assertIn('clearAllAdminAiUserLimits', index_html)
         self.assertIn('loadAdminAiUsage', app_js)
+        self.assertIn('adminAiUsagePageSize: 10', app_js)
         self.assertIn("`${ADMIN_API}/ai-usage/summary", app_js)
         self.assertIn("`${ADMIN_API}/ai-usage/global-limit`", app_js)
         self.assertIn("`${ADMIN_API}/ai-usage/clear-user-limits`", app_js)
@@ -1843,6 +1848,7 @@ class ServerRegressionTests(unittest.TestCase):
         self.assertIn('saveAdminInstallerDownloadUserLimit(row)', index_html)
         self.assertIn('clearAllAdminInstallerDownloadUserLimits', index_html)
         self.assertIn('loadAdminInstallerDownloads', app_js)
+        self.assertIn('adminInstallerDownloadsPageSize: 10', app_js)
         self.assertIn("`${ADMIN_API}/installer-downloads/summary", app_js)
         self.assertIn("`${ADMIN_API}/installer-downloads/global-limit`", app_js)
         self.assertIn("`${ADMIN_API}/installer-downloads/clear-user-limits`", app_js)
