@@ -1,5 +1,6 @@
 import concurrent.futures
 import base64
+import gzip
 import json
 import os
 import sqlite3
@@ -65,8 +66,8 @@ class ServerRegressionTests(unittest.TestCase):
                 error.close()
             return error.code, json.loads(body)
 
-    def raw_request(self, method, path, token=None):
-        headers = {}
+    def raw_request(self, method, path, token=None, extra_headers=None):
+        headers = dict(extra_headers or {})
         if token:
             headers['Authorization'] = f'Bearer {token}'
         req = urllib.request.Request(f'{self.base_url}{path}', method=method, headers=headers)
@@ -125,10 +126,60 @@ class ServerRegressionTests(unittest.TestCase):
         self.assertIn(b'style.css', body)
         self.assertEqual(headers.get('X-Content-Type-Options'), 'nosniff')
         self.assertEqual(headers.get('X-Frame-Options'), 'DENY')
+        self.assertEqual(headers.get('Cache-Control'), 'no-cache')
+        self.assertIsNone(headers.get('Content-Encoding'))
 
         status, headers, body = self.raw_request('GET', '/app.js')
         self.assertEqual(status, 200)
         self.assertIn(b'MANAGEBAC_INSTALLER_DOWNLOAD_URL', body)
+        self.assertEqual(headers.get('Cache-Control'), 'no-cache')
+
+        status, headers, body = self.raw_request(
+            'GET',
+            '/app.js?v=test',
+            extra_headers={'Accept-Encoding': 'gzip'},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(headers.get('Content-Encoding'), 'gzip')
+        self.assertEqual(headers.get('Vary'), 'Accept-Encoding')
+        self.assertEqual(headers.get('Cache-Control'), 'public, max-age=31536000, immutable')
+        self.assertIn(b'MANAGEBAC_INSTALLER_DOWNLOAD_URL', gzip.decompress(body))
+
+        status, headers, body = self.raw_request(
+            'HEAD',
+            '/vendor/element-plus.css',
+            extra_headers={'Accept-Encoding': 'gzip'},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body, b'')
+        self.assertEqual(headers.get('Content-Encoding'), 'gzip')
+        self.assertEqual(headers.get('Cache-Control'), 'public, max-age=31536000, immutable')
+
+    def test_static_gzip_response_is_cached_until_file_changes(self):
+        original_compress = server.gzip.compress
+        calls = []
+
+        def counting_compress(data, compresslevel=9, *args, **kwargs):
+            calls.append(len(data))
+            return original_compress(data, compresslevel=compresslevel, *args, **kwargs)
+
+        server.STATIC_GZIP_CACHE.clear()
+        server.gzip.compress = counting_compress
+        try:
+            for _ in range(2):
+                status, headers, body = self.raw_request(
+                    'GET',
+                    '/app.js?v=test-cache',
+                    extra_headers={'Accept-Encoding': 'gzip'},
+                )
+                self.assertEqual(status, 200)
+                self.assertEqual(headers.get('Content-Encoding'), 'gzip')
+                self.assertIn(b'MANAGEBAC_INSTALLER_DOWNLOAD_URL', gzip.decompress(body))
+        finally:
+            server.gzip.compress = original_compress
+            server.STATIC_GZIP_CACHE.clear()
+
+        self.assertEqual(len(calls), 1)
 
     def test_json_body_validation_and_api_not_found_contract(self):
         status, payload = self.request('POST', '/api/auth/register', [])

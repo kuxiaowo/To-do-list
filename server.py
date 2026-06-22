@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import gzip
 import hashlib
 import hmac
 import ipaddress
@@ -12,6 +13,7 @@ import os
 import posixpath
 import secrets
 import sqlite3
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -121,6 +123,10 @@ AVATAR_EXTENSIONS = {'png', 'jpg', 'jpeg', 'webp'}
 DEFAULT_AVATAR_COLOR = '#6366f1'
 STATIC_FILE_PATHS = {'/index.html', '/app.js', '/style.css'}
 STATIC_DIRECTORY_PREFIXES = ('/vendor/', '/assets/')
+STATIC_GZIP_EXTENSIONS = {'.html', '.css', '.js', '.mjs', '.json', '.txt', '.svg'}
+STATIC_GZIP_MIN_BYTES = 512
+STATIC_GZIP_CACHE: dict[str, tuple[tuple[int, int], bytes]] = {}
+STATIC_GZIP_CACHE_LOCK = threading.Lock()
 MANAGEBAC_HELPER_DIR = BASE_DIR / 'managebac-sync-helper'
 DEFAULT_OSS_SIGN_EXPIRES_SECONDS = 10 * 60
 MAX_OSS_SIGN_EXPIRES_SECONDS = 7 * 24 * 60 * 60
@@ -1867,6 +1873,65 @@ def is_allowed_static_path(path: str) -> bool:
     )
 
 
+def static_file_path(path: str) -> tuple[str, Path] | tuple[str, None]:
+    normalized = normalize_static_request_path(path)
+    if normalized == '/':
+        normalized = '/index.html'
+    if not is_allowed_static_path(normalized):
+        return normalized, None
+    parts = [part for part in normalized.lstrip('/').split('/') if part]
+    try:
+        file_path = WEB_DIR.joinpath(*parts).resolve()
+        file_path.relative_to(WEB_DIR.resolve())
+    except (OSError, ValueError):
+        return normalized, None
+    return normalized, file_path
+
+
+def accepts_gzip(accept_encoding: str) -> bool:
+    for raw_part in str(accept_encoding or '').split(','):
+        token, *params = raw_part.strip().lower().split(';')
+        if token != 'gzip':
+            continue
+        for param in params:
+            key, _, value = param.strip().partition('=')
+            if key == 'q':
+                try:
+                    return float(value) > 0
+                except ValueError:
+                    return True
+        return True
+    return False
+
+
+def is_gzip_static_file(path: Path) -> bool:
+    return path.suffix.lower() in STATIC_GZIP_EXTENSIONS
+
+
+def gzip_static_body(file_path: Path, raw: bytes, stat_result: os.stat_result) -> bytes:
+    signature = (int(stat_result.st_mtime_ns), int(stat_result.st_size))
+    cache_key = str(file_path)
+    with STATIC_GZIP_CACHE_LOCK:
+        cached = STATIC_GZIP_CACHE.get(cache_key)
+        if cached and cached[0] == signature:
+            return cached[1]
+
+    body = gzip.compress(raw, compresslevel=6)
+    with STATIC_GZIP_CACHE_LOCK:
+        STATIC_GZIP_CACHE[cache_key] = (signature, body)
+    return body
+
+
+def static_cache_control(path: str, query: str) -> str:
+    if path in {'/', '/index.html'}:
+        return 'no-cache'
+    if path.startswith('/vendor/') or path.startswith('/assets/'):
+        return 'public, max-age=31536000, immutable'
+    if query:
+        return 'public, max-age=31536000, immutable'
+    return 'no-cache'
+
+
 def find_managebac_installer() -> Path | None:
     direct_exes = sorted(MANAGEBAC_HELPER_DIR.glob('*.exe'))
     if len(direct_exes) == 1:
@@ -2005,6 +2070,39 @@ class TodoHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(WEB_DIR), **kwargs)
 
+    def handle_static_file(self, send_body: bool = True):
+        parsed = urlparse(self.path)
+        normalized, file_path = static_file_path(parsed.path)
+        if not file_path or not file_path.is_file():
+            self.send_error(HTTPStatus.NOT_FOUND, 'Not found')
+            return
+        try:
+            stat_result = file_path.stat()
+            raw = file_path.read_bytes()
+        except OSError:
+            self.send_error(HTTPStatus.NOT_FOUND, 'Not found')
+            return
+
+        should_gzip = (
+            len(raw) >= STATIC_GZIP_MIN_BYTES
+            and is_gzip_static_file(file_path)
+            and accepts_gzip(self.headers.get('Accept-Encoding', ''))
+        )
+        body = gzip_static_body(file_path, raw, stat_result) if should_gzip else raw
+
+        self.send_response(HTTPStatus.OK)
+        self.send_header('Content-Type', self.guess_type(str(file_path)))
+        self.send_header('Content-Length', str(len(body)))
+        self.send_header('Last-Modified', self.date_time_string(stat_result.st_mtime))
+        self.send_header('Cache-Control', static_cache_control(normalized, parsed.query))
+        if is_gzip_static_file(file_path):
+            self.send_header('Vary', 'Accept-Encoding')
+        if should_gzip:
+            self.send_header('Content-Encoding', 'gzip')
+        self.end_headers()
+        if send_body:
+            self.wfile.write(body)
+
     def do_GET(self):
         path = urlparse(self.path).path
         if path == '/api/managebac-helper/installer':
@@ -2034,7 +2132,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
         if not is_allowed_static_path(path):
             self.send_error(HTTPStatus.NOT_FOUND, 'Not found')
             return
-        return super().do_GET()
+        return self.handle_static_file(send_body=True)
 
     def do_HEAD(self):
         path = urlparse(self.path).path
@@ -2045,7 +2143,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
         if not is_allowed_static_path(path):
             self.send_error(HTTPStatus.NOT_FOUND, 'Not found')
             return
-        return super().do_HEAD()
+        return self.handle_static_file(send_body=False)
 
     def do_POST(self):
         path = urlparse(self.path).path
