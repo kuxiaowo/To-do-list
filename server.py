@@ -132,7 +132,7 @@ MANAGEBAC_OSS_INSTALLER_ENV_NAMES = [
     'ALIYUN_OSS_INSTALLER_KEY',
     'ALIYUN_OSS_ENDPOINT',
     'ALIYUN_OSS_INSTALLER_FILENAME',
-    'ALIYUN_OSS_SIGN_EXPIRES_SECONDS',
+    'ALIYUN_OSS_SIGN_EXPIRES_SECONDS', 
 ]
 DEFAULT_SUBJECTS = [
     'Chinese',
@@ -1158,6 +1158,16 @@ def clamp_habit_sync_window(start: str | None, end: str | None) -> tuple[str, st
         end_key = default_end
     start_key = max(today, min(start_key, max_end))
     end_key = min(max(end_key, start_key), max_end)
+    return start_key, end_key
+
+
+def normalize_optional_date_window(start: str | None, end: str | None) -> tuple[str | None, str | None]:
+    start_key = str(start or '').strip()
+    end_key = str(end or '').strip()
+    start_key = start_key if is_valid_date_key(start_key) else None
+    end_key = end_key if is_valid_date_key(end_key) else None
+    if start_key and end_key and end_key < start_key:
+        start_key, end_key = end_key, start_key
     return start_key, end_key
 
 
@@ -2638,17 +2648,31 @@ class TodoHandler(SimpleHTTPRequestHandler):
         except TimeoutError as error:
             raise RuntimeError(f'DeepSeek response failed: {error}') from error
 
-    def fetch_schedule_items_for_user(self, conn: sqlite3.Connection, user_id: int) -> list[dict]:
+    def fetch_schedule_items_for_user(
+        self,
+        conn: sqlite3.Connection,
+        user_id: int,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ) -> list[dict]:
+        where = ['schedule_items.user_id = ?']
+        params: list = [user_id]
+        if start_date:
+            where.append('schedule_items.schedule_date >= ?')
+            params.append(start_date)
+        if end_date:
+            where.append('schedule_items.schedule_date <= ?')
+            params.append(end_date)
         rows = conn.execute(
-            """
+            f"""
             SELECT schedule_items.*, tasks.title AS task_title, tasks.subject AS task_subject,
                    tasks.due_at AS task_due_at, tasks.pool AS task_pool, tasks.priority AS task_priority
             FROM schedule_items
             JOIN tasks ON tasks.id = schedule_items.task_id AND tasks.user_id = schedule_items.user_id
-            WHERE schedule_items.user_id = ?
+            WHERE {' AND '.join(where)}
             ORDER BY schedule_items.schedule_date ASC, schedule_items.slot_start ASC, schedule_items.sort_order ASC, schedule_items.created_at ASC
             """,
-            (user_id,),
+            params,
         ).fetchall()
         return [public_schedule_item(row) for row in rows]
 
@@ -3764,7 +3788,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
             user = self.ensure_user_exists(conn, user_id)
             if not user:
                 return self.write_json({'error': 'user not found'}, status=HTTPStatus.NOT_FOUND)
-            items = self.fetch_schedule_items_for_user(conn, user_id)
+            query_start, query_end = self.schedule_query_window_from_request()
+            items = self.fetch_schedule_items_for_user(conn, user_id, query_start, query_end)
         return self.write_json({'items': items, 'readOnly': True, 'user': public_user(user), 'habitSyncConflicts': []})
 
     def handle_admin_user_habits(self, user_id: int):
@@ -4585,10 +4610,16 @@ class TodoHandler(SimpleHTTPRequestHandler):
             )
         return conflicts
 
-    def habit_sync_window_from_request(self) -> tuple[str, str]:
+    def schedule_query_window_from_request(self) -> tuple[str | None, str | None]:
         query = parse_qs(urlparse(self.path).query)
         start = str((query.get('from') or [''])[0]).strip()
         end = str((query.get('to') or [''])[0]).strip()
+        return normalize_optional_date_window(start, end)
+
+    def habit_sync_window_from_request(self) -> tuple[str, str]:
+        query = parse_qs(urlparse(self.path).query)
+        start = str((query.get('syncFrom') or query.get('from') or [''])[0]).strip()
+        end = str((query.get('syncTo') or query.get('to') or [''])[0]).strip()
         return clamp_habit_sync_window(start, end)
 
     def handle_list_habits(self):
@@ -4711,10 +4742,11 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return self.write_json({'items': [], 'readOnly': True})
 
         with get_db() as conn:
+            query_start, query_end = self.schedule_query_window_from_request()
             sync_start, sync_end = self.habit_sync_window_from_request()
             sync_conflicts = self.sync_habit_instances(conn, int(user['id']), window_start=sync_start, window_end=sync_end)
             conn.commit()
-            items = self.fetch_schedule_items_for_user(conn, int(user['id']))
+            items = self.fetch_schedule_items_for_user(conn, int(user['id']), query_start, query_end)
         return self.write_json({'items': items, 'readOnly': False, 'habitSyncConflicts': sync_conflicts})
 
 

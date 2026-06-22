@@ -1052,10 +1052,56 @@ body {
   font-size: 0.94rem;
 }
 
+.timeline-scroll-frame {
+  min-width: 0;
+}
+
 .timeline-scroll {
   overflow-x: auto;
   overflow-y: hidden;
   padding-bottom: 10px;
+  scrollbar-width: none;
+}
+
+.timeline-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+.timeline-sticky-scrollbar {
+  position: sticky;
+  bottom: 0;
+  z-index: 18;
+  height: 18px;
+  margin-top: -8px;
+  padding: 3px 0 2px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  background: linear-gradient(
+    180deg,
+    rgba(var(--panel-rgb), 0),
+    rgba(var(--panel-rgb), 0.94) 42%,
+    rgba(var(--panel-rgb), 0.98)
+  );
+  scrollbar-width: thin;
+  scrollbar-color: var(--brand-line) rgba(var(--panel-rgb), 0.84);
+}
+
+.timeline-sticky-scrollbar::-webkit-scrollbar {
+  height: 10px;
+}
+
+.timeline-sticky-scrollbar::-webkit-scrollbar-track {
+  background: rgba(var(--panel-rgb), 0.84);
+  border-radius: 999px;
+}
+
+.timeline-sticky-scrollbar::-webkit-scrollbar-thumb {
+  background: var(--brand-line);
+  border-radius: 999px;
+}
+
+.timeline-sticky-scrollbar-spacer {
+  height: 1px;
 }
 
 .ddl-view {

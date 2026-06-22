@@ -253,9 +253,10 @@
             </div>
           </div>
 
-          <div v-if="ddlViewMode === 'timeline'" class="timeline-scroll" ref="timelineScroll" @scroll="handleTimelineScroll('ddl')">
-            <div class="timeline-columns">
-              <section v-for="day in dayColumns" :key="day.key" class="day-column" :data-day="day.key">
+          <div v-if="ddlViewMode === 'timeline'" class="timeline-scroll-frame">
+            <div class="timeline-scroll" ref="timelineScroll" @scroll="handleTimelineScroll('ddl')">
+              <div class="timeline-columns">
+                <section v-for="day in dayColumns" :key="day.key" class="day-column" :data-day="day.key">
                 <div class="day-header">
                   <div class="day-label">{{ day.label }}</div>
                   <div class="day-subtitle">{{ day.subtitle }}</div>
@@ -284,7 +285,19 @@
                 </div>
 
                 <div v-else class="empty-column">这一天暂无任务。</div>
-              </section>
+                </section>
+              </div>
+            </div>
+            <div
+              class="timeline-sticky-scrollbar"
+              ref="timelineStickyScroll"
+              aria-hidden="true"
+              @scroll="handleTimelineStickyScroll('ddl')"
+            >
+              <div
+                class="timeline-sticky-scrollbar-spacer"
+                :style="{ width: `${timelineStickyScrollbarWidths.ddl}px` }"
+              ></div>
             </div>
           </div>
 
@@ -335,9 +348,10 @@
               <el-button plain type="danger" :disabled="!currentUser" @click="resetAllScheduleConfig">重置全部</el-button>
             </div>
           </div>
-          <div class="timeline-scroll" ref="dailyScroll" @scroll="handleTimelineScroll('daily')">
-            <div class="timeline-columns">
-              <section v-for="day in scheduleDayColumns" :key="day.key" class="day-column" :data-day="day.key">
+          <div class="timeline-scroll-frame">
+            <div class="timeline-scroll" ref="dailyScroll" @scroll="handleTimelineScroll('daily')">
+              <div class="timeline-columns">
+                <section v-for="day in scheduleDayColumns" :key="day.key" class="day-column" :data-day="day.key">
                 <div class="day-header">
                   <div>
                     <div class="day-label">{{ day.label }}</div>
@@ -406,7 +420,19 @@
                   </div>
 
                 </div>
-              </section>
+                </section>
+              </div>
+            </div>
+            <div
+              class="timeline-sticky-scrollbar"
+              ref="dailyStickyScroll"
+              aria-hidden="true"
+              @scroll="handleTimelineStickyScroll('daily')"
+            >
+              <div
+                class="timeline-sticky-scrollbar-spacer"
+                :style="{ width: `${timelineStickyScrollbarWidths.daily}px` }"
+              ></div>
             </div>
           </div>
 
@@ -1309,9 +1335,10 @@
                   </div>
                 </div>
 
-                <div v-if="ddlViewMode === 'timeline'" class="timeline-scroll" ref="timelineScroll" @scroll="handleTimelineScroll('ddl')">
-                  <div class="timeline-columns">
-                    <section v-for="day in dayColumns" :key="day.key" class="day-column" :data-day="day.key">
+                <div v-if="ddlViewMode === 'timeline'" class="timeline-scroll-frame">
+                  <div class="timeline-scroll" ref="timelineScroll" @scroll="handleTimelineScroll('ddl')">
+                    <div class="timeline-columns">
+                      <section v-for="day in dayColumns" :key="day.key" class="day-column" :data-day="day.key">
                       <div class="day-header">
                         <div class="day-label">{{ day.label }}</div>
                         <div class="day-subtitle">{{ day.subtitle }}</div>
@@ -1328,7 +1355,19 @@
                         </article>
                       </div>
                       <div v-else class="empty-column">这一天暂无任务。</div>
-                    </section>
+                      </section>
+                    </div>
+                  </div>
+                  <div
+                    class="timeline-sticky-scrollbar"
+                    ref="timelineStickyScroll"
+                    aria-hidden="true"
+                    @scroll="handleTimelineStickyScroll('ddl')"
+                  >
+                    <div
+                      class="timeline-sticky-scrollbar-spacer"
+                      :style="{ width: `${timelineStickyScrollbarWidths.ddl}px` }"
+                    ></div>
                   </div>
                 </div>
 
@@ -1375,9 +1414,10 @@
                   </div>
                   <el-tag type="info" effect="plain">只读</el-tag>
                 </div>
-                <div class="timeline-scroll" ref="dailyScroll" @scroll="handleTimelineScroll('daily')">
-                  <div class="timeline-columns">
-                    <section v-for="day in scheduleDayColumns" :key="day.key" class="day-column" :data-day="day.key">
+                <div class="timeline-scroll-frame">
+                  <div class="timeline-scroll" ref="dailyScroll" @scroll="handleTimelineScroll('daily')">
+                    <div class="timeline-columns">
+                      <section v-for="day in scheduleDayColumns" :key="day.key" class="day-column" :data-day="day.key">
                       <div class="day-header">
                         <div>
                           <div class="day-label">{{ day.label }}</div>
@@ -1405,7 +1445,19 @@
                           <span v-if="item.completed" class="schedule-check">✓</span>
                         </article>
                       </div>
-                    </section>
+                      </section>
+                    </div>
+                  </div>
+                  <div
+                    class="timeline-sticky-scrollbar"
+                    ref="dailyStickyScroll"
+                    aria-hidden="true"
+                    @scroll="handleTimelineStickyScroll('daily')"
+                  >
+                    <div
+                      class="timeline-sticky-scrollbar-spacer"
+                      :style="{ width: `${timelineStickyScrollbarWidths.daily}px` }"
+                    ></div>
                   </div>
                 </div>
                 <div class="ddl-dock">

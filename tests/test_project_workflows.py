@@ -304,6 +304,69 @@ class ProjectWorkflowTests(unittest.TestCase):
         status, payload = self.request('DELETE', f'/api/schedule-items/{item_id}', token=token)
         self.assertEqual(status, HTTPStatus.OK, payload)
 
+    def test_schedule_item_query_range_is_separate_from_habit_sync_range(self):
+        token, user = self.register_user('schedule-range-user')
+        today = server.today_key()
+        past = server.add_days_key(today, -1)
+        past_task = self.create_task(token, 'past-schedule-task', dueAt='')
+        past_item_id, _ = self.create_schedule_item(token, past_task['id'], date_key=past, duration=1)
+
+        weekday = server.weekday_for_date(today)
+        slot = server.DEFAULT_WEEK_SLOTS[weekday][0]
+        now = server.now_iso()
+        with server.get_db() as conn:
+            conn.execute(
+                '''
+                INSERT INTO tasks
+                (id, user_id, title, subject, due_at, pool, priority, note, completed, created_at, updated_at)
+                VALUES (?, ?, ?, ?, '', 'habit', 'low', '', 0, ?, ?)
+                ''',
+                ('habit-range-task', user['id'], 'Range habit', 'Math', now, now),
+            )
+            conn.execute(
+                '''
+                INSERT INTO habits
+                (id, user_id, task_id, weekdays_json, slot_key_base, slot_label, slot_start, slot_end,
+                 duration_minutes, start_date, end_date, active, archived, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?)
+                ''',
+                (
+                    'habit-range',
+                    user['id'],
+                    'habit-range-task',
+                    json.dumps([weekday]),
+                    slot['keyBase'],
+                    slot['label'],
+                    slot['start'],
+                    slot['end'],
+                    1,
+                    today,
+                    today,
+                    now,
+                    now,
+                ),
+            )
+            conn.commit()
+
+        status, payload = self.request(
+            'GET',
+            f'/api/schedule-items?from={past}&to={past}&syncFrom={today}&syncTo={today}',
+            token=token,
+        )
+        self.assertEqual(status, HTTPStatus.OK, payload)
+        self.assertEqual([item['id'] for item in payload['items']], [past_item_id])
+
+        with server.get_db() as conn:
+            generated_count = conn.execute(
+                '''
+                SELECT COUNT(*)
+                FROM schedule_items
+                WHERE user_id = ? AND habit_id = ? AND schedule_date = ?
+                ''',
+                (user['id'], 'habit-range', today),
+            ).fetchone()[0]
+        self.assertEqual(generated_count, 1)
+
     def test_habit_sync_conflict_and_delete_cleanup(self):
         token, _ = self.register_user('habit-user')
         date_key = server.today_key()
