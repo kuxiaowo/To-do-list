@@ -485,6 +485,7 @@
           <button class="admin-nav-button" :class="{ active: adminSection === 'users' }" type="button" @click="switchAdminSection('users')">用户列表</button>
           <button class="admin-nav-button" :class="{ active: adminSection === 'logs' }" type="button" @click="switchAdminSection('logs')">用户日志</button>
           <button class="admin-nav-button" :class="{ active: adminSection === 'feedback' }" type="button" @click="switchAdminSection('feedback')">用户反馈</button>
+          <button class="admin-nav-button" :class="{ active: adminSection === 'security' }" type="button" @click="switchAdminSection('security')">安全设置</button>
           <button class="admin-nav-button" :class="{ active: adminSection === 'traffic' }" type="button" @click="switchAdminSection('traffic')">流量统计</button>
           <button class="admin-nav-button" :class="{ active: adminSection === 'aiUsage' }" type="button" @click="switchAdminSection('aiUsage')">Token 使用情况</button>
           <button class="admin-nav-button" :class="{ active: adminSection === 'installerDownloads' }" type="button" @click="switchAdminSection('installerDownloads')">下载统计</button>
@@ -676,6 +677,52 @@
               :current-page="adminFeedbackPage"
               @current-change="loadAdminFeedback"
             ></el-pagination>
+          </div>
+        </section>
+
+        <section v-else-if="adminSection === 'security'" class="admin-panel">
+          <div class="admin-panel-header">
+            <div>
+              <h2>安全设置</h2>
+              <p>控制匿名注册入口的 IP 尝试频率。</p>
+            </div>
+            <el-button plain @click="loadAdminSecuritySettings">刷新设置</el-button>
+          </div>
+
+          <div class="traffic-grid compact-analytics-grid">
+            <section class="traffic-top-panel ai-limit-panel">
+              <div class="traffic-section-title">
+                <span>注册 IP 限制</span>
+                <span>{{ registrationLimitText(adminRegistrationIpLimit) }}</span>
+              </div>
+              <div class="ai-limit-form">
+                <label>
+                  <span>窗口小时数</span>
+                  <el-input-number
+                    v-model="adminRegistrationIpLimitDraft.windowHours"
+                    :min="1"
+                    :max="8760"
+                    :step="1"
+                    step-strictly
+                    controls-position="right"
+                  ></el-input-number>
+                </label>
+                <label>
+                  <span>尝试次数上限</span>
+                  <el-input-number
+                    v-model="adminRegistrationIpLimitDraft.attemptLimit"
+                    :min="1"
+                    :max="1000000"
+                    :step="1"
+                    step-strictly
+                    controls-position="right"
+                  ></el-input-number>
+                </label>
+              </div>
+              <div class="ai-limit-actions">
+                <el-button type="primary" plain @click="saveAdminRegistrationIpLimit">保存注册限制</el-button>
+              </div>
+            </section>
           </div>
         </section>
 

@@ -285,6 +285,14 @@ createApp({
       adminFeedbackReplyVisible: false,
       adminFeedbackActive: null,
       adminFeedbackReply: '',
+      adminRegistrationIpLimit: {
+        windowHours: 24,
+        attemptLimit: 5
+      },
+      adminRegistrationIpLimitDraft: {
+        windowHours: 24,
+        attemptLimit: 5
+      },
       adminTrafficView: '7d',
       adminTrafficUserFilter: 'all',
       adminTrafficHoverPoint: null,
@@ -2048,6 +2056,7 @@ createApp({
       if (this.adminSection === 'logs') await this.loadAdminLogs(1);
       if (this.adminSection === 'timeline') await this.loadAdminTimeline();
       if (this.adminSection === 'feedback') await this.loadAdminFeedback(1);
+      if (this.adminSection === 'security') await this.loadAdminSecuritySettings();
       if (this.adminSection === 'traffic') await this.loadAdminTraffic();
       if (this.adminSection === 'aiUsage') await this.loadAdminAiUsage();
       if (this.adminSection === 'installerDownloads') await this.loadAdminInstallerDownloads();
@@ -2068,6 +2077,7 @@ createApp({
       if (section === 'logs') await this.loadAdminLogs(1);
       if (section === 'timeline') await this.loadAdminTimeline();
       if (section === 'feedback') await this.loadAdminFeedback(1);
+      if (section === 'security') await this.loadAdminSecuritySettings();
       if (section === 'traffic') await this.loadAdminTraffic();
       if (section === 'aiUsage') await this.loadAdminAiUsage();
       if (section === 'installerDownloads') await this.loadAdminInstallerDownloads();
@@ -2216,6 +2226,66 @@ createApp({
         this.adminFeedbackLimitDraft = this.feedbackLimitPerUser;
       } catch (error) {
         ElementPlus.ElMessage.error(`反馈读取失败：${error.message}`);
+      } finally {
+        this.adminLoading = false;
+      }
+    },
+    normalizeRegistrationIpLimitDraft(limit) {
+      const windowHours = Number(limit && limit.windowHours);
+      const attemptLimit = Number(limit && limit.attemptLimit);
+      if (!Number.isInteger(windowHours) || windowHours < 1 || windowHours > 8760) {
+        throw new Error('窗口小时数必须是 1 到 8760 之间的整数。');
+      }
+      if (!Number.isInteger(attemptLimit) || attemptLimit < 1 || attemptLimit > 1000000) {
+        throw new Error('尝试次数上限必须是 1 到 1000000 之间的整数。');
+      }
+      return { windowHours, attemptLimit };
+    },
+    registrationIpLimitDraftFromLimit(limit) {
+      return {
+        windowHours: Number(limit && limit.windowHours ? limit.windowHours : 24),
+        attemptLimit: Number(limit && limit.attemptLimit ? limit.attemptLimit : 5)
+      };
+    },
+    registrationLimitText(limit) {
+      const safe = this.registrationIpLimitDraftFromLimit(limit);
+      return `${safe.windowHours} 小时 · ${this.formatTokenCount(safe.attemptLimit)} 次`;
+    },
+    async loadAdminSecuritySettings() {
+      if (!this.isAdmin) return;
+      this.adminLoading = true;
+      try {
+        const payload = await this.apiJson(`${ADMIN_API}/registration-limit`, { cache: 'no-store' });
+        const limit = this.registrationIpLimitDraftFromLimit(payload.registrationIpLimit);
+        this.adminRegistrationIpLimit = limit;
+        this.adminRegistrationIpLimitDraft = this.registrationIpLimitDraftFromLimit(limit);
+      } catch (error) {
+        ElementPlus.ElMessage.error(`安全设置读取失败：${error.message}`);
+      } finally {
+        this.adminLoading = false;
+      }
+    },
+    async saveAdminRegistrationIpLimit() {
+      if (!this.isAdmin) return;
+      let limit;
+      try {
+        limit = this.normalizeRegistrationIpLimitDraft(this.adminRegistrationIpLimitDraft);
+      } catch (error) {
+        ElementPlus.ElMessage.warning(error.message);
+        return;
+      }
+      this.adminLoading = true;
+      try {
+        const payload = await this.apiJson(`${ADMIN_API}/registration-limit`, {
+          method: 'PUT',
+          body: JSON.stringify(limit)
+        });
+        const saved = this.registrationIpLimitDraftFromLimit(payload.registrationIpLimit || limit);
+        this.adminRegistrationIpLimit = saved;
+        this.adminRegistrationIpLimitDraft = this.registrationIpLimitDraftFromLimit(saved);
+        ElementPlus.ElMessage.success('注册限制已保存。');
+      } catch (error) {
+        ElementPlus.ElMessage.error(`注册限制保存失败：${error.message}`);
       } finally {
         this.adminLoading = false;
       }
@@ -2748,6 +2818,7 @@ createApp({
         'admin.feedback.limit_update': '修改未回复反馈上限',
         'feedback.delete': '删除反馈',
         'subject_template.update': '更新科目模板',
+        'admin.registration_ip_limit.update': '修改注册 IP 限制',
         'admin.ai_token.global_limit_update': '修改 AI 全局 Token 限制',
         'admin.ai_token.user_limit_update': '修改用户 AI Token 限制',
         'admin.ai_token.user_limit_clear': '清除用户 AI Token 覆盖',
@@ -3266,6 +3337,8 @@ createApp({
       this.adminFeedbackReplyVisible = false;
       this.adminFeedbackActive = null;
       this.adminFeedbackReply = '';
+      this.adminRegistrationIpLimit = { windowHours: 24, attemptLimit: 5 };
+      this.adminRegistrationIpLimitDraft = { windowHours: 24, attemptLimit: 5 };
       this.adminTrafficView = '7d';
       this.adminTrafficUserFilter = 'all';
       this.adminTrafficHoverPoint = null;

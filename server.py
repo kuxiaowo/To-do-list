@@ -92,11 +92,14 @@ DEFAULT_FEEDBACK_LIMIT_PER_USER = 10
 FEEDBACK_LIMIT_SETTING_KEY = 'feedback_limit_per_user'
 AI_TOKEN_LIMIT_SETTING_KEY = 'ai_token_limit_global'
 INSTALLER_DOWNLOAD_LIMIT_SETTING_KEY = 'managebac_installer_download_limit_global'
+REGISTRATION_IP_LIMIT_SETTING_KEY = 'registration_ip_attempt_limit'
 DEFAULT_AI_TOKEN_WINDOW_HOURS = 24
 DEFAULT_AI_INPUT_TOKEN_LIMIT = 200_000
 DEFAULT_AI_OUTPUT_TOKEN_LIMIT = 50_000
 DEFAULT_INSTALLER_DOWNLOAD_WINDOW_HOURS = 24
 DEFAULT_INSTALLER_DOWNLOAD_LINK_LIMIT = 5
+DEFAULT_REGISTRATION_IP_WINDOW_HOURS = 24
+DEFAULT_REGISTRATION_IP_ATTEMPT_LIMIT = 5
 TRUSTED_PROXY_IPS = {'127.0.0.1', '::1'}
 DEEPSEEK_API_URL = 'https://api.deepseek.com/chat/completions'
 DEFAULT_DEEPSEEK_MODEL = 'deepseek-v4-flash'
@@ -452,6 +455,21 @@ def init_db() -> None:
         conn.execute('CREATE INDEX IF NOT EXISTS idx_visit_logs_page ON visit_logs(page)')
         conn.execute(
             '''
+            CREATE TABLE IF NOT EXISTS registration_attempt_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ip TEXT NOT NULL DEFAULT '',
+                nickname TEXT NOT NULL DEFAULT '',
+                result TEXT NOT NULL DEFAULT '',
+                user_id INTEGER,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE SET NULL
+            )
+            '''
+        )
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_registration_attempt_logs_ip_created ON registration_attempt_logs(ip, created_at)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_registration_attempt_logs_created_at ON registration_attempt_logs(created_at)')
+        conn.execute(
+            '''
             CREATE TABLE IF NOT EXISTS ai_usage_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
@@ -543,6 +561,20 @@ def init_db() -> None:
                 json.dumps({
                     'windowHours': DEFAULT_INSTALLER_DOWNLOAD_WINDOW_HOURS,
                     'linkLimit': DEFAULT_INSTALLER_DOWNLOAD_LINK_LIMIT,
+                }, ensure_ascii=False),
+                now_iso(),
+            ),
+        )
+        conn.execute(
+            '''
+            INSERT OR IGNORE INTO app_settings (key, value, updated_at)
+            VALUES (?, ?, ?)
+            ''',
+            (
+                REGISTRATION_IP_LIMIT_SETTING_KEY,
+                json.dumps({
+                    'windowHours': DEFAULT_REGISTRATION_IP_WINDOW_HOURS,
+                    'attemptLimit': DEFAULT_REGISTRATION_IP_ATTEMPT_LIMIT,
                 }, ensure_ascii=False),
                 now_iso(),
             ),
@@ -1450,6 +1482,109 @@ def set_feedback_limit(conn: sqlite3.Connection, limit: int) -> None:
     )
 
 
+def default_registration_ip_limit() -> dict:
+    return {
+        'windowHours': DEFAULT_REGISTRATION_IP_WINDOW_HOURS,
+        'attemptLimit': DEFAULT_REGISTRATION_IP_ATTEMPT_LIMIT,
+    }
+
+
+def normalize_registration_ip_limit(raw: object) -> tuple[dict | None, str | None]:
+    if not isinstance(raw, dict):
+        return None, 'limit must be an object'
+    try:
+        window_hours = int(raw.get('windowHours'))
+        attempt_limit = int(raw.get('attemptLimit'))
+    except (TypeError, ValueError):
+        return None, 'windowHours and attemptLimit must be integers'
+    if window_hours < 1 or window_hours > 24 * 365:
+        return None, 'windowHours must be between 1 and 8760'
+    if attempt_limit < 1 or attempt_limit > 1_000_000:
+        return None, 'attemptLimit must be between 1 and 1000000'
+    return {'windowHours': window_hours, 'attemptLimit': attempt_limit}, None
+
+
+def get_registration_ip_limit(conn: sqlite3.Connection) -> dict:
+    row = conn.execute('SELECT value FROM app_settings WHERE key = ?', (REGISTRATION_IP_LIMIT_SETTING_KEY,)).fetchone()
+    if not row:
+        return default_registration_ip_limit()
+    try:
+        payload = json.loads(row['value'])
+    except (TypeError, json.JSONDecodeError):
+        return default_registration_ip_limit()
+    limit, error = normalize_registration_ip_limit(payload)
+    return default_registration_ip_limit() if error else limit
+
+
+def set_registration_ip_limit(conn: sqlite3.Connection, limit: dict) -> None:
+    conn.execute(
+        '''
+        INSERT INTO app_settings (key, value, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+        ''',
+        (REGISTRATION_IP_LIMIT_SETTING_KEY, json.dumps(limit, ensure_ascii=False), now_iso()),
+    )
+
+
+def registration_ip_window_start(window_hours: int) -> str:
+    start = datetime.now(timezone.utc) - timedelta(hours=window_hours)
+    return start.strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def registration_attempt_totals_since(conn: sqlite3.Connection, ip: str, start_key: str) -> dict:
+    row = conn.execute(
+        '''
+        SELECT COUNT(*) AS attempt_count
+        FROM registration_attempt_logs
+        WHERE ip = ? AND created_at >= ?
+        ''',
+        (ip, start_key),
+    ).fetchone()
+    return {'attemptCount': int(row['attempt_count'] or 0)}
+
+
+def registration_ip_limit_status(conn: sqlite3.Connection, ip: str) -> dict:
+    limit = get_registration_ip_limit(conn)
+    usage = registration_attempt_totals_since(conn, ip, registration_ip_window_start(limit['windowHours']))
+    return {
+        'limit': limit,
+        'usage': usage,
+        'exceeded': usage['attemptCount'] >= limit['attemptLimit'],
+    }
+
+
+def registration_ip_limit_error(status: dict) -> dict:
+    limit = status['limit']
+    usage = status['usage']
+    return {
+        'error': 'registration ip limit exceeded',
+        'message': (
+            f"Registration attempt limit reached: last {limit['windowHours']} hours used "
+            f"{usage['attemptCount']} / {limit['attemptLimit']}."
+        ),
+        'windowHours': limit['windowHours'],
+        'attemptLimit': limit['attemptLimit'],
+        'currentAttemptCount': usage['attemptCount'],
+    }
+
+
+def record_registration_attempt(
+    conn: sqlite3.Connection,
+    ip: str,
+    nickname: str,
+    result: str,
+    user_id: int | None = None,
+) -> None:
+    conn.execute(
+        '''
+        INSERT INTO registration_attempt_logs (ip, nickname, result, user_id, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        ''',
+        (ip, nickname[:32], result[:40], user_id, now_iso()),
+    )
+
+
 def default_ai_token_limit() -> dict:
     return {
         'windowHours': DEFAULT_AI_TOKEN_WINDOW_HOURS,
@@ -2189,6 +2324,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return self.handle_admin_update_ai_global_limit()
         if path == '/api/admin/installer-downloads/global-limit':
             return self.handle_admin_update_installer_download_global_limit()
+        if path == '/api/admin/registration-limit':
+            return self.handle_admin_update_registration_limit()
         parts = path.strip('/').split('/')
         if len(parts) == 5 and parts[:3] == ['api', 'admin', 'users'] and parts[4] == 'ai-token-limit':
             return self.handle_admin_update_user_ai_token_limit(parts[3])
@@ -2838,6 +2975,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return self.handle_admin_feedback()
         if parts == ['api', 'admin', 'feedback-settings']:
             return self.handle_admin_feedback_settings()
+        if parts == ['api', 'admin', 'registration-limit']:
+            return self.handle_admin_registration_limit()
         if parts == ['api', 'admin', 'traffic', 'summary']:
             return self.handle_admin_traffic_summary()
         if parts == ['api', 'admin', 'ai-usage', 'summary']:
@@ -3655,6 +3794,36 @@ class TodoHandler(SimpleHTTPRequestHandler):
         with get_db() as conn:
             feedback_limit = get_feedback_limit(conn)
         return self.write_json({'feedbackLimitPerUser': feedback_limit})
+
+    def handle_admin_registration_limit(self):
+        with get_db() as conn:
+            limit = get_registration_ip_limit(conn)
+        return self.write_json({'registrationIpLimit': limit})
+
+    def handle_admin_update_registration_limit(self):
+        admin = self.require_admin()
+        if not admin:
+            return
+        payload = self.read_json_body()
+        if payload is None:
+            return
+        limit, error = normalize_registration_ip_limit(payload)
+        if error:
+            return self.write_json({'error': error}, status=HTTPStatus.BAD_REQUEST)
+        with get_db() as conn:
+            old_limit = get_registration_ip_limit(conn)
+            set_registration_ip_limit(conn, limit)
+            self.log_operation(
+                conn,
+                int(admin['id']),
+                int(admin['id']),
+                'admin.registration_ip_limit.update',
+                'setting',
+                REGISTRATION_IP_LIMIT_SETTING_KEY,
+                {'oldLimit': old_limit, 'newLimit': limit},
+            )
+            conn.commit()
+        return self.write_json({'ok': True, 'registrationIpLimit': limit})
 
     def handle_admin_update_feedback_settings(self):
         admin = self.require_admin()
@@ -5313,16 +5482,33 @@ class TodoHandler(SimpleHTTPRequestHandler):
         name = str(payload.get('name', '')).strip()
         nickname = str(payload.get('nickname', '')).strip()
         password = str(payload.get('password', ''))
-        if not name or not nickname or not password:
-            return self.write_json({'error': 'name, nickname and password are required'}, status=HTTPStatus.BAD_REQUEST)
-        if len(name) > 64 or len(nickname) > 32:
-            return self.write_json({'error': 'name or nickname is too long'}, status=HTTPStatus.BAD_REQUEST)
-        if len(password) < 6:
-            return self.write_json({'error': 'password must be at least 6 characters'}, status=HTTPStatus.BAD_REQUEST)
+        request_ip = self.request_ip()
 
         with get_db() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            limit_status = registration_ip_limit_status(conn, request_ip)
+            if limit_status['exceeded']:
+                record_registration_attempt(conn, request_ip, nickname, 'rate_limited')
+                conn.commit()
+                return self.write_json(registration_ip_limit_error(limit_status), status=HTTPStatus.TOO_MANY_REQUESTS)
+
+            if not name or not nickname or not password:
+                record_registration_attempt(conn, request_ip, nickname, 'invalid_required')
+                conn.commit()
+                return self.write_json({'error': 'name, nickname and password are required'}, status=HTTPStatus.BAD_REQUEST)
+            if len(name) > 64 or len(nickname) > 32:
+                record_registration_attempt(conn, request_ip, nickname, 'invalid_length')
+                conn.commit()
+                return self.write_json({'error': 'name or nickname is too long'}, status=HTTPStatus.BAD_REQUEST)
+            if len(password) < 6:
+                record_registration_attempt(conn, request_ip, nickname, 'invalid_password')
+                conn.commit()
+                return self.write_json({'error': 'password must be at least 6 characters'}, status=HTTPStatus.BAD_REQUEST)
+
             existing = conn.execute('SELECT id FROM users WHERE nickname = ? COLLATE NOCASE', (nickname,)).fetchone()
             if existing:
+                record_registration_attempt(conn, request_ip, nickname, 'duplicate_nickname')
+                conn.commit()
                 return self.write_json({'error': 'nickname already exists'}, status=HTTPStatus.CONFLICT)
             try:
                 cursor = conn.execute(
@@ -5339,8 +5525,11 @@ class TodoHandler(SimpleHTTPRequestHandler):
                     str(user_id),
                     {'nickname': nickname},
                 )
+                record_registration_attempt(conn, request_ip, nickname, 'success', user_id)
                 conn.commit()
             except sqlite3.IntegrityError:
+                record_registration_attempt(conn, request_ip, nickname, 'duplicate_nickname')
+                conn.commit()
                 return self.write_json({'error': 'nickname already exists'}, status=HTTPStatus.CONFLICT)
             user = conn.execute(
                 'SELECT id, name, nickname, role, avatar_file, avatar_updated_at, avatar_color FROM users WHERE id = ?',
