@@ -367,7 +367,7 @@ class ProjectWorkflowTests(unittest.TestCase):
             ).fetchone()[0]
         self.assertEqual(generated_count, 1)
 
-    def test_habit_sync_conflict_and_delete_cleanup(self):
+    def test_habit_overlap_is_created_and_marked_for_cleanup(self):
         token, _ = self.register_user('habit-user')
         date_key = server.today_key()
         weekday = server.weekday_for_date(date_key)
@@ -404,9 +404,14 @@ class ProjectWorkflowTests(unittest.TestCase):
             'title': 'Conflicting habit',
             'durationMinutes': server.minutes_between(slot['start'], slot['end']),
         }, token=token)
-        self.assertEqual(status, HTTPStatus.CONFLICT)
-        self.assertEqual(payload['error'], 'habit schedule conflict')
-        self.assertTrue(payload['conflicts'])
+        self.assertEqual(status, HTTPStatus.CREATED, payload)
+
+        status, payload = self.request('GET', f'/api/schedule-items?from={date_key}&to={date_key}', token=token)
+        self.assertEqual(status, HTTPStatus.OK)
+        overlapping = [item for item in payload['items'] if item['habitId'] in {'habit-review', 'habit-conflict'}]
+        self.assertEqual(len(overlapping), 2)
+        self.assertTrue(all(item['hasConflict'] for item in overlapping))
+        self.assertTrue(all(len(item['conflictIds']) == 1 for item in overlapping))
 
         status, payload = self.request('DELETE', '/api/habits/habit-review', token=token)
         self.assertEqual(status, HTTPStatus.OK, payload)
@@ -414,6 +419,37 @@ class ProjectWorkflowTests(unittest.TestCase):
         status, payload = self.request('GET', f'/api/schedule-items?from={date_key}&to={date_key}', token=token)
         self.assertEqual(status, HTTPStatus.OK)
         self.assertFalse(any(item['habitId'] == 'habit-review' for item in payload['items']))
+
+    def test_habit_uses_exact_start_time_without_template_slot(self):
+        token, _ = self.register_user('exact-habit-user')
+        date_key = server.today_key()
+        weekday = server.weekday_for_date(date_key)
+        status, payload = self.request('POST', '/api/habits', {
+            'id': 'habit-exact-time',
+            'title': 'Exact habit',
+            'subject': 'Math',
+            'weekdays': [weekday],
+            'startTime': '08:07',
+            'durationMinutes': 26,
+            'startDate': date_key,
+            'endDate': date_key,
+            'priority': 'medium',
+            'note': '',
+            'active': True,
+        }, token=token)
+        self.assertEqual(status, HTTPStatus.CREATED, payload)
+        self.assertEqual(payload['habit']['startTime'], '08:07')
+        self.assertEqual(payload['habit']['endTime'], '08:33')
+
+        status, payload = self.request(
+            'GET',
+            f'/api/schedule-items?from={date_key}&to={date_key}',
+            token=token,
+        )
+        self.assertEqual(status, HTTPStatus.OK, payload)
+        item = next(entry for entry in payload['items'] if entry['habitId'] == 'habit-exact-time')
+        self.assertEqual(item['startTime'], '08:07')
+        self.assertEqual(item['endTime'], '08:33')
 
     def test_feedback_limits_admin_reply_and_permissions(self):
         admin_token, admin_user = self.register_user('admin', name='Admin')

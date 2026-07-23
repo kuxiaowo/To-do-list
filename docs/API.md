@@ -83,10 +83,12 @@ Authorization: Bearer <token>
   "userId": 1,
   "taskId": "task-1710000000000-abcd1234",
   "date": "2026-05-18",
-  "slotKey": "2026-05-18-1-18:00",
-  "slotLabel": "晚饭后",
-  "slotStart": "18:00",
-  "slotEnd": "18:40",
+  "slotKey": "2026-05-18-dynamic",
+  "slotLabel": "每日安排",
+  "slotStart": "00:00",
+  "slotEnd": "23:59",
+  "startTime": "18:05",
+  "endTime": "18:35",
   "durationMinutes": 30,
   "note": "复习错题",
   "completed": false,
@@ -102,7 +104,7 @@ Authorization: Bearer <token>
 }
 ```
 
-### Slot
+### Slot（旧版兼容）
 
 ```json
 {
@@ -115,8 +117,8 @@ Authorization: Bearer <token>
 
 说明：
 
+- 新版每日安排不再依赖时间格子；`slotKey`、`slotLabel`、`slotStart`、`slotEnd` 仅作为旧数据兼容字段返回。
 - `keyBase` 是同一天内的时间格子稳定标识。
-- 前端生成每日安排时会把日期和 `keyBase` 合成 `slotKey`。
 - `start` 和 `end` 使用 `HH:mm`。
 
 ## 认证接口
@@ -456,10 +458,7 @@ POST /api/schedule-items
 {
   "taskId": "task-1710000000000-abcd1234",
   "date": "2026-05-18",
-  "slotKey": "2026-05-18-1-18:00",
-  "slotLabel": "晚饭后",
-  "slotStart": "18:00",
-  "slotEnd": "18:40",
+  "startTime": "18:05",
   "durationMinutes": 30,
   "note": "复习错题",
   "completed": false
@@ -478,8 +477,21 @@ POST /api/schedule-items
 状态码：
 
 - `201 Created`：创建成功。
-- `400 Bad Request`：任务不存在、时间字段缺失、时长非法或超过当前格子容量。
+- `400 Bad Request`：任务不存在、日期或开始时间缺失、时长非法，或安排跨越到次日。
 - `401 Unauthorized`：未登录。
+
+每日安排不再依赖时间段模板。结束时间由 `startTime + durationMinutes` 自动计算；同一日期的安排允许时间重叠。查询安排时，每个实例会返回：
+
+```json
+{
+  "startTime": "18:05",
+  "endTime": "18:35",
+  "hasConflict": true,
+  "conflictIds": ["schedule-overlapping-id"]
+}
+```
+
+相邻但不重叠的区间不会标记冲突。
 
 ### 更新每日安排
 
@@ -491,6 +503,7 @@ PUT /api/schedule-items/{id}
 
 ```json
 {
+  "startTime": "18:10",
   "durationMinutes": 20,
   "note": "改做选择题",
   "completed": true
@@ -509,7 +522,7 @@ PUT /api/schedule-items/{id}
 状态码：
 
 - `200 OK`：更新成功。
-- `400 Bad Request`：时长非法或超过格子容量。
+- `400 Bad Request`：开始时间或时长非法，或安排跨越到次日。
 - `401 Unauthorized`：未登录。
 - `404 Not Found`：安排不存在或不属于当前用户。
 
@@ -711,10 +724,7 @@ POST /api/habits
   "title": "背单词",
   "subject": "English B",
   "weekdays": ["1", "3", "5"],
-  "slotKeyBase": "1-18:00",
-  "slotLabel": "晚饭后",
-  "slotStart": "18:00",
-  "slotEnd": "18:40",
+  "startTime": "18:00",
   "durationMinutes": 15,
   "startDate": "2026-05-18",
   "endDate": "",
@@ -736,9 +746,10 @@ POST /api/habits
 状态码：
 
 - `201 Created`：创建成功，并同步生成符合日期范围的每日安排。
-- `400 Bad Request`：字段缺失、星期非法、时间格子非法或时长非法。
+- `400 Bad Request`：字段缺失、星期非法、开始时间或时长非法，或习惯会跨越午夜。
 - `401 Unauthorized`：未登录。
-- `409 Conflict`：习惯同步会超出已有时间格子容量。
+
+习惯不再依赖一周时间格模板。结束时间由 `startTime + durationMinutes` 自动计算；即使与其他安排重叠也会正常创建，并在每日安排查询结果中通过 `hasConflict` 与 `conflictIds` 标记。
 
 ### 更新习惯
 

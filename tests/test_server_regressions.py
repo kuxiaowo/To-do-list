@@ -767,8 +767,7 @@ class ServerRegressionTests(unittest.TestCase):
 
         cases = [
             ({'date': '2026-99-99'}, 'date must be a valid YYYY-MM-DD date'),
-            ({'slotStart': '25:00'}, 'taskId, date, slotKey, slotStart and slotEnd are required'),
-            ({'slotKey': f'{server.today_key()}-missing'}, 'time slot does not exist for this date'),
+            ({'slotStart': '25:00'}, 'taskId, date and startTime are required'),
             ({'sortOrder': float('nan')}, 'sortOrder must be a finite number'),
             ({'sortOrder': float('inf')}, 'sortOrder must be a finite number'),
             ({'slotLabel': 'x' * 41}, 'slotLabel must be at most 40 characters'),
@@ -786,6 +785,78 @@ class ServerRegressionTests(unittest.TestCase):
         self.create_task(token)
         status, body = self.request('POST', '/api/schedule-items', self.schedule_payload(user['id']), token=token)
         self.assertEqual(status, 201, body)
+
+    def test_schedule_create_only_requires_dynamic_time_fields(self):
+        token, _ = self.register_user()
+        self.create_task(token)
+        date_key = server.today_key()
+        status, body = self.request('POST', '/api/schedule-items', {
+            'taskId': 'task-test',
+            'date': date_key,
+            'startTime': '08:07',
+            'durationMinutes': 26,
+            'note': '',
+        }, token=token)
+        self.assertEqual(status, 201, body)
+
+        status, body = self.request(
+            'GET',
+            f'/api/schedule-items?from={date_key}&to={date_key}',
+            token=token,
+        )
+        self.assertEqual(status, 200, body)
+        self.assertEqual(len(body['items']), 1)
+        item = body['items'][0]
+        self.assertEqual(item['startTime'], '08:07')
+        self.assertEqual(item['endTime'], '08:33')
+        self.assertEqual(item['slotKey'], f'{date_key}-dynamic')
+
+    def test_schedule_exact_time_migration_preserves_legacy_order(self):
+        with server.get_db() as conn:
+            conn.execute('DROP TABLE schedule_items')
+            conn.execute(
+                '''
+                CREATE TABLE schedule_items (
+                    id TEXT PRIMARY KEY,
+                    user_id INTEGER NOT NULL,
+                    task_id TEXT NOT NULL,
+                    schedule_date TEXT NOT NULL,
+                    slot_key TEXT NOT NULL,
+                    slot_label TEXT NOT NULL,
+                    slot_start TEXT NOT NULL,
+                    slot_end TEXT NOT NULL,
+                    duration_minutes INTEGER NOT NULL,
+                    sort_order REAL NOT NULL DEFAULT 0,
+                    habit_id TEXT NOT NULL DEFAULT '',
+                    note TEXT NOT NULL DEFAULT '',
+                    completed INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT,
+                    updated_at TEXT
+                )
+                '''
+            )
+            for index, duration in enumerate((20, 30), start=1):
+                conn.execute(
+                    '''
+                    INSERT INTO schedule_items
+                    (id, user_id, task_id, schedule_date, slot_key, slot_label, slot_start, slot_end,
+                     duration_minutes, sort_order, created_at, updated_at)
+                    VALUES (?, 1, ?, '2026-07-23', '2026-07-23-morning', '上午', '08:00', '09:00',
+                            ?, ?, ?, ?)
+                    ''',
+                    (f'legacy-{index}', f'task-{index}', duration, index * 1024, server.now_iso(), server.now_iso()),
+                )
+            conn.commit()
+
+        server.init_db()
+        with server.get_db() as conn:
+            rows = conn.execute(
+                'SELECT item_start, item_end FROM schedule_items ORDER BY sort_order ASC'
+            ).fetchall()
+        self.assertEqual(
+            [(row['item_start'], row['item_end']) for row in rows],
+            [('08:00', '08:20'), ('08:20', '08:50')],
+        )
 
     def test_ai_chat_requires_login_and_configured_key(self):
         original_key = os.environ.pop('DEEPSEEK_API_KEY', None)
@@ -1689,7 +1760,7 @@ class ServerRegressionTests(unittest.TestCase):
         finally:
             conn.close()
 
-    def test_concurrent_capacity_check_cannot_overfill_slot(self):
+    def test_concurrent_overlapping_items_are_both_created_and_flagged(self):
         token, user = self.register_user()
         self.create_task(token)
         payload = self.schedule_payload(user['id'])
@@ -1701,7 +1772,7 @@ class ServerRegressionTests(unittest.TestCase):
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
             statuses = sorted(executor.map(lambda _: post_schedule(), range(2)))
 
-        self.assertEqual(statuses, [201, 400])
+        self.assertEqual(statuses, [201, 201])
         conn = server.get_db()
         try:
             used = conn.execute(
@@ -1714,7 +1785,16 @@ class ServerRegressionTests(unittest.TestCase):
             ).fetchone()[0]
         finally:
             conn.close()
-        self.assertEqual(int(used), payload['durationMinutes'])
+        self.assertEqual(int(used), payload['durationMinutes'] * 2)
+
+        status, body = self.request(
+            'GET',
+            f"/api/schedule-items?from={payload['date']}&to={payload['date']}",
+            token=token,
+        )
+        self.assertEqual(status, 200, body)
+        self.assertEqual(len(body['items']), 2)
+        self.assertTrue(all(item['hasConflict'] for item in body['items']))
 
     def test_successful_login_verifies_password_once(self):
         self.register_user('login-user')
@@ -1917,10 +1997,40 @@ class ServerRegressionTests(unittest.TestCase):
         self.assertIn('v-if="showTaskPoolSection"', index_html)
         self.assertIn('v-if="showHabitPoolSection"', index_html)
         self.assertIn('v-model="appSettings.showUnscheduledDdl"', index_html)
-        self.assertIn('v-model="appSettings.showArrangementPool"', index_html)
+        self.assertNotIn('v-model="appSettings.showArrangementPool"', index_html)
         self.assertIn('v-model="appSettings.showHabitPool"', index_html)
         self.assertIn('v-model="appSettings.aiEnabled"', index_html)
+        self.assertIn('class="day-add-schedule-button"', index_html)
+        self.assertIn('@click.stop="openDirectScheduleCreateDialog(day)"', index_html)
         self.assertIn('.settings-row', style_css)
+
+    def test_ddl_calendar_is_standalone_and_conflicts_use_group_overlay(self):
+        index_html = INDEX_HTML_PATH.read_text(encoding='utf-8')
+        app_js = APP_JS_PATH.read_text(encoding='utf-8')
+        style_css = STYLE_CSS_PATH.read_text(encoding='utf-8')
+
+        self.assertIn("activePage === 'calendar'", index_html)
+        self.assertIn("switchPage('calendar')", index_html)
+        self.assertIn('DDL 日历', index_html)
+        self.assertNotIn('ddlViewMode', app_js)
+        self.assertNotIn('DDL视图切换', index_html)
+        self.assertIn('visibleScheduleGroupsForDate(day.key)', index_html)
+        self.assertIn('.schedule-item-group.has-conflict::after', style_css)
+        self.assertEqual(index_html.count('⚠ 冲突 {{ group.items.length }} 项'), 2)
+        self.assertNotIn('⚠ 冲突 {{ item.conflictIds.length + 1 }} 项', index_html)
+        self.assertIn('.schedule-conflict-label {\n  position: absolute;', style_css)
+        self.assertNotIn('scheduleConflictCount', app_js)
+        self.assertIn('scheduleConflictTypes()', app_js)
+        self.assertIn('个安排互相冲突', app_js)
+        self.assertIn('个习惯发生冲突', app_js)
+        self.assertIn('个习惯互相冲突', app_js)
+        self.assertNotIn('检测到时间冲突', index_html)
+        self.assertIn('v-for="conflict in scheduleConflictTypes"', index_html)
+        self.assertIn('⚠ {{ conflict.label }}', index_html)
+        self.assertIn('`${habitConflicts.size} 个习惯互相冲突`', app_js)
+        self.assertIn('`${mixedArrangements.size} 个安排与 ${mixedHabits.size} 个习惯发生冲突`', app_js)
+        self.assertIn('if (hasArrangements && hasHabits)', app_js)
+        self.assertIn("else if (hasHabits)", app_js)
 
     def test_admin_user_list_renders_avatar_column(self):
         index_html = INDEX_HTML_PATH.read_text(encoding='utf-8')
