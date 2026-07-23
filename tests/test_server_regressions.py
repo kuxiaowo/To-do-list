@@ -467,7 +467,7 @@ class ServerRegressionTests(unittest.TestCase):
         self.assertNotIn('task-habit', context_json)
         self.assertNotIn('task-arrangement', context_json)
         self.assertIn('taskPlacement', context)
-        self.assertIn('待安排DDL', context_json)
+        self.assertIn('待安排', context_json)
         self.assertIn('dueAt 为空字符串', context_json)
 
     def test_fetch_ai_context_tasks_uses_database_limit_and_truncation(self):
@@ -498,7 +498,7 @@ class ServerRegressionTests(unittest.TestCase):
             server.AI_REPAIR_SYSTEM_PROMPT,
         ]
         for prompt in prompts:
-            self.assertIn('待安排DDL', prompt)
+            self.assertIn('待安排', prompt)
             self.assertIn('dueAt', prompt)
             self.assertIn('空字符串', prompt)
 
@@ -2062,13 +2062,13 @@ class ServerRegressionTests(unittest.TestCase):
             app_js,
         )
 
-    def test_ai_frontend_explains_unscheduled_ddl_placement(self):
+    def test_ai_frontend_explains_pending_task_placement(self):
         index_html = INDEX_HTML_PATH.read_text(encoding='utf-8')
         app_js = APP_JS_PATH.read_text(encoding='utf-8')
 
-        self.assertIn('没有截止时间时会显示在“待定截止时间”', index_html)
-        self.assertIn('留空则放入待定截止时间', index_html)
-        self.assertIn(": '待定截止时间'", app_js)
+        self.assertIn('没有截止时间时会显示在“待安排”', index_html)
+        self.assertIn('留空则放入待安排', index_html)
+        self.assertIn(": '待安排'", app_js)
 
     def test_ai_frontend_entry_only_renders_on_ddl_page(self):
         index_html = INDEX_HTML_PATH.read_text(encoding='utf-8')
@@ -2117,6 +2117,12 @@ class ServerRegressionTests(unittest.TestCase):
         self.assertNotIn('v-model="appSettings.showArrangementPool"', index_html)
         self.assertIn('v-model="appSettings.showHabitPool"', index_html)
         self.assertIn('v-model="appSettings.aiEnabled"', index_html)
+        self.assertIn("['ddl', 'calendar', 'daily'].includes(this.activePage)", app_js)
+        self.assertIn("this.taskPool(task) === 'arrangement'", app_js)
+        self.assertIn('[...this.unscheduledTasks, ...this.arrangementTasks]', app_js)
+        self.assertIn('@click="openPoolTaskCreateDialog"', index_html)
+        self.assertIn(':draggable="activePage === \'daily\'"', index_html)
+        self.assertIn('尚未确定截止时间，或需要灵活安排的任务。', index_html)
         self.assertIn('class="day-add-schedule-button"', index_html)
         self.assertIn('@click.stop="openDirectScheduleCreateDialog(day)"', index_html)
         self.assertIn('.settings-row', style_css)

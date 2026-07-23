@@ -12,7 +12,7 @@
       document.documentElement.dataset.theme = savedTheme === 'dark' ? 'dark' : 'light';
     })();
   </script>
-  <link rel="stylesheet" href="./style.css?v=dynamic-daily-schedule-20260723-8" />
+  <link rel="stylesheet" href="./style.css?v=dynamic-daily-schedule-20260723-9" />
 </head>
 <body>
   <div id="app" v-cloak>
@@ -28,7 +28,7 @@
         </div>
         <button class="sidebar-peek-button" :class="{ 'is-expanded-control': !sidebarCollapsed }" type="button" :title="sidebarCollapsed ? '展开侧栏' : '收起侧栏'" @click="sidebarCollapsed = !sidebarCollapsed">
           <span class="sidebar-peek-icon">{{ sidebarCollapsed ? '›' : '‹' }}</span>
-          <span v-if="sidebarCollapsed" class="sidebar-peek-text">{{ showTaskPoolSection ? '待定' : '侧栏' }}</span>
+          <span v-if="sidebarCollapsed" class="sidebar-peek-text">{{ showTaskPoolSection ? '待安排' : '侧栏' }}</span>
           <span v-if="sidebarCollapsed && showTaskPoolSection" class="sidebar-peek-count">{{ unscheduledCount }}</span>
         </button>
         <div class="summary-panel-content">
@@ -63,20 +63,33 @@
 
         <section v-if="showTaskPoolSection" class="summary-section">
           <h3>
-            <span>待定截止时间</span>
+            <span>待安排</span>
             <span class="day-subtitle">{{ unscheduledCount }} 项</span>
           </h3>
-          <p class="summary-subtitle">还没确定截止时间的任务。</p>
+          <p class="summary-subtitle">尚未确定截止时间，或需要灵活安排的任务。</p>
           <div class="summary-card" data-guide="task-pool">
             <div class="summary-card-header">
               <div class="summary-card-title">按优先级排序</div>
-              <span class="day-subtitle">{{ unscheduledCount }} 项</span>
+              <el-button
+                v-if="activePage === 'daily'"
+                size="small"
+                type="primary"
+                plain
+                :disabled="!currentUser"
+                @click="openPoolTaskCreateDialog"
+              >新增</el-button>
+              <span v-else class="day-subtitle">{{ unscheduledCount }} 项</span>
             </div>
             <template v-if="activePoolTasks.length">
               <div
                 v-for="task in activePoolTasks"
                 :key="task.id"
                 class="summary-task"
+                :class="{ 'is-dragging': draggedTaskId === task.id }"
+                :draggable="activePage === 'daily'"
+                @dragstart="startTaskDrag(task, $event)"
+                @dragend="clearScheduleDragState"
+                @pointerdown="startTaskPointerDrag(task, $event)"
                 @click="openTaskFromPointerClick(task)"
               >
                 <div class="task-main">
@@ -93,7 +106,7 @@
                 </div>
               </div>
             </template>
-            <div v-else class="summary-empty">暂无待定截止时间的任务。</div>
+            <div v-else class="summary-empty">暂无待安排任务。</div>
           </div>
         </section>
 
@@ -137,8 +150,8 @@
         <div class="timeline-header">
           <div class="timeline-title">
             <div class="page-nav" data-guide="page-nav">
-              <button class="page-nav-button" :class="{ active: activePage === 'ddl' }" type="button" @click="switchPage('ddl')">DDL 时间线</button>
               <button class="page-nav-button" :class="{ active: activePage === 'calendar' }" type="button" @click="switchPage('calendar')">DDL 日历</button>
+              <button class="page-nav-button" :class="{ active: activePage === 'ddl' }" type="button" @click="switchPage('ddl')">DDL 时间线</button>
               <button class="page-nav-button" :class="{ active: activePage === 'daily' }" type="button" data-guide="daily-tab" @click="switchPage('daily')">每日安排</button>
             </div>
             <p>{{ activePage === 'ddl' ? '按截止日期自动排序' : (activePage === 'calendar' ? '用月历查看全部 DDL 任务' : '按开始时间排列每天的任务；重叠安排会标红提醒。') }}</p>
@@ -1272,10 +1285,10 @@
               </div>
               <section v-if="showTaskPoolSection" class="summary-section">
                 <h3>
-                  <span>待定截止时间</span>
+                  <span>待安排</span>
                   <span class="day-subtitle">{{ unscheduledCount }} 项</span>
                 </h3>
-                <p class="summary-subtitle">还没确定截止时间的任务。</p>
+                <p class="summary-subtitle">尚未确定截止时间，或需要灵活安排的任务。</p>
                 <div class="summary-card">
                   <div class="summary-card-header">
                     <div class="summary-card-title">按优先级排序</div>
@@ -1297,7 +1310,7 @@
                       </div>
                     </div>
                   </div>
-                  <div v-else class="summary-empty">暂无待定截止时间的任务。</div>
+                  <div v-else class="summary-empty">暂无待安排任务。</div>
                 </div>
               </section>
               <section v-if="showHabitPoolSection" class="summary-section habit-pool-section">
@@ -1339,8 +1352,8 @@
               <div class="timeline-header">
                 <div class="timeline-title">
                   <div class="page-nav">
-                    <button class="page-nav-button" :class="{ active: activePage === 'ddl' }" type="button" @click="switchPage('ddl')">DDL 时间线</button>
                     <button class="page-nav-button" :class="{ active: activePage === 'calendar' }" type="button" @click="switchPage('calendar')">DDL 日历</button>
+                    <button class="page-nav-button" :class="{ active: activePage === 'ddl' }" type="button" @click="switchPage('ddl')">DDL 时间线</button>
                     <button class="page-nav-button" :class="{ active: activePage === 'daily' }" type="button" @click="switchPage('daily')">每日安排</button>
                   </div>
                   <p>只读查看 {{ selectedAdminUser.name }} 的时间表。</p>
@@ -1579,7 +1592,7 @@
                 <div class="ai-help-title">AI 助手会怎样处理</div>
                 <div class="ai-help-section">
                   <div class="ai-help-section-title">可以做</div>
-                  <p>创建任务、修改任务详情、总结最近待办。没有截止时间时会显示在“待定截止时间”。</p>
+                  <p>创建任务、修改任务详情、总结最近待办。没有截止时间时会显示在“待安排”。</p>
                 </div>
                 <div class="ai-help-section">
                   <div class="ai-help-section-title">不会做</div>
@@ -1790,8 +1803,8 @@
         </div>
         <div class="settings-row">
           <div>
-            <div class="settings-row-title">待定截止时间</div>
-            <div class="settings-row-desc">控制左侧待定截止时间区域显示。</div>
+            <div class="settings-row-title">待安排</div>
+            <div class="settings-row-desc">控制左侧待安排任务区域显示。</div>
           </div>
           <el-switch v-model="appSettings.showUnscheduledDdl" @change="saveAppSettings"></el-switch>
         </div>
@@ -1885,7 +1898,7 @@
                     :disabled="aiActionLocked(action)"
                     :maxlength="field.field === 'title' ? 80 : undefined"
                     :show-word-limit="field.field === 'title'"
-                    :placeholder="field.field === 'dueAt' ? '留空则放入待定截止时间，或 YYYY-MM-DDTHH:mm:00' : field.label"
+                    :placeholder="field.field === 'dueAt' ? '留空则放入待安排，或 YYYY-MM-DDTHH:mm:00' : field.label"
                   ></el-input>
                 </template>
                 <div v-if="action.type === 'update_task'" class="ai-field-before">
@@ -2234,7 +2247,7 @@
         </el-form-item>
 
         <el-form-item label="时间安排">
-          <el-switch v-model="form.unscheduled" active-text="先放入待定截止时间" inactive-text="设置截止时间"></el-switch>
+          <el-switch v-model="form.unscheduled" active-text="先放入待安排" inactive-text="设置截止时间"></el-switch>
         </el-form-item>
 
         <el-form-item label="截止日期" v-if="!form.unscheduled">
@@ -2580,7 +2593,7 @@
 
   <script src="./vendor/vue.global.prod.js"></script>
   <script src="./vendor/element-plus.full.min.js"></script>
-  <script src="./app.js?v=dynamic-daily-schedule-20260723-8"></script>
+  <script src="./app.js?v=dynamic-daily-schedule-20260723-9"></script>
 </body>
 </html>
 

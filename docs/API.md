@@ -862,7 +862,7 @@ Content-Type: application/json
 
 ```json
 {
-  "message": "帮我创建一个数学任务，低优先级，先放到待安排DDL",
+  "message": "帮我创建一个数学任务，低优先级，先放到待安排",
   "history": [
     { "role": "user", "content": "上一轮用户消息" },
     { "role": "assistant", "content": "上一轮助手回复" }
@@ -882,7 +882,7 @@ Content-Type: application/json
     {
       "id": "ai-action-1",
       "type": "create_task",
-      "summary": "创建任务：完成练习 / Mathematics / 待安排DDL / 低",
+      "summary": "创建任务：完成练习 / Mathematics / 待安排 / 低",
       "task": {
         "title": "完成练习",
         "subject": "Mathematics",

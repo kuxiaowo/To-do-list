@@ -389,8 +389,8 @@ createApp({
         {
           key: 'task-pool',
           target: 'task-pool',
-          title: '左侧是待定截止时间',
-          text: '还没确定截止时间的任务会先放在这里，想好之后再设置也不迟。',
+          title: '左侧是待安排',
+          text: '尚未确定截止时间或需要灵活安排的任务会放在这里，并可拖入每日安排。',
           page: 'ddl'
         },
         {
@@ -690,7 +690,7 @@ createApp({
       return !this.adminMode && this.activePage === 'ddl' && this.appSettings.aiEnabled;
     },
     showTaskPoolSection() {
-      return ['ddl', 'calendar'].includes(this.activePage) && this.appSettings.showUnscheduledDdl;
+      return ['ddl', 'calendar', 'daily'].includes(this.activePage) && this.appSettings.showUnscheduledDdl;
     },
     showHabitPoolSection() {
       return this.activePage === 'daily' && this.appSettings.showHabitPool;
@@ -715,8 +715,14 @@ createApp({
         .filter(task => !task.dueAt && this.taskPool(task) === 'todo')
         .sort((a, b) => this.compareTasks(a, b));
     },
+    arrangementTasks() {
+      return this.filteredTasks
+        .filter(task => this.taskPool(task) === 'arrangement')
+        .sort((a, b) => this.compareTasks(a, b));
+    },
     activePoolTasks() {
-      return this.unscheduledTasks;
+      return [...this.unscheduledTasks, ...this.arrangementTasks]
+        .sort((a, b) => this.compareTasks(a, b));
     },
     unscheduledCount() {
       return this.activePoolTasks.length;
@@ -1811,7 +1817,7 @@ createApp({
     },
     aiFormatFieldValue(field, value) {
       if (field === 'priority') return this.priorityLabel(value || 'medium');
-      if (field === 'dueAt') return value ? String(value).replace('T', ' ').slice(0, 16) : '待定截止时间';
+      if (field === 'dueAt') return value ? String(value).replace('T', ' ').slice(0, 16) : '待安排';
       return value === '' || value === null || value === undefined ? '空' : String(value);
     },
     aiActionPreviewFields(action) {
@@ -4682,6 +4688,20 @@ createApp({
       this.activeTaskId = null;
       this.activeTaskPool = 'todo';
       this.form = this.emptyForm();
+      this.dialogVisible = true;
+    },
+    openPoolTaskCreateDialog() {
+      if (this.adminMode) return;
+      if (!this.currentUser) {
+        ElementPlus.ElMessage.warning('请先登录或注册，再新增待安排任务。');
+        return;
+      }
+      this.dialogMode = 'create';
+      this.createDialogType = 'task';
+      this.activeTaskId = null;
+      this.activeTaskPool = 'todo';
+      this.form = this.emptyForm();
+      this.form.unscheduled = true;
       this.dialogVisible = true;
     },
     openEditDialog(task) {
