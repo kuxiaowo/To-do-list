@@ -88,6 +88,8 @@ HOST = os.environ.get('TODO_HOST', '127.0.0.1')
 PORT = int(os.environ.get('TODO_PORT', '8092'))
 PASSWORD_ITERATIONS = 260_000
 SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
+SESSION_REFRESH_INTERVAL_SECONDS = 60 * 60
+DB_BUSY_TIMEOUT_MS = 5_000
 DEFAULT_FEEDBACK_LIMIT_PER_USER = 10
 FEEDBACK_LIMIT_SETTING_KEY = 'feedback_limit_per_user'
 AI_TOKEN_LIMIT_SETTING_KEY = 'ai_token_limit_global'
@@ -240,13 +242,27 @@ def avatar_dir() -> Path:
     return DATA_DIR / 'uploads' / 'avatars'
 
 
+def configure_db_connection(conn: sqlite3.Connection, *, enable_wal: bool = False) -> None:
+    """Apply connection-local settings and optionally persist WAL mode."""
+    if enable_wal:
+        journal_mode = conn.execute('PRAGMA journal_mode = WAL').fetchone()[0]
+        if str(journal_mode).lower() != 'wal':
+            raise RuntimeError(f'Failed to enable SQLite WAL mode (got {journal_mode!r})')
+    conn.execute('PRAGMA synchronous = NORMAL')
+    conn.execute('PRAGMA foreign_keys = ON')
+    conn.execute(f'PRAGMA busy_timeout = {DB_BUSY_TIMEOUT_MS}')
+
+
 def init_db() -> None:
     """Create the SQLite schema and apply small in-place migrations."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     avatar_dir().mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(DB_PATH, factory=ClosingConnection) as conn:
-        conn.execute('PRAGMA foreign_keys = ON')
-        conn.execute('PRAGMA busy_timeout = 5000')
+    with sqlite3.connect(
+        DB_PATH,
+        timeout=DB_BUSY_TIMEOUT_MS / 1000,
+        factory=ClosingConnection,
+    ) as conn:
+        configure_db_connection(conn, enable_wal=True)
         conn.execute(
             '''
             CREATE TABLE IF NOT EXISTS users (
@@ -655,9 +671,26 @@ def init_db() -> None:
             )
             '''
         )
+        conn.execute(
+            '''
+            CREATE INDEX IF NOT EXISTS idx_tasks_user_list_order
+            ON tasks(
+                user_id,
+                due_at,
+                CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END,
+                title COLLATE NOCASE
+            )
+            '''
+        )
         conn.execute('CREATE INDEX IF NOT EXISTS idx_schedule_items_user_date_slot ON schedule_items(user_id, schedule_date, slot_key)')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_schedule_items_user_task ON schedule_items(user_id, task_id)')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_schedule_items_user_habit_date ON schedule_items(user_id, habit_id, schedule_date)')
+        conn.execute(
+            '''
+            CREATE INDEX IF NOT EXISTS idx_schedule_items_user_list_order
+            ON schedule_items(user_id, schedule_date, item_start, sort_order, created_at)
+            '''
+        )
         conn.execute('CREATE INDEX IF NOT EXISTS idx_habits_user_active_archived ON habits(user_id, active, archived)')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_operation_logs_target_created ON operation_logs(target_user_id, created_at)')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_feedback_user_created ON feedback(user_id, created_at)')
@@ -665,9 +698,12 @@ def init_db() -> None:
 
 
 def get_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH, factory=ClosingConnection)
-    conn.execute('PRAGMA foreign_keys = ON')
-    conn.execute('PRAGMA busy_timeout = 5000')
+    conn = sqlite3.connect(
+        DB_PATH,
+        timeout=DB_BUSY_TIMEOUT_MS / 1000,
+        factory=ClosingConnection,
+    )
+    configure_db_connection(conn)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -2573,7 +2609,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
             self.copyfile(source, self.wfile)
 
     def current_user(self):
-        """Resolve the bearer token and slide the session expiration forward."""
+        """Resolve the bearer token and periodically slide its expiration."""
         auth = self.headers.get('Authorization', '')
         if not auth.lower().startswith('bearer '):
             return None
@@ -2598,8 +2634,17 @@ class TodoHandler(SimpleHTTPRequestHandler):
                 conn.execute('DELETE FROM sessions WHERE token = ?', (token,))
                 conn.commit()
                 return None
-            conn.execute('UPDATE sessions SET expires_at = ? WHERE token = ?', (now + SESSION_TTL_SECONDS, token))
-            conn.commit()
+            refresh_before = now + SESSION_TTL_SECONDS - SESSION_REFRESH_INTERVAL_SECONDS
+            if int(row['expires_at']) <= refresh_before:
+                conn.execute(
+                    '''
+                    UPDATE sessions
+                    SET expires_at = ?
+                    WHERE token = ? AND expires_at <= ?
+                    ''',
+                    (now + SESSION_TTL_SECONDS, token, refresh_before),
+                )
+                conn.commit()
             return row
 
     def require_user(self):

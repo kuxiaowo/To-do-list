@@ -7,6 +7,7 @@ import sqlite3
 import sys
 import tempfile
 import threading
+import time
 import types
 import unittest
 import urllib.error
@@ -1759,6 +1760,122 @@ class ServerRegressionTests(unittest.TestCase):
                 )
         finally:
             conn.close()
+
+    def test_database_connections_use_wal_and_performance_pragmas(self):
+        with server.get_db() as conn:
+            self.assertEqual(conn.execute('PRAGMA journal_mode').fetchone()[0], 'wal')
+            self.assertEqual(conn.execute('PRAGMA synchronous').fetchone()[0], 1)
+            self.assertEqual(
+                conn.execute('PRAGMA busy_timeout').fetchone()[0],
+                server.DB_BUSY_TIMEOUT_MS,
+            )
+
+            indexes = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_schema WHERE type = 'index'"
+                ).fetchall()
+            }
+            task_plan = [
+                row[3]
+                for row in conn.execute(
+                    '''
+                    EXPLAIN QUERY PLAN
+                    SELECT id, user_id, title, subject, due_at, pool, priority,
+                           note, completed, created_at, updated_at
+                    FROM tasks
+                    WHERE user_id = ?
+                    ORDER BY due_at ASC,
+                             CASE priority
+                                 WHEN 'high' THEN 0
+                                 WHEN 'medium' THEN 1
+                                 ELSE 2
+                             END ASC,
+                             title COLLATE NOCASE ASC
+                    ''',
+                    (1,),
+                ).fetchall()
+            ]
+            schedule_plan = [
+                row[3]
+                for row in conn.execute(
+                    '''
+                    EXPLAIN QUERY PLAN
+                    SELECT schedule_items.*, tasks.title AS task_title
+                    FROM schedule_items
+                    JOIN tasks
+                      ON tasks.id = schedule_items.task_id
+                     AND tasks.user_id = schedule_items.user_id
+                    WHERE schedule_items.user_id = ?
+                    ORDER BY schedule_items.schedule_date ASC,
+                             schedule_items.item_start ASC,
+                             schedule_items.sort_order ASC,
+                             schedule_items.created_at ASC
+                    ''',
+                    (1,),
+                ).fetchall()
+            ]
+
+        self.assertIn('idx_tasks_user_list_order', indexes)
+        self.assertIn('idx_schedule_items_user_list_order', indexes)
+        self.assertTrue(
+            any('idx_tasks_user_list_order' in detail for detail in task_plan),
+            task_plan,
+        )
+        self.assertFalse(
+            any('USE TEMP B-TREE' in detail for detail in task_plan),
+            task_plan,
+        )
+        self.assertTrue(
+            any('idx_schedule_items_user_list_order' in detail for detail in schedule_plan),
+            schedule_plan,
+        )
+        self.assertFalse(
+            any('USE TEMP B-TREE' in detail for detail in schedule_plan),
+            schedule_plan,
+        )
+
+    def test_session_expiration_refresh_is_rate_limited(self):
+        token, _user = self.register_user('session-refresh')
+
+        with server.get_db() as conn:
+            initial_expiry = conn.execute(
+                'SELECT expires_at FROM sessions WHERE token = ?',
+                (token,),
+            ).fetchone()[0]
+
+        status, payload = self.request('GET', '/api/auth/me', token=token)
+        self.assertEqual(status, 200, payload)
+
+        with server.get_db() as conn:
+            unchanged_expiry = conn.execute(
+                'SELECT expires_at FROM sessions WHERE token = ?',
+                (token,),
+            ).fetchone()[0]
+            stale_expiry = (
+                int(time.time())
+                + server.SESSION_TTL_SECONDS
+                - server.SESSION_REFRESH_INTERVAL_SECONDS
+                - 1
+            )
+            conn.execute(
+                'UPDATE sessions SET expires_at = ? WHERE token = ?',
+                (stale_expiry, token),
+            )
+            conn.commit()
+
+        self.assertEqual(unchanged_expiry, initial_expiry)
+
+        status, payload = self.request('GET', '/api/auth/me', token=token)
+        self.assertEqual(status, 200, payload)
+
+        with server.get_db() as conn:
+            refreshed_expiry = conn.execute(
+                'SELECT expires_at FROM sessions WHERE token = ?',
+                (token,),
+            ).fetchone()[0]
+
+        self.assertGreater(refreshed_expiry, stale_expiry)
 
     def test_concurrent_overlapping_items_are_both_created_and_flagged(self):
         token, user = self.register_user()
