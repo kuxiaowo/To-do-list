@@ -1111,48 +1111,26 @@ body {
   min-width: 0;
 }
 
-.ddl-view-toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-
-.ddl-view-switch {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 4px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: rgba(var(--panel-rgb), 0.94);
-  box-shadow: var(--schedule-shadow);
-}
-
-.ddl-view-button {
-  border: 0;
-  border-radius: 999px;
-  padding: 7px 14px;
-  background: transparent;
-  color: var(--muted);
-  font: inherit;
-  font-size: 0.9rem;
-  font-weight: 800;
-  cursor: pointer;
-}
-
-.ddl-view-button.active {
-  background: var(--brand-soft);
-  color: var(--brand);
-}
-
 .ddl-calendar-nav {
   display: flex;
   align-items: center;
   justify-content: flex-end;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.ddl-calendar-page {
+  min-width: 0;
+}
+
+.ddl-calendar-page > .ddl-calendar-nav {
+  justify-content: center;
+  margin-bottom: 12px;
+  padding: 12px;
+  border: 1px solid var(--panel-border);
+  border-radius: 16px;
+  background: rgba(var(--panel-rgb), 0.94);
+  box-shadow: var(--schedule-shadow);
 }
 
 .ddl-calendar-title {
@@ -1367,6 +1345,35 @@ body {
   display: flex;
   gap: 2px;
   flex-shrink: 0;
+}
+
+.day-add-schedule-button {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--panel);
+  color: var(--brand);
+  cursor: pointer;
+  font: 700 1.25rem/1 system-ui, sans-serif;
+  transition: border-color 0.18s ease, background-color 0.18s ease, transform 0.18s ease;
+}
+
+.day-add-schedule-button:hover:not(:disabled) {
+  border-color: var(--brand);
+  background: var(--brand-soft);
+  transform: translateY(-1px);
+}
+
+.day-add-schedule-button:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
+
+.day-add-schedule-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 
 .day-label {
@@ -1631,6 +1638,42 @@ body {
   font-size: 0.9rem;
 }
 
+.schedule-conflict-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  border: 1px solid rgba(220, 38, 38, 0.48);
+  border-radius: 14px;
+  background: rgba(220, 38, 38, 0.10);
+  color: var(--danger);
+  padding: 11px 14px;
+  font-size: 0.9rem;
+}
+
+.schedule-conflict-types {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.schedule-conflict-types span {
+  padding: 3px 8px;
+  border: 1px solid rgba(220, 38, 38, 0.24);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.64);
+  color: var(--danger);
+  font-size: 0.8rem;
+  font-weight: 800;
+}
+
+.habit-end-time {
+  margin-left: 10px;
+  color: var(--muted);
+  font-size: 0.86rem;
+  white-space: nowrap;
+}
+
 .daily-tools {
   display: flex;
   justify-content: space-between;
@@ -1661,47 +1704,78 @@ body {
   justify-content: flex-end;
 }
 
-.schedule-slot {
+.schedule-day-items {
   position: relative;
-  border: 1px dashed var(--slot-border);
-  background: var(--panel-muted);
-  border-radius: 16px;
-  padding: 10px;
-  margin-top: 10px;
-  min-height: 100px;
+  flex: 1;
+  min-height: 140px;
+  padding: 2px 2px 14px;
+  transition: background-color 0.18s ease, box-shadow 0.18s ease;
 }
 
-.schedule-slot:hover {
-  border-color: var(--slot-hover-border);
-  background: var(--brand-soft);
-}
-
-.schedule-slot.is-drag-target {
-  border-color: var(--insert-line);
-}
-
-.slot-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 8px;
-  margin-bottom: 8px;
-}
-
-.slot-title {
-  font-weight: 800;
-  font-size: 0.92rem;
-}
-
-.slot-time,
-.slot-capacity {
-  color: var(--muted);
-  font-size: 0.82rem;
-  line-height: 1.4;
+.schedule-day-items.is-drag-target {
+  background: rgba(99, 102, 241, 0.06);
+  box-shadow: inset 0 0 0 2px rgba(99, 102, 241, 0.24);
+  border-radius: 14px;
 }
 
 .schedule-card-list {
   position: relative;
+}
+
+.schedule-item-block {
+  margin-top: 10px;
+}
+
+.schedule-item-group {
+  position: relative;
+}
+
+.schedule-item-group.has-conflict {
+  margin-top: 10px;
+  padding: 10px 7px 12px;
+  overflow: hidden;
+  border: 1px solid rgba(220, 38, 38, 0.35);
+  border-radius: 14px;
+  background: rgba(220, 38, 38, 0.05);
+}
+
+.schedule-item-group.has-conflict::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  border-radius: inherit;
+  background: rgba(220, 38, 38, 0.20);
+  pointer-events: none;
+}
+
+.schedule-item-group.has-conflict .schedule-item-block:first-child {
+  margin-top: 0;
+}
+
+.schedule-item-group.has-conflict .schedule-insert-line {
+  z-index: 4;
+}
+
+.schedule-item-start-time {
+  margin: 0 0 3px 5px;
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-weight: 650;
+  line-height: 1.25;
+  letter-spacing: 0.01em;
+}
+
+.schedule-item-block .schedule-card {
+  margin-top: 0;
+}
+
+.schedule-day-empty {
+  padding: 20px 4px;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.5;
+  text-align: center;
 }
 
 .schedule-insert-line {
@@ -1745,6 +1819,22 @@ body {
   margin-top: 8px;
   cursor: pointer;
   box-shadow: var(--schedule-shadow);
+}
+
+.schedule-conflict-label {
+  position: absolute;
+  top: 7px;
+  right: 9px;
+  z-index: 4;
+  padding: 2px 7px;
+  border: 1px solid rgba(185, 28, 28, 0.22);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--danger);
+  font-size: 0.76rem;
+  font-weight: 900;
+  line-height: 1.4;
+  white-space: nowrap;
 }
 
 .schedule-card[draggable="true"] {
@@ -1815,6 +1905,13 @@ body.is-schedule-touch-dragging * {
 .schedule-card.priority-high { border-left-color: var(--danger); background: var(--task-high-bg); }
 .schedule-card.priority-medium { border-left-color: var(--warning); background: var(--task-medium-bg); }
 .schedule-card.priority-low { border-left-color: var(--success); background: var(--task-low-bg); }
+
+.schedule-card.has-conflict {
+  border: 2px solid rgba(220, 38, 38, 0.82);
+  border-left-width: 5px;
+  background: var(--panel);
+  box-shadow: var(--schedule-shadow);
+}
 
 .schedule-card.completed {
   filter: grayscale(0.85);
@@ -3416,7 +3513,6 @@ body.is-schedule-touch-dragging * {
     justify-content: space-between;
   }
 
-  .ddl-view-toolbar,
   .ddl-calendar-nav {
     align-items: flex-start;
     justify-content: flex-start;
@@ -3537,14 +3633,16 @@ body.is-schedule-touch-dragging * {
 }
 
 .app-shell:not(.admin-readonly-board):not(.sidebar-collapsed) .timeline-header,
-.app-shell:not(.admin-readonly-board):not(.sidebar-collapsed) .ddl-view-toolbar,
-.app-shell:not(.admin-readonly-board):not(.sidebar-collapsed) .daily-tools {
+.app-shell:not(.admin-readonly-board):not(.sidebar-collapsed) .ddl-calendar-page,
+.app-shell:not(.admin-readonly-board):not(.sidebar-collapsed) .daily-tools,
+.app-shell:not(.admin-readonly-board):not(.sidebar-collapsed) .schedule-conflict-summary {
   margin-left: 360px;
 }
 
 .app-shell.sidebar-collapsed:not(.admin-readonly-board) .timeline-header,
-.app-shell.sidebar-collapsed:not(.admin-readonly-board) .ddl-view-toolbar,
-.app-shell.sidebar-collapsed:not(.admin-readonly-board) .daily-tools {
+.app-shell.sidebar-collapsed:not(.admin-readonly-board) .ddl-calendar-page,
+.app-shell.sidebar-collapsed:not(.admin-readonly-board) .daily-tools,
+.app-shell.sidebar-collapsed:not(.admin-readonly-board) .schedule-conflict-summary {
   margin-left: 72px;
 }
 
@@ -3558,14 +3656,16 @@ body.is-schedule-touch-dragging * {
   }
 
   .app-shell:not(.admin-readonly-board):not(.sidebar-collapsed) .timeline-header,
-  .app-shell:not(.admin-readonly-board):not(.sidebar-collapsed) .ddl-view-toolbar,
-  .app-shell:not(.admin-readonly-board):not(.sidebar-collapsed) .daily-tools {
+  .app-shell:not(.admin-readonly-board):not(.sidebar-collapsed) .ddl-calendar-page,
+  .app-shell:not(.admin-readonly-board):not(.sidebar-collapsed) .daily-tools,
+  .app-shell:not(.admin-readonly-board):not(.sidebar-collapsed) .schedule-conflict-summary {
     margin-left: 0;
   }
 
   .app-shell.sidebar-collapsed:not(.admin-readonly-board) .timeline-header,
-  .app-shell.sidebar-collapsed:not(.admin-readonly-board) .ddl-view-toolbar,
-  .app-shell.sidebar-collapsed:not(.admin-readonly-board) .daily-tools {
+  .app-shell.sidebar-collapsed:not(.admin-readonly-board) .ddl-calendar-page,
+  .app-shell.sidebar-collapsed:not(.admin-readonly-board) .daily-tools,
+  .app-shell.sidebar-collapsed:not(.admin-readonly-board) .schedule-conflict-summary {
     margin-left: 58px;
   }
 

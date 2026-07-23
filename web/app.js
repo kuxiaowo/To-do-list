@@ -47,7 +47,6 @@ const PRIORITY_LABELS = { high: '高优先级', medium: '中优先级', low: '�
 const DEFAULT_APP_SETTINGS = {
   aiEnabled: true,
   showHabitPool: true,
-  showArrangementPool: true,
   showUnscheduledDdl: true,
 };
 const WEEKDAY_TEXT = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
@@ -143,7 +142,6 @@ function loadAppSettings() {
     return {
       aiEnabled: saved.aiEnabled !== false,
       showHabitPool: saved.showHabitPool !== false,
-      showArrangementPool: saved.showArrangementPool !== false,
       showUnscheduledDdl: saved.showUnscheduledDdl !== false,
     };
   } catch (error) {
@@ -175,9 +173,8 @@ createApp({
       showCompleted: false,
       isDarkMode: (localStorage.getItem(THEME_STORAGE_KEY) || 'light') === 'dark',
       activePage: 'ddl',
-      ddlViewMode: 'timeline',
       ddlCalendarMonthKey: '',
-      pageViewDateKeys: { ddl: '', daily: '' },
+      pageViewDateKeys: { ddl: '', calendar: '', daily: '' },
       dialogVisible: false,
       dialogMode: 'create',
       createDialogType: 'task',
@@ -399,8 +396,8 @@ createApp({
         {
           key: 'page-nav',
           target: 'page-nav',
-          title: '两个核心视图',
-          text: 'DDL 时间线用于看截止日期，每日安排用于把任务拆到具体时间段里执行。',
+          title: '三个核心页面',
+          text: 'DDL 时间线用于按日期展开，DDL 日历用于按月总览，每日安排用于把任务放到当天的具体开始时间执行。',
           page: null
         },
         {
@@ -414,23 +411,23 @@ createApp({
           key: 'switch-daily',
           target: 'daily-tab',
           title: '切到每日安排',
-          text: '请点击上方“每日安排”页签，进入每天的时间段视图。',
+          text: '请点击上方“每日安排”页签，进入按开始时间排列的每日视图。',
           page: 'ddl',
           waitForPage: 'daily',
           allowTargetClick: true
         },
         {
-          key: 'daily-tools',
-          target: 'daily-tools',
-          title: '每日安排使用时间段',
-          text: '你可以维护一周模板，也可以只编辑某一天的时间段，让安排贴合当天节奏。',
+          key: 'daily-board',
+          target: 'daily-board',
+          title: '每日安排按时间排列',
+          text: '每张任务卡上方显示开始时间，持续时间决定结束时间；时间重叠时会直接标红提醒。',
           page: 'daily'
         },
         {
           key: 'ddl-dock',
           target: 'ddl-dock',
           title: '把 DDL 拖进每天的计划',
-          text: '底部是已设置截止时间的任务。拖到上方时间段后，就会变成当天安排。',
+          text: '底部是已设置截止时间的任务。拖到上方任意日期后，再确认开始时间和持续时间。',
           page: 'daily'
         },
         {
@@ -693,9 +690,7 @@ createApp({
       return !this.adminMode && this.activePage === 'ddl' && this.appSettings.aiEnabled;
     },
     showTaskPoolSection() {
-      return this.activePage === 'daily'
-        ? this.appSettings.showArrangementPool
-        : this.appSettings.showUnscheduledDdl;
+      return ['ddl', 'calendar'].includes(this.activePage) && this.appSettings.showUnscheduledDdl;
     },
     showHabitPoolSection() {
       return this.activePage === 'daily' && this.appSettings.showHabitPool;
@@ -720,13 +715,8 @@ createApp({
         .filter(task => !task.dueAt && this.taskPool(task) === 'todo')
         .sort((a, b) => this.compareTasks(a, b));
     },
-    arrangementTasks() {
-      return this.filteredTasks
-        .filter(task => !task.dueAt && this.taskPool(task) === 'arrangement')
-        .sort((a, b) => this.compareTasks(a, b));
-    },
     activePoolTasks() {
-      return this.activePage === 'daily' ? this.arrangementTasks : this.unscheduledTasks;
+      return this.unscheduledTasks;
     },
     unscheduledCount() {
       return this.activePoolTasks.length;
@@ -740,59 +730,111 @@ createApp({
     habitCount() {
       return this.activeHabits.length;
     },
+    scheduleConflictTypes() {
+      const itemsById = new Map(this.scheduleItems.map(item => [item.id, item]));
+      const entities = new Map();
+      const adjacency = new Map();
+      const entityKey = item => item.habitId
+        ? `habit:${item.habitId}`
+        : `arrangement:${item.id}`;
+      const ensureEntity = item => {
+        const key = entityKey(item);
+        if (!entities.has(key)) {
+          entities.set(key, {
+            id: item.habitId || item.id,
+            type: item.habitId ? 'habit' : 'arrangement'
+          });
+          adjacency.set(key, new Set());
+        }
+        return key;
+      };
+      for (const item of this.scheduleItems) ensureEntity(item);
+      for (const item of this.scheduleItems) {
+        for (const conflictId of item.conflictIds || []) {
+          const conflict = itemsById.get(conflictId);
+          if (!conflict) continue;
+          const itemKey = ensureEntity(item);
+          const conflictKey = ensureEntity(conflict);
+          if (itemKey === conflictKey) continue;
+          adjacency.get(itemKey).add(conflictKey);
+          adjacency.get(conflictKey).add(itemKey);
+        }
+      }
+      const arrangementConflicts = new Set();
+      const mixedArrangements = new Set();
+      const mixedHabits = new Set();
+      const habitConflicts = new Set();
+      const visited = new Set();
+      for (const [startKey, neighbours] of adjacency) {
+        if (visited.has(startKey) || !neighbours.size) continue;
+        const component = [];
+        const stack = [startKey];
+        while (stack.length) {
+          const currentKey = stack.pop();
+          if (visited.has(currentKey)) continue;
+          visited.add(currentKey);
+          component.push(entities.get(currentKey));
+          for (const neighbourKey of adjacency.get(currentKey) || []) {
+            if (!visited.has(neighbourKey)) stack.push(neighbourKey);
+          }
+        }
+        const hasArrangements = component.some(entity => entity.type === 'arrangement');
+        const hasHabits = component.some(entity => entity.type === 'habit');
+        if (hasArrangements && hasHabits) {
+          component.forEach(entity => {
+            if (entity.type === 'habit') mixedHabits.add(entity.id);
+            else mixedArrangements.add(entity.id);
+          });
+        } else if (hasHabits) {
+          component.forEach(entity => habitConflicts.add(entity.id));
+        } else {
+          component.forEach(entity => arrangementConflicts.add(entity.id));
+        }
+      }
+      return [
+        arrangementConflicts.size
+          ? { type: 'arrangement', label: `${arrangementConflicts.size} 个安排互相冲突` }
+          : null,
+        mixedArrangements.size
+          ? { type: 'mixed', label: `${mixedArrangements.size} 个安排与 ${mixedHabits.size} 个习惯发生冲突` }
+          : null,
+        habitConflicts.size
+          ? { type: 'habit', label: `${habitConflicts.size} 个习惯互相冲突` }
+          : null
+      ].filter(Boolean);
+    },
     weekdayOptions() {
       return WEEKDAY_TEXT.map((label, value) => ({ label, value }));
     },
-    habitSlotOptions() {
-      const dateKey = this.habitForm.startDate || this.currentViewDateKey || this.formatDateKey(new Date());
-      const weekdays = Array.isArray(this.habitForm.weekdays) ? this.habitForm.weekdays : [];
-      if (weekdays.length) {
-        const weekSlots = this.weekTemplateForDate(dateKey);
-        let sharedSlots = null;
-        weekdays.forEach((weekday) => {
-          const slots = this.sortSlots(this.cloneSlots(weekSlots[String(weekday)] || []));
-          if (sharedSlots === null) {
-            sharedSlots = slots;
-            return;
-          }
-          sharedSlots = sharedSlots.filter(slot => slots.some(item =>
-            item.keyBase === slot.keyBase && item.start === slot.start && item.end === slot.end
-          ));
-        });
-        return (sharedSlots || []).map(slot => ({
-          ...slot,
-          key: slot.keyBase,
-          duration: this.minutesBetween(slot.start, slot.end),
-          labelText: `${slot.label} ${slot.start}-${slot.end}`
-        }));
-      }
-      return this.slotsForDate(dateKey).map(slot => ({
-        ...slot,
-        key: slot.keyBase,
-        duration: this.minutesBetween(slot.start, slot.end),
-        labelText: `${slot.label} ${slot.start}-${slot.end}`
-      }));
+    habitMaxDuration() {
+      const start = this.habitForm.startTime || '00:00';
+      return Math.max(1, this.minutesBetween(start, '24:00'));
     },
-    habitSelectedSlotDuration() {
-      const slot = this.habitSlotOptions.find(item => item.keyBase === this.habitForm.slotKeyBase);
-      return slot ? slot.duration : 999;
+    habitEndTime() {
+      return this.addMinutesToTime(this.habitForm.startTime, this.habitForm.durationMinutes) || '跨日';
+    },
+    scheduleMaxDuration() {
+      const start = this.scheduleForm.startTime || '00:00';
+      return Math.max(1, this.minutesBetween(start, '24:00'));
     },
     activeScheduleIsHabit() {
       if (!this.activeScheduleItemId) return false;
       const item = this.scheduleItems.find(entry => entry.id === this.activeScheduleItemId);
       return !!(item && item.habitId);
     },
+    activeScheduleConflictItems() {
+      if (!this.activeScheduleItemId) return [];
+      const item = this.scheduleItems.find(entry => entry.id === this.activeScheduleItemId);
+      const ids = new Set(item && Array.isArray(item.conflictIds) ? item.conflictIds : []);
+      return this.scheduleItems.filter(entry => ids.has(entry.id));
+    },
+    activeScheduleConflictSummary() {
+      return this.activeScheduleConflictItems
+        .map(item => `${item.task.title}（${item.startTime || item.slotStart}-${item.endTime || item.slotEnd}）`)
+        .join('、');
+    },
     isDirectScheduleCreate() {
       return this.scheduleDialogMode === 'create' && !this.activeScheduleTask;
-    },
-    directScheduleSlotOptions() {
-      const dateKey = this.scheduleForm.date || this.currentViewDateKey || this.formatDateKey(new Date());
-      return this.slotsForDate(dateKey).map(slot => ({
-        ...slot,
-        key: this.scheduleSlotKeyFromBase(dateKey, slot.keyBase),
-        duration: this.minutesBetween(slot.start, slot.end),
-        labelText: `${slot.label} ${slot.start}-${slot.end}`
-      }));
     },
     enabledSubjectOptions() {
       return this.subjectTemplate
@@ -880,7 +922,7 @@ createApp({
       const gridStart = this.ddlCalendarWeekStartDate(monthStart);
       const gridEnd = this.addDays(this.ddlCalendarWeekStartDate(monthEnd), 6);
       const todayKey = this.formatDateKey(new Date());
-      const selectedKey = this.pageViewDateKeys.ddl || this.currentViewDateKey || todayKey;
+      const selectedKey = this.pageViewDateKeys.calendar || this.currentViewDateKey || todayKey;
       const days = [];
       for (let date = new Date(gridStart); date <= gridEnd; date = this.addDays(date, 1)) {
         const key = this.formatDateKey(date);
@@ -946,12 +988,6 @@ createApp({
     ddlTasks() {
       return this.sortedTasks.filter(task => task.dueAt && this.taskPool(task) === 'todo' && !task.completed);
     },
-    isCreatingArrangement() {
-      return this.dialogMode === 'create' && this.createDialogType === 'arrangement';
-    },
-    isArrangementDialog() {
-      return this.isCreatingArrangement || (this.dialogMode === 'edit' && this.activeTaskPool === 'arrangement');
-    },
     dueHour: {
       get() {
         return String(this.form.time || '').split(':')[0] || '';
@@ -968,11 +1004,10 @@ createApp({
         this.setDialogTimePart('minute', value);
       }
     },
-    scheduleItemsBySlot() {
+    scheduleItemsByDate() {
       const groups = this.scheduleItems.reduce((result, item) => {
-        const key = this.scheduleSlotKey(item.date, item.slotKey);
-        if (!result[key]) result[key] = [];
-        result[key].push(item);
+        if (!result[item.date]) result[item.date] = [];
+        result[item.date].push(item);
         return result;
       }, {});
       Object.values(groups).forEach(items => items.sort((a, b) => this.compareScheduleItems(a, b)));
@@ -986,17 +1021,10 @@ createApp({
       for (let date = new Date(start); date <= end; date = this.addDays(date, 1)) {
         const offset = this.daysBetween(base, date);
         const key = this.formatDateKey(date);
-        const rawSlots = this.slotsForDate(key);
         days.push({
           key,
           label: this.formatDateLabel(date),
-          subtitle: this.relativeLabel(offset),
-          hasOverride: !!this.scheduleDayOverrides[key],
-          slots: rawSlots.map((slot) => ({
-            ...slot,
-            key: this.scheduleSlotKeyFromBase(key, slot.keyBase),
-            duration: this.minutesBetween(slot.start, slot.end)
-          }))
+          subtitle: this.relativeLabel(offset)
         });
       }
       return days;
@@ -1006,6 +1034,7 @@ createApp({
     this.applyTheme();
     this.currentViewDateKey = this.formatDateKey(new Date());
     this.pageViewDateKeys.ddl = this.currentViewDateKey;
+    this.pageViewDateKeys.calendar = this.currentViewDateKey;
     this.pageViewDateKeys.daily = this.currentViewDateKey;
     this.setDdlCalendarMonth(this.currentViewDateKey);
     document.addEventListener('click', this.closeAccountMenu);
@@ -1171,10 +1200,7 @@ createApp({
         title: '',
         subject: '',
         weekdays: [],
-        slotKeyBase: '',
-        slotLabel: '',
-        slotStart: '',
-        slotEnd: '',
+        startTime: '08:00',
         durationMinutes: 30,
         startDate: today,
         endDate: '',
@@ -1189,7 +1215,7 @@ createApp({
         title: '',
         subject: '',
         date: today,
-        slotKeyBase: '',
+        startTime: '08:00',
         durationMinutes: 30,
         priority: 'medium',
         note: '',
@@ -3544,26 +3570,94 @@ createApp({
       const [eh, em] = end.split(':').map(Number);
       return (eh * 60 + em) - (sh * 60 + sm);
     },
-    scheduleItemsForSlot(date, slotKey) {
-      return this.scheduleItemsBySlot[this.scheduleSlotKey(date, slotKey)] || [];
+    addMinutesToTime(start, durationMinutes) {
+      const [hour, minute] = String(start || '').split(':').map(Number);
+      const duration = Number(durationMinutes || 0);
+      if (!Number.isFinite(hour) || !Number.isFinite(minute) || !Number.isFinite(duration) || duration <= 0) return '';
+      const total = hour * 60 + minute + duration;
+      if (total > 24 * 60) return '';
+      if (total === 24 * 60) return '24:00';
+      return `${this.pad(Math.floor(total / 60))}:${this.pad(total % 60)}`;
     },
-    visibleScheduleItemsForSlot(date, slotKey) {
-      return this.scheduleItemsForSlot(date, slotKey)
+    scheduleItemsForDate(date) {
+      return this.scheduleItemsByDate[date] || [];
+    },
+    visibleScheduleItemsForDate(date) {
+      return this.scheduleItemsForDate(date)
         .filter(item => this.showCompleted || !item.completed);
     },
-    slotUsedMinutes(date, slotKey, excludeId = null) {
-      return this.scheduleItemsForSlot(date, slotKey)
-        .filter(item => item.id !== excludeId)
-        .reduce((sum, item) => sum + Number(item.durationMinutes || 0), 0);
+    visibleScheduleGroupsForDate(date) {
+      const items = this.visibleScheduleItemsForDate(date);
+      const byId = new Map(items.map(item => [item.id, item]));
+      const visited = new Set();
+      const groups = [];
+      for (const item of items) {
+        if (visited.has(item.id)) continue;
+        const component = [];
+        const stack = [item];
+        while (stack.length) {
+          const current = stack.pop();
+          if (!current || visited.has(current.id)) continue;
+          visited.add(current.id);
+          component.push(current);
+          for (const conflictId of current.conflictIds || []) {
+            const conflict = byId.get(conflictId);
+            if (conflict && !visited.has(conflict.id)) stack.push(conflict);
+          }
+        }
+        component.sort((left, right) => this.compareScheduleItems(left, right));
+        groups.push({
+          key: component.map(entry => entry.id).join('::'),
+          hasConflict: component.some(entry => entry.hasConflict),
+          items: component
+        });
+      }
+      return groups;
     },
-    scheduleSlotKey(date, slotKey) {
-      return `${date}::${slotKey}`;
+    visibleScheduleItemIndex(date, itemId) {
+      return this.visibleScheduleItemsForDate(date).findIndex(item => item.id === itemId);
+    },
+    dailyScheduleContext(date, dateLabel = '') {
+      return {
+        key: `${date}-dynamic`,
+        label: '每日安排',
+        start: '00:00',
+        end: '23:59',
+        duration: 24 * 60,
+        date,
+        dateLabel: dateLabel || date
+      };
+    },
+    firstAvailableStartTime(date, durationMinutes = 30, excludeId = null) {
+      const duration = Math.max(1, Number(durationMinutes || 30));
+      const today = this.formatDateKey(new Date());
+      const now = new Date();
+      let candidate = date === today
+        ? `${this.pad(now.getHours())}:${this.pad(Math.ceil(now.getMinutes() / 5) * 5)}`
+        : '08:00';
+      if (candidate.endsWith(':60')) {
+        candidate = this.addMinutesToTime(`${candidate.slice(0, 2)}:00`, 60) || '08:00';
+      }
+      const items = this.scheduleItemsForDate(date)
+        .filter(item => !item.completed && item.id !== excludeId)
+        .sort((a, b) => String(a.startTime || a.slotStart).localeCompare(String(b.startTime || b.slotStart)));
+      for (const item of items) {
+        const itemStart = item.startTime || item.slotStart;
+        const itemEnd = item.endTime || this.addMinutesToTime(itemStart, item.durationMinutes);
+        const candidateEnd = this.addMinutesToTime(candidate, duration);
+        if (candidateEnd && candidateEnd <= itemStart) return candidate;
+        if (itemEnd > candidate) candidate = itemEnd;
+      }
+      const candidateEnd = this.addMinutesToTime(candidate, duration);
+      return candidateEnd ? candidate : '08:00';
     },
     scheduleSortValue(item) {
       const value = Number(item && item.sortOrder);
       return Number.isFinite(value) ? value : 0;
     },
     compareScheduleItems(a, b) {
+      const timeDiff = String(a.startTime || a.slotStart || '').localeCompare(String(b.startTime || b.slotStart || ''));
+      if (timeDiff !== 0) return timeDiff;
       const sortDiff = this.scheduleSortValue(a) - this.scheduleSortValue(b);
       if (sortDiff !== 0) return sortDiff;
       return String(a.createdAt || '').localeCompare(String(b.createdAt || ''));
@@ -3715,29 +3809,29 @@ createApp({
         this.showScheduleDragPreview(drag);
       }
       this.moveScheduleDragPreview(event.clientX, event.clientY);
-      const slotElement = this.scheduleSlotElementFromPoint(event.clientX, event.clientY);
-      const context = this.scheduleSlotContextFromElement(slotElement);
-      if (!context) {
+      const dayElement = this.scheduleDayElementFromPoint(event.clientX, event.clientY);
+      const day = this.scheduleDayContextFromElement(dayElement);
+      if (!day) {
         if (this.scheduleDropPosition) this.scheduleDropPosition = null;
         return;
       }
       this.updateScheduleDropPosition({
-        currentTarget: slotElement,
+        currentTarget: dayElement,
         clientY: event.clientY
-      }, context.day, context.slot);
+      }, day);
     },
     finishSchedulePointerDrag(event) {
       const drag = this.schedulePointerDrag;
       if (!drag || event.pointerId !== drag.pointerId) return;
       if (drag.dragging) {
         event.preventDefault();
-        const slotElement = this.scheduleSlotElementFromPoint(event.clientX, event.clientY);
-        const context = this.scheduleSlotContextFromElement(slotElement);
-        if (context) {
-          this.handleDropOnSlot({
-            currentTarget: slotElement,
+        const dayElement = this.scheduleDayElementFromPoint(event.clientX, event.clientY);
+        const day = this.scheduleDayContextFromElement(dayElement);
+        if (day) {
+          this.handleDropOnDay({
+            currentTarget: dayElement,
             clientY: event.clientY
-          }, context.day, context.slot);
+          }, day);
         } else {
           this.clearScheduleDragState();
         }
@@ -3765,18 +3859,15 @@ createApp({
       window.removeEventListener('pointerup', this.finishSchedulePointerDrag);
       window.removeEventListener('pointercancel', this.cancelSchedulePointerDrag);
     },
-    scheduleSlotElementFromPoint(clientX, clientY) {
+    scheduleDayElementFromPoint(clientX, clientY) {
       const element = document.elementFromPoint(clientX, clientY);
-      return element ? element.closest('.schedule-slot') : null;
+      return element ? element.closest('.schedule-day-items') : null;
     },
-    scheduleSlotContextFromElement(slotElement) {
-      if (!slotElement) return null;
-      const date = slotElement.dataset.scheduleDate;
-      const slotKey = slotElement.dataset.scheduleSlotKey;
-      if (!date || !slotKey) return null;
-      const day = this.scheduleDayColumns.find(item => item.key === date);
-      const slot = day ? day.slots.find(item => item.key === slotKey) : null;
-      return day && slot ? { day, slot } : null;
+    scheduleDayContextFromElement(dayElement) {
+      if (!dayElement) return null;
+      const date = dayElement.dataset.scheduleDate;
+      if (!date) return null;
+      return this.scheduleDayColumns.find(item => item.key === date) || null;
     },
     openTaskFromPointerClick(task) {
       if (this.suppressNextScheduleClick) return;
@@ -3795,22 +3886,22 @@ createApp({
     hasActiveScheduleDrag() {
       return !!(this.draggedTaskId || this.draggedScheduleItemId);
     },
-    scheduleDropKey(date, slotKey) {
-      return `${date}::${slotKey}`;
+    scheduleDropKey(date) {
+      return date;
     },
-    isScheduleDropPosition(day, slot) {
+    isScheduleDropPosition(day) {
       return this.scheduleDropPosition
-        && this.scheduleDropPosition.key === this.scheduleDropKey(day.key, slot.key);
+        && this.scheduleDropPosition.key === this.scheduleDropKey(day.key);
     },
-    isScheduleInsertIndex(day, slot, index) {
-      return this.isScheduleDropPosition(day, slot)
+    isScheduleInsertIndex(day, index) {
+      return this.isScheduleDropPosition(day)
         && this.scheduleDropPosition.index === index;
     },
-    updateScheduleDropPosition(event, day, slot) {
+    updateScheduleDropPosition(event, day) {
       if (this.adminMode || !this.hasActiveScheduleDrag()) return;
-      const slotElement = event.currentTarget;
-      if (!slotElement) return;
-      const cards = Array.from(slotElement.querySelectorAll('.schedule-card'))
+      const dayElement = event.currentTarget;
+      if (!dayElement) return;
+      const cards = Array.from(dayElement.querySelectorAll('.schedule-card'))
         .filter(card => String(card.dataset.scheduleId) !== String(this.draggedScheduleItemId));
       let index = cards.length;
       if (cards.length) {
@@ -3820,7 +3911,7 @@ createApp({
         });
         index = targetIndex < 0 ? cards.length : targetIndex;
       }
-      const key = this.scheduleDropKey(day.key, slot.key);
+      const key = this.scheduleDropKey(day.key);
       if (this.scheduleDropPosition
         && this.scheduleDropPosition.key === key
         && this.scheduleDropPosition.index === index) {
@@ -3829,59 +3920,57 @@ createApp({
       this.scheduleDropPosition = {
         key,
         date: day.key,
-        slotKey: slot.key,
         index
       };
     },
-    dropIndexForSlot(event, day, slot) {
-      if (!this.isScheduleDropPosition(day, slot)) {
-        this.updateScheduleDropPosition(event, day, slot);
+    dropIndexForDay(event, day) {
+      if (!this.isScheduleDropPosition(day)) {
+        this.updateScheduleDropPosition(event, day);
       }
-      return this.isScheduleDropPosition(day, slot)
+      return this.isScheduleDropPosition(day)
         ? this.scheduleDropPosition.index
-        : this.scheduleItemsForSlot(day.key, slot.key).length;
+        : this.scheduleItemsForDate(day.key).length;
     },
-    handleDropOnSlot(event, day, slot) {
+    handleDropOnDay(event, day) {
       if (this.adminMode) return;
       if (!this.currentUser) {
         ElementPlus.ElMessage.warning('请先登录或注册，再创建安排。');
         this.clearScheduleDragState();
         return;
       }
-      const dropIndex = this.dropIndexForSlot(event, day, slot);
+      const dropIndex = this.dropIndexForDay(event, day);
       if (this.draggedScheduleItemId) {
-        this.moveScheduleItemToSlot(day, slot, dropIndex);
+        this.moveScheduleItemToDay(day, dropIndex);
         return;
       }
       if (this.draggedTaskId) {
-        this.openScheduleCreateDialog(day, slot, dropIndex);
+        this.openScheduleCreateDialog(day, dropIndex);
       }
     },
-    openDirectScheduleCreateDialog() {
+    openDirectScheduleCreateDialog(day = null) {
       if (this.adminMode) return;
       if (!this.currentUser) {
         ElementPlus.ElMessage.warning('请先登录或注册，再新增安排。');
         return;
       }
-      const dateKey = this.pageViewDateKeys.daily || this.currentViewDateKey || this.formatDateKey(new Date());
+      const dateKey = day && day.key
+        ? day.key
+        : (this.pageViewDateKeys.daily || this.currentViewDateKey || this.formatDateKey(new Date()));
       this.ensureDateRangeForKey(dateKey);
       this.scheduleDialogMode = 'create';
       this.activeScheduleItemId = null;
       this.activeScheduleTask = null;
-      this.activeScheduleSlot = null;
+      this.activeScheduleSlot = this.dailyScheduleContext(
+        dateKey,
+        day && day.label ? day.label : this.formatDateLabel(this.parseDateKey(dateKey))
+      );
       this.activeScheduleSortOrder = null;
-      this.scheduleForm = { ...this.emptyScheduleForm(), date: dateKey };
-      this.scheduleDialogVisible = true;
-    },
-    applyDirectScheduleSlot(slot) {
-      const dateKey = this.scheduleForm.date || this.formatDateKey(new Date());
-      this.activeScheduleSlot = {
-        ...slot,
-        key: this.scheduleSlotKeyFromBase(dateKey, slot.keyBase),
+      this.scheduleForm = {
+        ...this.emptyScheduleForm(),
         date: dateKey,
-        dateLabel: this.formatDateLabel(this.parseDateKey(dateKey))
+        startTime: this.firstAvailableStartTime(dateKey, 30)
       };
-      this.scheduleForm.durationMinutes = Math.min(Number(this.scheduleForm.durationMinutes || 30), slot.duration);
+      this.scheduleDialogVisible = true;
     },
     handleDirectScheduleDateChange() {
       if (!this.scheduleForm.date) {
@@ -3890,48 +3979,36 @@ createApp({
       }
       const expanded = this.ensureDateRangeForKey(this.scheduleForm.date);
       if (expanded && this.currentUser) this.loadScheduleItems();
-      if (!this.scheduleForm.slotKeyBase) {
-        this.activeScheduleSlot = null;
-        return;
-      }
-      const slot = this.directScheduleSlotOptions.find(item => item.keyBase === this.scheduleForm.slotKeyBase);
-      if (slot) {
-        this.applyDirectScheduleSlot(slot);
-        return;
-      }
-      this.scheduleForm.slotKeyBase = '';
-      this.activeScheduleSlot = null;
+      this.activeScheduleSlot = this.dailyScheduleContext(
+        this.scheduleForm.date,
+        this.formatDateLabel(this.parseDateKey(this.scheduleForm.date))
+      );
+      this.scheduleForm.startTime = this.firstAvailableStartTime(
+        this.scheduleForm.date,
+        this.scheduleForm.durationMinutes
+      );
     },
-    handleDirectScheduleSlotChange(keyBase) {
-      const slot = this.directScheduleSlotOptions.find(item => item.keyBase === keyBase);
-      if (!slot) {
-        this.activeScheduleSlot = null;
-        return;
-      }
-      this.applyDirectScheduleSlot(slot);
-    },
-    openScheduleCreateDialog(day, slot, dropIndex = null) {
+    openScheduleCreateDialog(day, dropIndex = null) {
       const task = this.tasks.find(item => item.id === this.draggedTaskId);
       if (!task) return;
-      const remaining = slot.duration - this.slotUsedMinutes(day.key, slot.key);
-      if (remaining <= 0) {
-        ElementPlus.ElMessage.warning('这个时间段已经排满了。');
-        this.clearScheduleDragState();
-        return;
-      }
       this.scheduleDialogMode = 'create';
       this.activeScheduleItemId = null;
       this.activeScheduleTask = task;
-      this.activeScheduleSlot = { ...slot, date: day.key, dateLabel: day.label };
+      this.activeScheduleSlot = this.dailyScheduleContext(day.key, day.label);
       this.activeScheduleSortOrder = Number.isInteger(dropIndex)
-        ? this.sortOrderForIndex(day.key, slot.key, null, dropIndex)
+        ? this.sortOrderForIndex(day.key, null, dropIndex)
         : null;
-      this.scheduleForm = { ...this.emptyScheduleForm(), date: day.key, durationMinutes: Math.min(30, remaining) };
+      this.scheduleForm = {
+        ...this.emptyScheduleForm(),
+        date: day.key,
+        startTime: this.firstAvailableStartTime(day.key, 30),
+        durationMinutes: 30
+      };
       this.scheduleDialogVisible = true;
       this.clearScheduleDragState();
     },
-    sortOrderForIndex(date, slotKey, draggedId, dropIndex) {
-      const items = this.scheduleItemsForSlot(date, slotKey)
+    sortOrderForIndex(date, draggedId, dropIndex) {
+      const items = this.scheduleItemsForDate(date)
         .filter(item => item.id !== draggedId)
         .sort((a, b) => this.compareScheduleItems(a, b));
       const index = Math.max(0, Math.min(Number(dropIndex || 0), items.length));
@@ -3942,19 +4019,24 @@ createApp({
       if (!next) return this.scheduleSortValue(prev) + 1024;
       return (this.scheduleSortValue(prev) + this.scheduleSortValue(next)) / 2;
     },
-    async moveScheduleItemToSlot(day, slot, dropIndex) {
+    async moveScheduleItemToDay(day, dropIndex) {
       const item = this.scheduleItems.find(entry => entry.id === this.draggedScheduleItemId);
       if (!item) {
         this.clearScheduleDragState();
         return;
       }
-      const sortOrder = this.sortOrderForIndex(day.key, slot.key, item.id, dropIndex);
+      const context = this.dailyScheduleContext(day.key, day.label);
+      const sortOrder = this.sortOrderForIndex(day.key, item.id, dropIndex);
+      const nextStartTime = item.date === day.key
+        ? (item.startTime || item.slotStart)
+        : this.firstAvailableStartTime(day.key, item.durationMinutes, item.id);
       const payload = {
         date: day.key,
-        slotKey: slot.key,
-        slotLabel: slot.label,
-        slotStart: slot.start,
-        slotEnd: slot.end,
+        slotKey: context.key,
+        slotLabel: context.label,
+        slotStart: context.start,
+        slotEnd: context.end,
+        startTime: nextStartTime,
         durationMinutes: item.durationMinutes,
         sortOrder,
         note: item.note || '',
@@ -3981,18 +4063,11 @@ createApp({
       this.activeScheduleItemId = item.id;
       this.activeScheduleTask = task;
       this.activeScheduleSortOrder = null;
-      this.activeScheduleSlot = {
-        key: item.slotKey,
-        label: item.slotLabel,
-        start: item.slotStart,
-        end: item.slotEnd,
-        duration: this.minutesBetween(item.slotStart, item.slotEnd),
-        date: item.date,
-        dateLabel: item.date
-      };
+      this.activeScheduleSlot = this.dailyScheduleContext(item.date, item.date);
       this.scheduleForm = {
         ...this.emptyScheduleForm(),
         durationMinutes: Number(item.durationMinutes || 1),
+        startTime: item.startTime || item.slotStart,
         date: item.date,
         note: item.note || '',
         completed: !!item.completed
@@ -4005,43 +4080,42 @@ createApp({
       if (this.isDirectScheduleCreate) {
         const title = this.scheduleForm.title.trim();
         const subject = this.scheduleForm.subject.trim();
-        if (!title || !subject || !this.scheduleForm.date || !this.scheduleForm.slotKeyBase || !this.activeScheduleSlot) {
-          ElementPlus.ElMessage.warning('请填写标题、科目、日期和时间段。');
+        if (!title || !subject || !this.scheduleForm.date || !this.scheduleForm.startTime || !this.activeScheduleSlot) {
+          ElementPlus.ElMessage.warning('请填写标题、科目、日期和开始时间。');
           return;
         }
         if (subject.length > 40) {
           ElementPlus.ElMessage.warning('科目不能超过 40 个字符。');
           return;
         }
-      } else if (!scheduleTask || !this.activeScheduleSlot) {
+      } else if (!scheduleTask || !this.activeScheduleSlot || !this.scheduleForm.startTime) {
         return;
       }
-      const used = this.slotUsedMinutes(
-        this.activeScheduleSlot.date,
-        this.activeScheduleSlot.key,
-        this.scheduleDialogMode === 'edit' ? this.activeScheduleItemId : null
-      );
       const duration = Number(this.scheduleForm.durationMinutes || 0);
       if (!Number.isFinite(duration) || duration <= 0) {
         ElementPlus.ElMessage.warning('预计持续时间必须大于 0。');
         return;
       }
-      if (used + duration > this.activeScheduleSlot.duration) {
-        ElementPlus.ElMessage.error(`时间段容量不足：已用 ${used} 分钟，总共 ${this.activeScheduleSlot.duration} 分钟。`);
+      const endTime = this.addMinutesToTime(this.scheduleForm.startTime, duration);
+      if (!endTime) {
+        ElementPlus.ElMessage.error('安排必须在当天结束，请调整开始时间或持续时间。');
         return;
       }
       let createdDirectTask = null;
       const payload = {
         taskId: scheduleTask ? scheduleTask.id : '',
         date: this.activeScheduleSlot.date,
-        slotKey: this.activeScheduleSlot.key,
-        slotLabel: this.activeScheduleSlot.label,
-        slotStart: this.activeScheduleSlot.start,
-        slotEnd: this.activeScheduleSlot.end,
+        startTime: this.scheduleForm.startTime,
         durationMinutes: duration,
         note: this.scheduleForm.note.trim(),
         completed: !!this.scheduleForm.completed
       };
+      if (!this.activeScheduleIsHabit) {
+        payload.slotKey = this.activeScheduleSlot.key;
+        payload.slotLabel = this.activeScheduleSlot.label;
+        payload.slotStart = this.activeScheduleSlot.start;
+        payload.slotEnd = this.activeScheduleSlot.end;
+      }
       if (this.activeScheduleSortOrder !== null) {
         payload.sortOrder = this.activeScheduleSortOrder;
       }
@@ -4463,35 +4537,6 @@ createApp({
       const weekdays = Array.isArray(habit.weekdays) ? habit.weekdays : [];
       return weekdays.map(key => this.weekdayLabel(key)).join('、') || '未设置';
     },
-    handleHabitSlotChange(keyBase) {
-      const slot = this.habitSlotOptions.find(item => item.keyBase === keyBase);
-      if (!slot) {
-        this.habitForm.slotLabel = '';
-        this.habitForm.slotStart = '';
-        this.habitForm.slotEnd = '';
-        return;
-      }
-      this.habitForm.slotKeyBase = slot.keyBase;
-      this.habitForm.slotLabel = slot.label;
-      this.habitForm.slotStart = slot.start;
-      this.habitForm.slotEnd = slot.end;
-      this.habitForm.durationMinutes = Math.min(Number(this.habitForm.durationMinutes || 30), slot.duration);
-    },
-    handleHabitStartDateChange() {
-      if (!this.habitForm.slotKeyBase) return;
-      const slot = this.habitSlotOptions.find(item => item.keyBase === this.habitForm.slotKeyBase);
-      if (slot) {
-        this.handleHabitSlotChange(slot.keyBase);
-        return;
-      }
-      this.habitForm.slotKeyBase = '';
-      this.habitForm.slotLabel = '';
-      this.habitForm.slotStart = '';
-      this.habitForm.slotEnd = '';
-    },
-    handleHabitWeekdaysChange() {
-      this.handleHabitStartDateChange();
-    },
     openHabitDialog(habit = null) {
       if (this.adminMode) return;
       if (!this.currentUser) {
@@ -4505,10 +4550,7 @@ createApp({
             title: habit.title || '',
             subject: habit.subject || '',
             weekdays: Array.isArray(habit.weekdays) ? [...habit.weekdays] : [],
-            slotKeyBase: habit.slotKeyBase || '',
-            slotLabel: habit.slotLabel || '',
-            slotStart: habit.slotStart || '',
-            slotEnd: habit.slotEnd || '',
+            startTime: habit.startTime || habit.slotStart || '08:00',
             durationMinutes: Number(habit.durationMinutes || 30),
             startDate: habit.startDate || this.formatDateKey(new Date()),
             endDate: habit.endDate || '',
@@ -4523,18 +4565,20 @@ createApp({
       if (!this.currentUser) return;
       const title = this.habitForm.title.trim();
       const subject = this.habitForm.subject.trim();
-      if (!title || !subject || !this.habitForm.weekdays.length || !this.habitForm.slotKeyBase || !this.habitForm.startDate) {
-        ElementPlus.ElMessage.warning('请填写标题、科目、星期、时间段和开始日期。');
+      if (!title || !subject || !this.habitForm.weekdays.length || !this.habitForm.startTime || !this.habitForm.startDate) {
+        ElementPlus.ElMessage.warning('请填写标题、科目、星期、开始时间和开始日期。');
+        return;
+      }
+      const endTime = this.addMinutesToTime(this.habitForm.startTime, this.habitForm.durationMinutes);
+      if (!endTime) {
+        ElementPlus.ElMessage.warning('习惯必须在当天结束，请调整开始时间或持续时间。');
         return;
       }
       const payload = {
         title,
         subject,
         weekdays: this.habitForm.weekdays,
-        slotKeyBase: this.habitForm.slotKeyBase,
-        slotLabel: this.habitForm.slotLabel,
-        slotStart: this.habitForm.slotStart,
-        slotEnd: this.habitForm.slotEnd,
+        startTime: this.habitForm.startTime,
         durationMinutes: Number(this.habitForm.durationMinutes || 0),
         startDate: this.habitForm.startDate,
         endDate: this.habitForm.endDate || '',
@@ -4592,19 +4636,6 @@ createApp({
     ddlTasksForDate(key) {
       return this.todoTasksByDueDate[key] || [];
     },
-    setDdlViewMode(mode) {
-      if (mode === this.ddlViewMode) return;
-      if (this.activePage === 'ddl') this.rememberCurrentViewDate('ddl');
-      this.ddlViewMode = mode;
-      const key = this.pageViewDateKeys.ddl || this.currentViewDateKey || this.formatDateKey(new Date());
-      this.setDdlCalendarMonth(key);
-      if (mode === 'timeline') {
-        this.$nextTick(() => {
-          this.scrollToDate(key, 'ddl', 'instant');
-          this.updateTimelineStickyScrollbars();
-        });
-      }
-    },
     setDdlCalendarMonth(dateLike) {
       const date = this.parseDateKey(dateLike);
       this.ddlCalendarMonthKey = this.formatDateKey(new Date(date.getFullYear(), date.getMonth(), 1));
@@ -4615,18 +4646,19 @@ createApp({
       this.setDdlCalendarMonth(target);
       const selected = this.formatDateKey(target);
       this.currentViewDateKey = selected;
-      this.pageViewDateKeys.ddl = selected;
+      this.pageViewDateKeys.calendar = selected;
     },
     goToDdlCalendarToday() {
-      this.scrollToDate(new Date(), 'ddl');
+      this.scrollToDate(new Date(), 'calendar');
     },
     jumpDdlCalendarDayToTimeline(dateLike) {
       const targetDate = this.parseDateKey(dateLike);
       const key = this.formatDateKey(targetDate);
       this.currentViewDateKey = key;
       this.pageViewDateKeys.ddl = key;
+      this.pageViewDateKeys.calendar = key;
       this.pauseTimelineAutoExpand();
-      this.ddlViewMode = 'timeline';
+      this.activePage = 'ddl';
       this.$nextTick(() => {
         window.requestAnimationFrame(() => this.scrollToDate(targetDate, 'ddl', 'smooth'));
       });
@@ -4650,22 +4682,6 @@ createApp({
       this.activeTaskId = null;
       this.activeTaskPool = 'todo';
       this.form = this.emptyForm();
-      this.dialogVisible = true;
-    },
-    openPoolTaskCreateDialog() {
-      if (this.adminMode) return;
-      if (!this.currentUser) {
-        ElementPlus.ElMessage.warning('请先登录或注册，再新增临时任务。');
-        return;
-      }
-      this.dialogMode = 'create';
-      this.createDialogType = 'arrangement';
-      this.activeTaskId = null;
-      this.activeTaskPool = 'arrangement';
-      this.form = this.emptyForm();
-      this.form.unscheduled = true;
-      this.form.date = '';
-      this.form.time = '';
       this.dialogVisible = true;
     },
     openEditDialog(task) {
@@ -4693,7 +4709,6 @@ createApp({
     },
     buildDueAt() {
       // Empty dueAt means the task stays in the unscheduled/flexible pool.
-      if (this.isArrangementDialog) return '';
       if (this.form.unscheduled) return '';
       if (!this.form.date || !this.form.time) return null;
       const normalizedTime = this.normalizeTimeText(this.form.time);
@@ -4705,11 +4720,6 @@ createApp({
       if (!this.currentUser) {
         ElementPlus.ElMessage.warning('请先登录或注册，再保存任务。');
         return;
-      }
-      if (this.isArrangementDialog) {
-        this.form.unscheduled = true;
-        this.form.date = '';
-        this.form.time = '';
       }
       const title = this.form.title.trim();
       const subject = this.form.subject.trim();
@@ -4727,13 +4737,11 @@ createApp({
         title,
         subject,
         dueAt,
-        pool: this.isArrangementDialog ? 'arrangement' : 'todo',
+        pool: 'todo',
         priority: this.form.priority,
         note: this.form.note.trim(),
         completed: !!this.form.completed
       };
-      if (this.isArrangementDialog) payload.dueAt = '';
-
       try {
         if (this.dialogMode === 'create') {
           const task = { id: this.createTaskId(), createdAt: new Date().toISOString(), ...payload };
@@ -4875,7 +4883,7 @@ createApp({
       if (page === 'daily' && this.currentUser && !this.adminMode) this.loadScheduleItems();
       const key = this.pageViewDateKeys[page] || this.currentViewDateKey || this.formatDateKey(new Date());
       this.$nextTick(() => {
-        if (page === 'ddl') this.setDdlCalendarMonth(key);
+        if (page === 'calendar') this.setDdlCalendarMonth(key);
         this.scrollToDate(key, page, 'instant');
         this.updateTimelineStickyScrollbars();
         if (this.guideVisible && this.currentGuideStep && this.currentGuideStep.waitForPage === page) {
@@ -4894,9 +4902,9 @@ createApp({
         this.$nextTick(() => this.scrollToDate(targetDate, page, behavior, align));
         return;
       }
-      if (page === 'ddl' && this.ddlViewMode === 'calendar') {
+      if (page === 'calendar') {
         this.currentViewDateKey = key;
-        this.pageViewDateKeys.ddl = key;
+        this.pageViewDateKeys.calendar = key;
         this.setDdlCalendarMonth(targetDate);
         return;
       }
@@ -4931,9 +4939,9 @@ createApp({
       this.syncTimelineStickyScrollbar(page, 'content');
     },
     rememberCurrentViewDate(page) {
-      if (page === 'ddl' && this.ddlViewMode === 'calendar') {
-        const key = this.pageViewDateKeys.ddl || this.currentViewDateKey || this.formatDateKey(new Date());
-        this.pageViewDateKeys.ddl = key;
+      if (page === 'calendar') {
+        const key = this.pageViewDateKeys.calendar || this.currentViewDateKey || this.formatDateKey(new Date());
+        this.pageViewDateKeys.calendar = key;
         this.currentViewDateKey = key;
         this.setDdlCalendarMonth(key);
         return;

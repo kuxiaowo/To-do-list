@@ -302,6 +302,8 @@ def init_db() -> None:
                 slot_label TEXT NOT NULL,
                 slot_start TEXT NOT NULL,
                 slot_end TEXT NOT NULL,
+                item_start TEXT NOT NULL DEFAULT '',
+                item_end TEXT NOT NULL DEFAULT '',
                 duration_minutes INTEGER NOT NULL,
                 sort_order REAL NOT NULL DEFAULT 0,
                 habit_id TEXT NOT NULL DEFAULT '',
@@ -334,6 +336,30 @@ def init_db() -> None:
                 )
         if 'habit_id' not in columns:
             conn.execute("ALTER TABLE schedule_items ADD COLUMN habit_id TEXT NOT NULL DEFAULT ''")
+        if 'item_start' not in columns:
+            conn.execute("ALTER TABLE schedule_items ADD COLUMN item_start TEXT NOT NULL DEFAULT ''")
+        if 'item_end' not in columns:
+            conn.execute("ALTER TABLE schedule_items ADD COLUMN item_end TEXT NOT NULL DEFAULT ''")
+        legacy_schedule_rows = conn.execute(
+            '''
+            SELECT id, user_id, schedule_date, slot_key, slot_start, duration_minutes
+            FROM schedule_items
+            WHERE item_start = '' OR item_end = ''
+            ORDER BY user_id ASC, schedule_date ASC, slot_key ASC, sort_order ASC, created_at ASC, id ASC
+            '''
+        ).fetchall()
+        legacy_slot_offsets: dict[tuple, int] = {}
+        for row in legacy_schedule_rows:
+            row_id, user_id, schedule_date, slot_key_text, slot_start, duration_minutes = row
+            group_key = (user_id, schedule_date, slot_key_text)
+            offset = legacy_slot_offsets.get(group_key, 0)
+            item_start = add_minutes_to_time(slot_start, offset) if offset else normalize_time_text(slot_start)
+            item_end = add_minutes_to_time(item_start, int(duration_minutes or 0))
+            legacy_slot_offsets[group_key] = offset + int(duration_minutes or 0)
+            conn.execute(
+                'UPDATE schedule_items SET item_start = ?, item_end = ? WHERE id = ?',
+                (item_start, item_end, row_id),
+            )
         conn.execute(
             '''
             CREATE TABLE IF NOT EXISTS habits (
@@ -1171,6 +1197,23 @@ def normalize_time_text(value: str) -> str:
     return f'{hour:02d}:{minute:02d}'
 
 
+def add_minutes_to_time(start: str, duration_minutes: int) -> str:
+    start = normalize_time_text(start)
+    if not start:
+        return ''
+    try:
+        duration = int(duration_minutes)
+    except Exception:
+        return ''
+    hour, minute = [int(part) for part in start.split(':', 1)]
+    total = hour * 60 + minute + duration
+    if duration <= 0 or total > 24 * 60:
+        return ''
+    if total == 24 * 60:
+        return '24:00'
+    return f'{total // 60:02d}:{total % 60:02d}'
+
+
 def is_valid_date_key(value: str) -> bool:
     try:
         datetime.strptime(value, '%Y-%m-%d')
@@ -1339,7 +1382,7 @@ def conflict_with_existing_items(
             '''
             SELECT slot_key, slot_start, slot_end, SUM(duration_minutes) AS used_minutes
             FROM schedule_items
-            WHERE user_id = ? AND schedule_date = ?
+            WHERE user_id = ? AND schedule_date = ? AND habit_id = ''
             GROUP BY slot_key, slot_start, slot_end
             ''',
             (user_id, date_key),
@@ -1359,11 +1402,6 @@ def conflict_with_existing_items(
                     'error': 'time slot has existing schedule items',
                     'message': f"{date_key} 的时间段 {row['slot_start']}-{row['slot_end']} 已有安排，不能修改开始或结束时间。",
                 }
-            if int(row['used_minutes'] or 0) > minutes_between(slot['start'], slot['end']):
-                return {
-                    'error': 'time slot capacity would be too small',
-                    'message': f"{date_key} 的时间段容量不足以容纳已有安排。",
-                }
     return None
 
 
@@ -1378,6 +1416,8 @@ def public_schedule_item(row: sqlite3.Row) -> dict:
         'slotLabel': row['slot_label'],
         'slotStart': row['slot_start'],
         'slotEnd': row['slot_end'],
+        'startTime': row['item_start'] or row['slot_start'],
+        'endTime': row['item_end'] or add_minutes_to_time(row['slot_start'], row['duration_minutes']),
         'durationMinutes': row['duration_minutes'],
         'sortOrder': row['sort_order'],
         'note': row['note'],
@@ -1393,6 +1433,33 @@ def public_schedule_item(row: sqlite3.Row) -> dict:
             'priority': row['task_priority'],
         },
     }
+
+
+def annotate_schedule_conflicts(items: list[dict]) -> list[dict]:
+    by_date: dict[str, list[dict]] = {}
+    for item in items:
+        item['conflictIds'] = []
+        item['hasConflict'] = False
+        by_date.setdefault(str(item.get('date', '')), []).append(item)
+
+    for day_items in by_date.values():
+        for index, left in enumerate(day_items):
+            left_start = str(left.get('startTime', ''))
+            left_end = str(left.get('endTime', ''))
+            if not left_start or not left_end:
+                continue
+            for right in day_items[index + 1:]:
+                right_start = str(right.get('startTime', ''))
+                right_end = str(right.get('endTime', ''))
+                if not right_start or not right_end:
+                    continue
+                if left_start < right_end and right_start < left_end:
+                    left['conflictIds'].append(right['id'])
+                    right['conflictIds'].append(left['id'])
+
+    for item in items:
+        item['hasConflict'] = bool(item['conflictIds'])
+    return items
 
 
 def public_habit(row: sqlite3.Row) -> dict:
@@ -1413,6 +1480,8 @@ def public_habit(row: sqlite3.Row) -> dict:
         'slotLabel': row['slot_label'],
         'slotStart': row['slot_start'],
         'slotEnd': row['slot_end'],
+        'startTime': row['slot_start'],
+        'endTime': row['slot_end'],
         'durationMinutes': row['duration_minutes'],
         'startDate': row['start_date'],
         'endDate': row['end_date'],
@@ -2905,11 +2974,11 @@ class TodoHandler(SimpleHTTPRequestHandler):
             FROM schedule_items
             JOIN tasks ON tasks.id = schedule_items.task_id AND tasks.user_id = schedule_items.user_id
             WHERE {' AND '.join(where)}
-            ORDER BY schedule_items.schedule_date ASC, schedule_items.slot_start ASC, schedule_items.sort_order ASC, schedule_items.created_at ASC
+            ORDER BY schedule_items.schedule_date ASC, schedule_items.item_start ASC, schedule_items.sort_order ASC, schedule_items.created_at ASC
             """,
             params,
         ).fetchall()
-        return [public_schedule_item(row) for row in rows]
+        return annotate_schedule_conflicts([public_schedule_item(row) for row in rows])
 
     def fetch_habits_for_user(self, conn: sqlite3.Connection, user_id: int, include_archived: bool = False) -> list[dict]:
         archived_filter = '' if include_archived else 'AND habits.archived = 0'
@@ -4649,10 +4718,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
         priority = str(payload.get('priority', 'medium')).strip() or 'medium'
         note = str(payload.get('note', '') or '').strip()
         raw_weekdays = payload.get('weekdays', [])
-        slot_key_base = str(payload.get('slotKeyBase', '')).strip()
-        slot_label = str(payload.get('slotLabel', '')).strip()
-        slot_start = normalize_time_text(str(payload.get('slotStart', '')).strip())
-        slot_end = normalize_time_text(str(payload.get('slotEnd', '')).strip())
+        slot_start = normalize_time_text(str(payload.get('startTime', payload.get('slotStart', ''))).strip())
         start_date = str(payload.get('startDate', '')).strip()
         end_date = str(payload.get('endDate', '') or '').strip()
         active = bool(payload.get('active', True))
@@ -4686,20 +4752,20 @@ class TodoHandler(SimpleHTTPRequestHandler):
         weekdays.sort()
         if not weekdays:
             return None, {'error': 'at least one weekday is required'}
-        if not slot_key_base or not slot_label or not slot_start or not slot_end:
-            return None, {'error': 'slotKeyBase, slotLabel, slotStart and slotEnd are required'}
-        slot_capacity = minutes_between(slot_start, slot_end)
-        if slot_capacity <= 0:
-            return None, {'error': 'invalid slot time range'}
+        if not slot_start:
+            return None, {'error': 'startTime is required'}
         if duration_minutes <= 0:
             return None, {'error': 'durationMinutes must be positive'}
-        if duration_minutes > slot_capacity:
-            return None, {'error': 'duration exceeds slot capacity'}
+        slot_end = add_minutes_to_time(slot_start, duration_minutes)
+        if not slot_end:
+            return None, {'error': 'habit must end on the same day'}
         if not is_valid_date_key(start_date):
             return None, {'error': 'startDate is required'}
         if end_date and (not is_valid_date_key(end_date) or end_date < start_date):
             return None, {'error': 'endDate must be empty or later than startDate'}
 
+        slot_key_base = f"habit-{slot_start.replace(':', '')}"
+        slot_label = '习惯'
         return {
             'id': habit_id or str(payload.get('id', '')).strip() or f"habit-{int(time.time() * 1000)}-{secrets.token_hex(4)}",
             'userId': user_id,
@@ -4800,23 +4866,6 @@ class TodoHandler(SimpleHTTPRequestHandler):
                 if existing and not (reset_future_uncompleted and not bool(existing['completed']) and date_key >= today):
                     continue
                 target_slot_key = f"{date_key}-{habit['slot_key_base']}"
-                slots = effective_slots_for_date(conn, user_id, date_key)
-                slot = next((item for item in slots if slot_key(date_key, item) == target_slot_key), None)
-                if not slot or slot['start'] != habit['slot_start'] or slot['end'] != habit['slot_end']:
-                    conflicts.append({'habitId': habit['id'], 'date': date_key, 'reason': 'slot missing'})
-                    continue
-                used = conn.execute(
-                    '''
-                    SELECT COALESCE(SUM(duration_minutes), 0)
-                    FROM schedule_items
-                    WHERE user_id = ? AND schedule_date = ? AND slot_key = ?
-                      AND NOT (habit_id = ? AND completed = 0 AND schedule_date >= ?)
-                    ''',
-                    (user_id, date_key, target_slot_key, habit['id'], today),
-                ).fetchone()[0]
-                if int(used or 0) + int(habit['duration_minutes']) > minutes_between(habit['slot_start'], habit['slot_end']):
-                    conflicts.append({'habitId': habit['id'], 'date': date_key, 'reason': 'capacity exceeded'})
-                    continue
                 inserts.append((habit, date_key, target_slot_key))
 
         if conflicts and strict:
@@ -4856,8 +4905,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
                 '''
                 INSERT INTO schedule_items
                 (id, user_id, task_id, habit_id, schedule_date, slot_key, slot_label, slot_start, slot_end,
-                 duration_minutes, sort_order, note, completed, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', 0, ?, ?)
+                 item_start, item_end, duration_minutes, sort_order, note, completed, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', 0, ?, ?)
                 ''',
                 (
                     item_id,
@@ -4867,6 +4916,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
                     date_key,
                     target_slot_key,
                     habit['slot_label'],
+                    habit['slot_start'],
+                    habit['slot_end'],
                     habit['slot_start'],
                     habit['slot_end'],
                     habit['duration_minutes'],
@@ -4955,8 +5006,19 @@ class TodoHandler(SimpleHTTPRequestHandler):
             existing = conn.execute('SELECT * FROM habits WHERE id = ? AND user_id = ? AND archived = 0', (habit_id, user['id'])).fetchone()
             if not existing:
                 return self.write_json({'error': 'habit not found'}, status=HTTPStatus.NOT_FOUND)
-            task_id = self.create_habit_task(conn, habit)
             now = now_iso()
+            task_id = existing['task_id']
+            conn.execute(
+                '''
+                UPDATE tasks
+                SET title = ?, subject = ?, priority = ?, note = ?, updated_at = ?
+                WHERE id = ? AND user_id = ?
+                ''',
+                (
+                    habit['title'], habit['subject'], habit['priority'], habit['note'],
+                    now, task_id, user['id'],
+                ),
+            )
             conn.execute(
                 '''
                 UPDATE habits
@@ -5206,15 +5268,17 @@ class TodoHandler(SimpleHTTPRequestHandler):
         payload: dict,
         user_id: int,
         existing_id: str | None = None,
-        enforce_slot_exists: bool = True,
+        enforce_slot_exists: bool = False,
     ):
-        """Validate schedule item edits and enforce per-slot capacity."""
+        """Validate a date, exact start time and duration; slot fields are legacy metadata."""
         task_id = str(payload.get('taskId', '')).strip()
         schedule_date = str(payload.get('date', '')).strip()
-        slot_key = str(payload.get('slotKey', '')).strip()
-        slot_label = str(payload.get('slotLabel', '')).strip()
-        slot_start = normalize_time_text(str(payload.get('slotStart', '')).strip())
-        slot_end = normalize_time_text(str(payload.get('slotEnd', '')).strip())
+        raw_slot_start = normalize_time_text(str(payload.get('slotStart', '')).strip())
+        item_start = normalize_time_text(str(payload.get('startTime', raw_slot_start)).strip())
+        slot_key = str(payload.get('slotKey', '')).strip() or f'{schedule_date}-dynamic'
+        slot_label = str(payload.get('slotLabel', '')).strip() or '每日安排'
+        slot_start = raw_slot_start or '00:00'
+        slot_end = normalize_time_text(str(payload.get('slotEnd', '')).strip()) or '23:59'
         note = str(payload.get('note', '') or '').strip()
         try:
             duration_minutes = int(payload.get('durationMinutes'))
@@ -5231,46 +5295,23 @@ class TodoHandler(SimpleHTTPRequestHandler):
             if not math.isfinite(sort_order):
                 return None, {'error': 'sortOrder must be a finite number'}
 
-        if not task_id or not schedule_date or not slot_key or not slot_start or not slot_end:
-            return None, {'error': 'taskId, date, slotKey, slotStart and slotEnd are required'}
+        if not task_id or not schedule_date or not item_start:
+            return None, {'error': 'taskId, date and startTime are required'}
         if not is_valid_date_key(schedule_date):
             return None, {'error': 'date must be a valid YYYY-MM-DD date'}
         if len(slot_label) > 40:
             return None, {'error': 'slotLabel must be at most 40 characters'}
         if duration_minutes <= 0:
             return None, {'error': 'durationMinutes must be positive'}
-        slot_capacity = minutes_between(slot_start, slot_end)
-        if slot_capacity <= 0:
-            return None, {'error': 'invalid slot time range'}
-        if duration_minutes > slot_capacity:
-            return None, {'error': 'duration exceeds slot capacity'}
+        item_end = add_minutes_to_time(item_start, duration_minutes)
+        if not item_end:
+            return None, {'error': 'schedule item must end on the same day'}
         if len(note) > 500:
             return None, {'error': 'note is too long'}
-        if enforce_slot_exists and not matching_effective_slot(conn, user_id, schedule_date, slot_key, slot_start, slot_end):
-            return None, {'error': 'time slot does not exist for this date'}
 
         task = conn.execute('SELECT id FROM tasks WHERE id = ? AND user_id = ?', (task_id, user_id)).fetchone()
         if not task:
             return None, {'error': 'task not found'}
-        if existing_id:
-            used = conn.execute(
-                """
-                SELECT COALESCE(SUM(duration_minutes), 0) FROM schedule_items
-                WHERE user_id = ? AND schedule_date = ? AND slot_key = ? AND id != ?
-                """,
-                (user_id, schedule_date, slot_key, existing_id),
-            ).fetchone()[0]
-        else:
-            used = conn.execute(
-                """
-                SELECT COALESCE(SUM(duration_minutes), 0) FROM schedule_items
-                WHERE user_id = ? AND schedule_date = ? AND slot_key = ?
-                """,
-                (user_id, schedule_date, slot_key),
-            ).fetchone()[0]
-        if int(used) + duration_minutes > slot_capacity:
-            return None, {'error': 'time slot capacity exceeded', 'usedMinutes': int(used), 'capacityMinutes': slot_capacity}
-
         return {
             'taskId': task_id,
             'date': schedule_date,
@@ -5278,6 +5319,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
             'slotLabel': slot_label or slot_key,
             'slotStart': slot_start,
             'slotEnd': slot_end,
+            'startTime': item_start,
+            'endTime': item_end,
             'durationMinutes': duration_minutes,
             'sortOrder': sort_order,
             'note': note,
@@ -5309,12 +5352,13 @@ class TodoHandler(SimpleHTTPRequestHandler):
                 """
                 INSERT INTO schedule_items
                 (id, user_id, task_id, schedule_date, slot_key, slot_label, slot_start, slot_end,
-                 duration_minutes, sort_order, note, completed, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 item_start, item_end, duration_minutes, sort_order, note, completed, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     item_id, user['id'], item['taskId'], item['date'], item['slotKey'], item['slotLabel'],
-                    item['slotStart'], item['slotEnd'], item['durationMinutes'], sort_order, item['note'],
+                    item['slotStart'], item['slotEnd'], item['startTime'], item['endTime'],
+                    item['durationMinutes'], sort_order, item['note'],
                     0, now_iso(), now_iso(),
                 ),
             )
@@ -5349,6 +5393,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
                     'slotLabel': existing['slot_label'],
                     'slotStart': existing['slot_start'],
                     'slotEnd': existing['slot_end'],
+                    'startTime': existing['item_start'],
                     'durationMinutes': existing['duration_minutes'],
                 }
                 for key, current_value in locked_fields.items():
@@ -5362,6 +5407,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
                 'slotLabel': payload.get('slotLabel', existing['slot_label']),
                 'slotStart': payload.get('slotStart', existing['slot_start']),
                 'slotEnd': payload.get('slotEnd', existing['slot_end']),
+                'startTime': payload.get('startTime', existing['item_start'] or existing['slot_start']),
                 'durationMinutes': payload.get('durationMinutes', existing['duration_minutes']),
                 'sortOrder': payload.get('sortOrder', existing['sort_order']),
                 'note': payload.get('note', existing['note']),
@@ -5374,6 +5420,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
                     'slotKey': existing['slot_key'],
                     'slotStart': existing['slot_start'],
                     'slotEnd': existing['slot_end'],
+                    'startTime': existing['item_start'] or existing['slot_start'],
                     'durationMinutes': existing['duration_minutes'],
                     'sortOrder': existing['sort_order'],
                 }.items()
@@ -5384,7 +5431,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
                     merged,
                     int(user['id']),
                     existing_id=item_id,
-                    enforce_slot_exists=True,
+                    enforce_slot_exists=False,
                 )
                 if error:
                     return self.write_json(error, status=HTTPStatus.BAD_REQUEST)
@@ -5401,6 +5448,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
                     'slotLabel': existing['slot_label'],
                     'slotStart': existing['slot_start'],
                     'slotEnd': existing['slot_end'],
+                    'startTime': existing['item_start'] or existing['slot_start'],
+                    'endTime': existing['item_end'] or add_minutes_to_time(existing['slot_start'], existing['duration_minutes']),
                     'durationMinutes': existing['duration_minutes'],
                     'sortOrder': existing['sort_order'],
                     'note': note,
@@ -5412,12 +5461,13 @@ class TodoHandler(SimpleHTTPRequestHandler):
                 """
                 UPDATE schedule_items
                 SET schedule_date = ?, slot_key = ?, slot_label = ?, slot_start = ?, slot_end = ?,
-                    duration_minutes = ?, sort_order = ?, note = ?, completed = ?, updated_at = ?
+                    item_start = ?, item_end = ?, duration_minutes = ?, sort_order = ?, note = ?, completed = ?, updated_at = ?
                 WHERE id = ? AND user_id = ?
                 """,
                 (
                     item['date'], item['slotKey'], item['slotLabel'], item['slotStart'], item['slotEnd'],
-                    item['durationMinutes'], item['sortOrder'], item['note'], 1 if completed else 0,
+                    item['startTime'], item['endTime'], item['durationMinutes'], item['sortOrder'],
+                    item['note'], 1 if completed else 0,
                     now_iso(), item_id, user['id'],
                 ),
             )
