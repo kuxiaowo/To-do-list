@@ -12,14 +12,14 @@
       document.documentElement.dataset.theme = savedTheme === 'dark' ? 'dark' : 'light';
     })();
   </script>
-  <link rel="stylesheet" href="./style.css?v=timeline-under-sidebar-20260623-3" />
+  <link rel="stylesheet" href="./style.css?v=dynamic-daily-schedule-20260723-9" />
 </head>
 <body>
   <div id="app" v-cloak>
     <div v-if="!adminMode" class="app-shell" :class="{ 'sidebar-collapsed': sidebarCollapsed }">
       <aside class="summary-panel" :class="{ 'is-collapsed': sidebarCollapsed }">
         <div v-if="sidebarCollapsed" class="sidebar-quick-actions">
-          <button class="sidebar-action-button" type="button" :title="activePage === 'daily' ? '新增安排' : '新增任务'" :disabled="!currentUser" @click="openCreateDialog">
+          <button v-if="activePage !== 'daily'" class="sidebar-action-button" type="button" title="新增任务" :disabled="!currentUser" @click="openCreateDialog">
             <span>新增</span>
           </button>
           <button class="sidebar-action-button" type="button" title="定位今天" @click="scrollSidebarToToday">
@@ -28,7 +28,7 @@
         </div>
         <button class="sidebar-peek-button" :class="{ 'is-expanded-control': !sidebarCollapsed }" type="button" :title="sidebarCollapsed ? '展开侧栏' : '收起侧栏'" @click="sidebarCollapsed = !sidebarCollapsed">
           <span class="sidebar-peek-icon">{{ sidebarCollapsed ? '›' : '‹' }}</span>
-          <span v-if="sidebarCollapsed" class="sidebar-peek-text">{{ showTaskPoolSection ? (activePage === 'daily' ? '临时' : '待定') : '侧栏' }}</span>
+          <span v-if="sidebarCollapsed" class="sidebar-peek-text">{{ showTaskPoolSection ? '待安排' : '侧栏' }}</span>
           <span v-if="sidebarCollapsed && showTaskPoolSection" class="sidebar-peek-count">{{ unscheduledCount }}</span>
         </button>
         <div class="summary-panel-content">
@@ -36,7 +36,7 @@
           <div>
             <h1 class="summary-title">To-Do List</h1>
           </div>
-          <el-button data-guide="add-task" type="primary" :disabled="!currentUser" @click="openCreateDialog">{{ activePage === 'daily' ? '新增安排' : '新增任务' }}</el-button>
+          <el-button v-if="activePage !== 'daily'" data-guide="add-task" type="primary" :disabled="!currentUser" @click="openCreateDialog">新增任务</el-button>
         </div>
 
         <div class="toolbar">
@@ -63,10 +63,10 @@
 
         <section v-if="showTaskPoolSection" class="summary-section">
           <h3>
-            <span>{{ activePage === 'daily' ? '临时任务' : '待定截止时间' }}</span>
+            <span>待安排</span>
             <span class="day-subtitle">{{ unscheduledCount }} 项</span>
           </h3>
-          <p class="summary-subtitle">{{ activePage === 'daily' ? '没有截止日期，但需要安排到某天完成的事。' : '还没确定截止时间的任务。' }}</p>
+          <p class="summary-subtitle">尚未确定截止时间，或需要灵活安排的任务。</p>
           <div class="summary-card" data-guide="task-pool">
             <div class="summary-card-header">
               <div class="summary-card-title">按优先级排序</div>
@@ -106,9 +106,7 @@
                 </div>
               </div>
             </template>
-            <div v-else class="summary-empty">
-              {{ activePage === 'daily' ? '暂无临时任务。' : '暂无待定截止时间的任务。' }}
-            </div>
+            <div v-else class="summary-empty">暂无待安排任务。</div>
           </div>
         </section>
 
@@ -117,7 +115,7 @@
             <span>习惯池</span>
             <span class="day-subtitle">{{ habitCount }} 项</span>
           </h3>
-          <p class="summary-subtitle">按星期和时间段自动同步到每日安排。</p>
+          <p class="summary-subtitle">按星期、开始时间和持续时长自动同步。</p>
           <div v-if="habitSyncConflicts.length" class="habit-conflict-banner">
             有 {{ habitSyncConflicts.length }} 个习惯日期未能同步。
           </div>
@@ -134,7 +132,7 @@
                     <div class="task-meta">
                       <span v-if="habit.subject" class="meta-chip subject-chip">{{ habit.subject }}</span>
                       <span>{{ habitWeekdaysLabel(habit) }}</span>
-                      <span>{{ habit.slotLabel }} {{ habit.slotStart }}-{{ habit.slotEnd }}</span>
+                      <span>{{ habit.startTime || habit.slotStart }}-{{ habit.endTime || habit.slotEnd }}</span>
                       <span v-if="!habit.active" class="meta-chip completed-badge">已暂停</span>
                     </div>
                   </div>
@@ -152,10 +150,11 @@
         <div class="timeline-header">
           <div class="timeline-title">
             <div class="page-nav" data-guide="page-nav">
+              <button class="page-nav-button" :class="{ active: activePage === 'calendar' }" type="button" @click="switchPage('calendar')">DDL 日历</button>
               <button class="page-nav-button" :class="{ active: activePage === 'ddl' }" type="button" @click="switchPage('ddl')">DDL 时间线</button>
               <button class="page-nav-button" :class="{ active: activePage === 'daily' }" type="button" data-guide="daily-tab" @click="switchPage('daily')">每日安排</button>
             </div>
-            <p>{{ activePage === 'ddl' ? '按截止日期自动排序' : '把临时任务、习惯或截止任务拖进每天的时间段。' }}</p>
+            <p>{{ activePage === 'ddl' ? '按截止日期自动排序' : (activePage === 'calendar' ? '用月历查看全部 DDL 任务' : '按开始时间排列每天的任务；重叠安排会标红提醒。') }}</p>
           </div>
           <div class="timeline-header-actions">
             <div class="toolbar-row theme-toggle-row">
@@ -240,20 +239,7 @@
         </div>
 
         <div v-if="activePage === 'ddl'" class="ddl-view" data-guide="ddl-timeline">
-          <div class="ddl-view-toolbar">
-            <div class="ddl-view-switch" role="group" aria-label="DDL视图切换">
-              <button class="ddl-view-button" :class="{ active: ddlViewMode === 'timeline' }" type="button" @click="setDdlViewMode('timeline')">时间线</button>
-              <button class="ddl-view-button" :class="{ active: ddlViewMode === 'calendar' }" type="button" @click="setDdlViewMode('calendar')">日历</button>
-            </div>
-            <div v-if="ddlViewMode === 'calendar'" class="ddl-calendar-nav">
-              <el-button plain @click="shiftDdlCalendarMonth(-1)">上月</el-button>
-              <div class="ddl-calendar-title">{{ ddlCalendarTitle }}</div>
-              <el-button plain @click="goToDdlCalendarToday">今天</el-button>
-              <el-button plain @click="shiftDdlCalendarMonth(1)">下月</el-button>
-            </div>
-          </div>
-
-          <div v-if="ddlViewMode === 'timeline'" class="timeline-scroll-frame">
+          <div class="timeline-scroll-frame">
             <div class="timeline-scroll" ref="timelineScroll" @scroll="handleTimelineScroll('ddl')">
               <div class="timeline-columns">
                 <section v-for="day in dayColumns" :key="day.key" class="day-column" :data-day="day.key">
@@ -300,8 +286,16 @@
               ></div>
             </div>
           </div>
+        </div>
 
-          <div v-else class="ddl-calendar-panel">
+        <div v-else-if="activePage === 'calendar'" class="ddl-calendar-page">
+          <div class="ddl-calendar-nav">
+            <el-button plain @click="shiftDdlCalendarMonth(-1)">上月</el-button>
+            <div class="ddl-calendar-title">{{ ddlCalendarTitle }}</div>
+            <el-button plain @click="goToDdlCalendarToday">今天</el-button>
+            <el-button plain @click="shiftDdlCalendarMonth(1)">下月</el-button>
+          </div>
+          <div class="ddl-calendar-panel">
             <div class="ddl-calendar-grid">
               <div v-for="weekday in ddlCalendarWeekdays" :key="weekday" class="ddl-calendar-weekday">{{ weekday }}</div>
               <section
@@ -337,15 +331,10 @@
           </div>
         </div>
 
-        <div v-else-if="activePage === 'daily'" class="daily-board">
-          <div class="daily-tools" data-guide="daily-tools">
-            <div>
-              <div class="daily-tools-title">每日时间段</div>
-              <div class="daily-tools-subtitle">编辑一周模板，也可以单独调整某一天。</div>
-            </div>
-            <div class="daily-tools-actions">
-              <el-button plain :disabled="!currentUser" @click="openWeekSlotEditor">编辑一周模板</el-button>
-              <el-button plain type="danger" :disabled="!currentUser" @click="resetAllScheduleConfig">重置全部</el-button>
+        <div v-else-if="activePage === 'daily'" class="daily-board" data-guide="daily-board">
+          <div v-if="scheduleConflictTypes.length" class="schedule-conflict-summary" role="alert">
+            <div class="schedule-conflict-types">
+              <span v-for="conflict in scheduleConflictTypes" :key="conflict.type">⚠ {{ conflict.label }}</span>
             </div>
           </div>
           <div class="timeline-scroll-frame">
@@ -355,68 +344,72 @@
                 <div class="day-header">
                   <div>
                     <div class="day-label">{{ day.label }}</div>
-                    <div class="day-subtitle">{{ day.subtitle }}<span v-if="day.hasOverride"> · 单日自定义</span></div>
+                    <div class="day-subtitle">{{ day.subtitle }}</div>
                   </div>
-                  <div class="day-actions">
-                    <el-button size="small" text :disabled="!currentUser" @click="openDaySlotEditor(day)">编辑</el-button>
-                    <el-button size="small" text :disabled="!currentUser || !day.hasOverride" @click="resetDaySlots(day)">重置</el-button>
-                  </div>
+                  <button
+                    class="day-add-schedule-button"
+                    type="button"
+                    :title="`在 ${day.label} 新建安排`"
+                    :aria-label="`在 ${day.label} 新建安排`"
+                    :disabled="!currentUser"
+                    @click.stop="openDirectScheduleCreateDialog(day)"
+                  >+</button>
                 </div>
 
                 <div
-                  v-for="slot in day.slots"
-                  :key="slot.key"
-                  class="schedule-slot"
-                  :class="{ 'is-drag-target': isScheduleDropPosition(day, slot) }"
+                  class="schedule-day-items"
+                  :class="{ 'is-drag-target': isScheduleDropPosition(day) }"
                   :data-schedule-date="day.key"
-                  :data-schedule-slot-key="slot.key"
-                  @dragenter.prevent="updateScheduleDropPosition($event, day, slot)"
-                  @dragover.prevent="updateScheduleDropPosition($event, day, slot)"
-                  @drop.prevent="handleDropOnSlot($event, day, slot)"
+                  @dragenter.prevent="updateScheduleDropPosition($event, day)"
+                  @dragover.prevent="updateScheduleDropPosition($event, day)"
+                  @drop.prevent="handleDropOnDay($event, day)"
                 >
-                  <div class="slot-header">
-                    <div>
-                      <div class="slot-title">{{ slot.label }}</div>
-                      <div class="slot-time">{{ slot.start }} - {{ slot.end }}</div>
-                    </div>
-                    <div class="slot-capacity">{{ slotUsedMinutes(day.key, slot.key) }} / {{ slot.duration }} 分钟</div>
-                  </div>
-
                   <div class="schedule-card-list">
                     <template
-                      v-for="(item, itemIndex) in visibleScheduleItemsForSlot(day.key, slot.key)"
-                      :key="item.id"
+                      v-for="group in visibleScheduleGroupsForDate(day.key)"
+                      :key="group.key"
                     >
-                      <div
-                        v-if="isScheduleInsertIndex(day, slot, itemIndex)"
-                        class="schedule-insert-line"
-                      ></div>
-                      <article
-                        class="schedule-card"
-                        :class="[priorityClass(item.task.priority), { completed: item.completed, 'is-dragging': draggedScheduleItemId === item.id, 'is-habit': item.habitId }]"
-                        :data-schedule-id="item.id"
-                        :draggable="!item.habitId"
-                        @dragstart.stop="startScheduleDrag(item, $event)"
-                        @dragend="clearScheduleDragState"
-                        @pointerdown="startSchedulePointerDragForItem(item, $event)"
-                        @click="openScheduleFromPointerClick(item)"
-                      >
-                        <div class="schedule-title-row">
-                          <div class="task-title">{{ item.task.title }}</div>
-                          <span v-if="item.habitId" class="schedule-habit-label">习惯</span>
-                        </div>
-                        <div class="task-meta">
-                          <span v-if="item.task.subject" class="meta-chip subject-chip">{{ item.task.subject }}</span>
-                          <span>{{ item.durationMinutes }} 分钟</span>
-                        </div>
-                        <div v-if="item.note" class="task-note-preview">{{ item.note }}</div>
-                        <span v-if="item.completed" class="schedule-check">✓</span>
-                      </article>
+                      <div class="schedule-item-group" :class="{ 'has-conflict': group.hasConflict }">
+                        <span v-if="group.hasConflict" class="schedule-conflict-label" role="alert">⚠ 冲突 {{ group.items.length }} 项</span>
+                        <template v-for="item in group.items" :key="item.id">
+                          <div
+                            v-if="isScheduleInsertIndex(day, visibleScheduleItemIndex(day.key, item.id))"
+                            class="schedule-insert-line"
+                          ></div>
+                          <div class="schedule-item-block">
+                            <div class="schedule-item-start-time">{{ item.startTime || item.slotStart }}</div>
+                            <article
+                              class="schedule-card"
+                              :class="[priorityClass(item.task.priority), { completed: item.completed, 'is-dragging': draggedScheduleItemId === item.id, 'is-habit': item.habitId, 'has-conflict': item.hasConflict }]"
+                              :data-schedule-id="item.id"
+                              :draggable="!item.habitId"
+                              @dragstart.stop="startScheduleDrag(item, $event)"
+                              @dragend="clearScheduleDragState"
+                              @pointerdown="startSchedulePointerDragForItem(item, $event)"
+                              @click="openScheduleFromPointerClick(item)"
+                            >
+                              <div class="schedule-title-row">
+                                <div class="task-title">{{ item.task.title }}</div>
+                                <span v-if="item.habitId" class="schedule-habit-label">习惯</span>
+                              </div>
+                              <div class="task-meta">
+                                <span v-if="item.task.subject" class="meta-chip subject-chip">{{ item.task.subject }}</span>
+                                <span>{{ item.durationMinutes }} 分钟</span>
+                              </div>
+                              <div v-if="item.note" class="task-note-preview">{{ item.note }}</div>
+                              <span v-if="item.completed" class="schedule-check">✓</span>
+                            </article>
+                          </div>
+                        </template>
+                      </div>
                     </template>
                     <div
-                      v-if="isScheduleInsertIndex(day, slot, visibleScheduleItemsForSlot(day.key, slot.key).length)"
+                      v-if="isScheduleInsertIndex(day, visibleScheduleItemsForDate(day.key).length)"
                       class="schedule-insert-line"
                     ></div>
+                    <div v-if="!visibleScheduleItemsForDate(day.key).length" class="schedule-day-empty">
+                      拖入任务或点击右上角“+”
+                    </div>
                   </div>
 
                 </div>
@@ -439,7 +432,7 @@
           <div class="ddl-dock" data-guide="ddl-dock">
             <div class="ddl-dock-header">
               <div class="card-title">待安排的截止任务</div>
-              <span class="day-subtitle">可拖到多个时间段</span>
+              <span class="day-subtitle">可拖到任意日期后设置开始时间</span>
             </div>
             <div class="ddl-list" v-if="ddlTasks.length">
               <article
@@ -1292,10 +1285,10 @@
               </div>
               <section v-if="showTaskPoolSection" class="summary-section">
                 <h3>
-                  <span>{{ activePage === 'daily' ? '临时任务' : '待定截止时间' }}</span>
+                  <span>待安排</span>
                   <span class="day-subtitle">{{ unscheduledCount }} 项</span>
                 </h3>
-                <p class="summary-subtitle">{{ activePage === 'daily' ? '没有截止日期，但需要安排到某天完成的事。' : '还没确定截止时间的任务。' }}</p>
+                <p class="summary-subtitle">尚未确定截止时间，或需要灵活安排的任务。</p>
                 <div class="summary-card">
                   <div class="summary-card-header">
                     <div class="summary-card-title">按优先级排序</div>
@@ -1317,9 +1310,7 @@
                       </div>
                     </div>
                   </div>
-                  <div v-else class="summary-empty">
-                    {{ activePage === 'daily' ? '暂无临时任务。' : '暂无待定截止时间的任务。' }}
-                  </div>
+                  <div v-else class="summary-empty">暂无待安排任务。</div>
                 </div>
               </section>
               <section v-if="showHabitPoolSection" class="summary-section habit-pool-section">
@@ -1327,7 +1318,7 @@
                   <span>习惯池</span>
                   <span class="day-subtitle">{{ habitCount }} 项</span>
                 </h3>
-                <p class="summary-subtitle">按星期和时间段自动同步到每日安排。</p>
+                <p class="summary-subtitle">按星期、开始时间和持续时长自动同步。</p>
                 <div v-if="habitSyncConflicts.length" class="habit-conflict-banner">
                   有 {{ habitSyncConflicts.length }} 个习惯日期未能同步。
                 </div>
@@ -1344,7 +1335,7 @@
                           <div class="task-meta">
                             <span v-if="habit.subject" class="meta-chip subject-chip">{{ habit.subject }}</span>
                             <span>{{ habitWeekdaysLabel(habit) }}</span>
-                            <span>{{ habit.slotLabel }} {{ habit.slotStart }}-{{ habit.slotEnd }}</span>
+                            <span>{{ habit.startTime || habit.slotStart }}-{{ habit.endTime || habit.slotEnd }}</span>
                             <span v-if="!habit.active" class="meta-chip completed-badge">已暂停</span>
                           </div>
                         </div>
@@ -1361,6 +1352,7 @@
               <div class="timeline-header">
                 <div class="timeline-title">
                   <div class="page-nav">
+                    <button class="page-nav-button" :class="{ active: activePage === 'calendar' }" type="button" @click="switchPage('calendar')">DDL 日历</button>
                     <button class="page-nav-button" :class="{ active: activePage === 'ddl' }" type="button" @click="switchPage('ddl')">DDL 时间线</button>
                     <button class="page-nav-button" :class="{ active: activePage === 'daily' }" type="button" @click="switchPage('daily')">每日安排</button>
                   </div>
@@ -1369,20 +1361,7 @@
               </div>
 
               <div v-if="activePage === 'ddl'" class="ddl-view">
-                <div class="ddl-view-toolbar">
-                  <div class="ddl-view-switch" role="group" aria-label="DDL视图切换">
-                    <button class="ddl-view-button" :class="{ active: ddlViewMode === 'timeline' }" type="button" @click="setDdlViewMode('timeline')">时间线</button>
-                    <button class="ddl-view-button" :class="{ active: ddlViewMode === 'calendar' }" type="button" @click="setDdlViewMode('calendar')">日历</button>
-                  </div>
-                  <div v-if="ddlViewMode === 'calendar'" class="ddl-calendar-nav">
-                    <el-button plain @click="shiftDdlCalendarMonth(-1)">上月</el-button>
-                    <div class="ddl-calendar-title">{{ ddlCalendarTitle }}</div>
-                    <el-button plain @click="goToDdlCalendarToday">今天</el-button>
-                    <el-button plain @click="shiftDdlCalendarMonth(1)">下月</el-button>
-                  </div>
-                </div>
-
-                <div v-if="ddlViewMode === 'timeline'" class="timeline-scroll-frame">
+                <div class="timeline-scroll-frame">
                   <div class="timeline-scroll" ref="timelineScroll" @scroll="handleTimelineScroll('ddl')">
                     <div class="timeline-columns">
                       <section v-for="day in dayColumns" :key="day.key" class="day-column" :data-day="day.key">
@@ -1417,8 +1396,16 @@
                     ></div>
                   </div>
                 </div>
+              </div>
 
-                <div v-else class="ddl-calendar-panel">
+              <div v-else-if="activePage === 'calendar'" class="ddl-calendar-page">
+                <div class="ddl-calendar-nav">
+                  <el-button plain @click="shiftDdlCalendarMonth(-1)">上月</el-button>
+                  <div class="ddl-calendar-title">{{ ddlCalendarTitle }}</div>
+                  <el-button plain @click="goToDdlCalendarToday">今天</el-button>
+                  <el-button plain @click="shiftDdlCalendarMonth(1)">下月</el-button>
+                </div>
+                <div class="ddl-calendar-panel">
                   <div class="ddl-calendar-grid">
                     <div v-for="weekday in ddlCalendarWeekdays" :key="weekday" class="ddl-calendar-weekday">{{ weekday }}</div>
                     <section
@@ -1453,14 +1440,7 @@
                 </div>
               </div>
 
-              <div v-else class="daily-board">
-                <div class="daily-tools">
-                  <div>
-                    <div class="daily-tools-title">每日时间段</div>
-                    <div class="daily-tools-subtitle">后台只读展示模板和单日自定义。</div>
-                  </div>
-                  <el-tag type="info" effect="plain">只读</el-tag>
-                </div>
+              <div v-else-if="activePage === 'daily'" class="daily-board">
                 <div class="timeline-scroll-frame">
                   <div class="timeline-scroll" ref="dailyScroll" @scroll="handleTimelineScroll('daily')">
                     <div class="timeline-columns">
@@ -1468,29 +1448,34 @@
                       <div class="day-header">
                         <div>
                           <div class="day-label">{{ day.label }}</div>
-                          <div class="day-subtitle">{{ day.subtitle }}<span v-if="day.hasOverride"> · 单日自定义</span></div>
+                          <div class="day-subtitle">{{ day.subtitle }}</div>
                         </div>
                       </div>
-                      <div v-for="slot in day.slots" :key="slot.key" class="schedule-slot">
-                        <div class="slot-header">
-                          <div>
-                            <div class="slot-title">{{ slot.label }}</div>
-                            <div class="slot-time">{{ slot.start }} - {{ slot.end }}</div>
+                      <div class="schedule-day-items">
+                        <div
+                          v-for="group in visibleScheduleGroupsForDate(day.key)"
+                          :key="group.key"
+                          class="schedule-item-group"
+                          :class="{ 'has-conflict': group.hasConflict }"
+                        >
+                          <span v-if="group.hasConflict" class="schedule-conflict-label" role="alert">⚠ 冲突 {{ group.items.length }} 项</span>
+                          <div v-for="item in group.items" :key="item.id" class="schedule-item-block">
+                            <div class="schedule-item-start-time">{{ item.startTime || item.slotStart }}</div>
+                            <article class="schedule-card" :class="[priorityClass(item.task.priority), { completed: item.completed, 'is-habit': item.habitId, 'has-conflict': item.hasConflict }]">
+                              <div class="schedule-title-row">
+                                <div class="task-title">{{ item.task.title }}</div>
+                                <span v-if="item.habitId" class="schedule-habit-label">习惯</span>
+                              </div>
+                              <div class="task-meta">
+                                <span v-if="item.task.subject" class="meta-chip subject-chip">{{ item.task.subject }}</span>
+                                <span>{{ item.durationMinutes }} 分钟</span>
+                              </div>
+                              <div v-if="item.note" class="task-note-preview">{{ item.note }}</div>
+                              <span v-if="item.completed" class="schedule-check">✓</span>
+                            </article>
                           </div>
-                          <div class="slot-capacity">{{ slotUsedMinutes(day.key, slot.key) }} / {{ slot.duration }} 分钟</div>
                         </div>
-                        <article v-for="item in visibleScheduleItemsForSlot(day.key, slot.key)" :key="item.id" class="schedule-card" :class="[priorityClass(item.task.priority), { completed: item.completed, 'is-habit': item.habitId }]">
-                          <div class="schedule-title-row">
-                            <div class="task-title">{{ item.task.title }}</div>
-                            <span v-if="item.habitId" class="schedule-habit-label">习惯</span>
-                          </div>
-                          <div class="task-meta">
-                            <span v-if="item.task.subject" class="meta-chip subject-chip">{{ item.task.subject }}</span>
-                            <span>{{ item.durationMinutes }} 分钟</span>
-                          </div>
-                          <div v-if="item.note" class="task-note-preview">{{ item.note }}</div>
-                          <span v-if="item.completed" class="schedule-check">✓</span>
-                        </article>
+                        <div v-if="!visibleScheduleItemsForDate(day.key).length" class="schedule-day-empty">当日暂无安排</div>
                       </div>
                       </section>
                     </div>
@@ -1607,7 +1592,7 @@
                 <div class="ai-help-title">AI 助手会怎样处理</div>
                 <div class="ai-help-section">
                   <div class="ai-help-section-title">可以做</div>
-                  <p>创建任务、修改任务详情、总结最近待办。没有截止时间时会显示在“待定截止时间”。</p>
+                  <p>创建任务、修改任务详情、总结最近待办。没有截止时间时会显示在“待安排”。</p>
                 </div>
                 <div class="ai-help-section">
                   <div class="ai-help-section-title">不会做</div>
@@ -1818,17 +1803,10 @@
         </div>
         <div class="settings-row">
           <div>
-            <div class="settings-row-title">待定截止时间</div>
-            <div class="settings-row-desc">控制左侧待定截止时间区域显示。</div>
+            <div class="settings-row-title">待安排</div>
+            <div class="settings-row-desc">控制左侧待安排任务区域显示。</div>
           </div>
           <el-switch v-model="appSettings.showUnscheduledDdl" @change="saveAppSettings"></el-switch>
-        </div>
-        <div class="settings-row">
-          <div>
-            <div class="settings-row-title">临时任务</div>
-            <div class="settings-row-desc">控制每日安排页左侧临时任务区域显示。</div>
-          </div>
-          <el-switch v-model="appSettings.showArrangementPool" @change="saveAppSettings"></el-switch>
         </div>
         <div class="settings-row">
           <div>
@@ -1920,7 +1898,7 @@
                     :disabled="aiActionLocked(action)"
                     :maxlength="field.field === 'title' ? 80 : undefined"
                     :show-word-limit="field.field === 'title'"
-                    :placeholder="field.field === 'dueAt' ? '留空则放入待定截止时间，或 YYYY-MM-DDTHH:mm:00' : field.label"
+                    :placeholder="field.field === 'dueAt' ? '留空则放入待安排，或 YYYY-MM-DDTHH:mm:00' : field.label"
                   ></el-input>
                 </template>
                 <div v-if="action.type === 'update_task'" class="ai-field-before">
@@ -2234,7 +2212,7 @@
 
     <el-dialog
       v-model="dialogVisible"
-      :title="dialogMode === 'create' ? (isCreatingArrangement ? '新增安排' : '新增任务') : '任务详情 / 编辑'"
+      :title="dialogMode === 'create' ? '新增任务' : '任务详情 / 编辑'"
       width="min(92vw, 640px)"
       destroy-on-close
     >
@@ -2268,15 +2246,11 @@
           </el-select>
         </el-form-item>
 
-        <el-form-item v-if="isArrangementDialog" label="时间安排">
-          <el-tag type="info" effect="plain">放入临时任务</el-tag>
+        <el-form-item label="时间安排">
+          <el-switch v-model="form.unscheduled" active-text="先放入待安排" inactive-text="设置截止时间"></el-switch>
         </el-form-item>
 
-        <el-form-item v-else label="时间安排">
-          <el-switch v-model="form.unscheduled" :active-text="activePage === 'daily' ? '先放入临时任务' : '先放入待定截止时间'" inactive-text="设置截止时间"></el-switch>
-        </el-form-item>
-
-        <el-form-item label="截止日期" v-if="!isArrangementDialog && !form.unscheduled">
+        <el-form-item label="截止日期" v-if="!form.unscheduled">
           <el-date-picker
             v-model="form.date"
             type="date"
@@ -2286,7 +2260,7 @@
           ></el-date-picker>
         </el-form-item>
 
-        <el-form-item label="截止时间" v-if="!isArrangementDialog && !form.unscheduled">
+        <el-form-item label="截止时间" v-if="!form.unscheduled">
           <div class="fixed-time-input" @click="focusDialogTimeContainer">
             <el-input ref="dueHourInput" v-model="dueHour" placeholder="HH" inputmode="numeric" @focus="selectDialogTimeInput" @keydown="handleDialogTimeKeydown('hour', $event)" @blur="normalizeDialogTimeInput"></el-input>
             <span class="fixed-time-colon" aria-hidden="true">:</span>
@@ -2358,7 +2332,7 @@
         </el-form-item>
 
         <el-form-item label="每周重复">
-          <el-checkbox-group v-model="habitForm.weekdays" @change="handleHabitWeekdaysChange">
+          <el-checkbox-group v-model="habitForm.weekdays">
             <el-checkbox-button v-for="weekday in weekdayOptions" :key="weekday.value" :label="weekday.value">{{ weekday.label }}</el-checkbox-button>
           </el-checkbox-group>
         </el-form-item>
@@ -2371,7 +2345,6 @@
               value-format="YYYY-MM-DD"
               placeholder="开始日期"
               style="width: 100%;"
-              @change="handleHabitStartDateChange"
             ></el-date-picker>
           </el-form-item>
           <el-form-item label="结束日期">
@@ -2385,31 +2358,23 @@
           </el-form-item>
         </div>
 
-        <el-form-item label="时间段">
-          <div class="form-field-stack">
-            <el-select
-              v-model="habitForm.slotKeyBase"
-              placeholder="选择时间段"
+        <div class="habit-form-grid">
+          <el-form-item label="开始时间">
+            <el-time-picker
+              v-model="habitForm.startTime"
+              format="HH:mm"
+              value-format="HH:mm"
+              placeholder="选择开始时间"
               style="width: 100%;"
-              @change="handleHabitSlotChange"
-            >
-              <el-option
-                v-for="slot in habitSlotOptions"
-                :key="slot.keyBase"
-                :label="slot.labelText"
-                :value="slot.keyBase"
-              ></el-option>
-            </el-select>
-            <div class="day-subtitle">
-              只显示所选星期中都存在且开始、结束时间一致的时间段；不同日期时间不同，需要拆成多个习惯。
-            </div>
-          </div>
-        </el-form-item>
+            ></el-time-picker>
+          </el-form-item>
+          <el-form-item label="时长">
+            <el-input-number v-model="habitForm.durationMinutes" :min="1" :max="habitMaxDuration"></el-input-number>
+            <span class="habit-end-time">结束 {{ habitEndTime }}</span>
+          </el-form-item>
+        </div>
 
         <div class="habit-form-grid">
-          <el-form-item label="时长">
-            <el-input-number v-model="habitForm.durationMinutes" :min="1" :max="habitSelectedSlotDuration"></el-input-number>
-          </el-form-item>
           <el-form-item label="状态">
             <el-switch v-model="habitForm.active" active-text="启用" inactive-text="暂停"></el-switch>
           </el-form-item>
@@ -2535,6 +2500,15 @@
       width="min(92vw, 560px)"
       destroy-on-close
     >
+      <el-alert
+        v-if="activeScheduleConflictItems.length"
+        title="当前安排与其他任务重叠"
+        :description="`冲突对象：${activeScheduleConflictSummary}。可调整开始时间或持续时间；系统允许保存重叠安排。`"
+        type="error"
+        :closable="false"
+        show-icon
+        style="margin-bottom: 16px;"
+      ></el-alert>
       <el-form :model="scheduleForm" label-width="110px" @submit.prevent>
         <template v-if="isDirectScheduleCreate">
           <el-form-item label="标题">
@@ -2567,21 +2541,6 @@
               @change="handleDirectScheduleDateChange"
             ></el-date-picker>
           </el-form-item>
-          <el-form-item label="时间段">
-            <el-select
-              v-model="scheduleForm.slotKeyBase"
-              placeholder="选择当天时间段"
-              style="width: 100%;"
-              @change="handleDirectScheduleSlotChange"
-            >
-              <el-option
-                v-for="slot in directScheduleSlotOptions"
-                :key="slot.keyBase"
-                :label="slot.labelText"
-                :value="slot.keyBase"
-              ></el-option>
-            </el-select>
-          </el-form-item>
           <el-form-item label="优先级">
             <el-radio-group v-model="scheduleForm.priority">
               <el-radio-button label="high">高 / 红</el-radio-button>
@@ -2593,11 +2552,22 @@
         <el-form-item v-else label="安排任务">
           <div>{{ activeScheduleTask ? activeScheduleTask.title : '未选择' }}</div>
         </el-form-item>
-        <el-form-item v-if="!isDirectScheduleCreate" label="时间段">
-          <div>{{ activeScheduleSlot ? `${activeScheduleSlot.dateLabel} ${activeScheduleSlot.label} ${activeScheduleSlot.start}-${activeScheduleSlot.end}` : '未选择' }}</div>
+        <el-form-item v-if="!isDirectScheduleCreate" label="日期">
+          <div>{{ activeScheduleSlot ? activeScheduleSlot.dateLabel : '未选择' }}</div>
+        </el-form-item>
+        <el-form-item label="开始时间">
+          <el-time-picker
+            v-model="scheduleForm.startTime"
+            format="HH:mm"
+            value-format="HH:mm"
+            placeholder="选择开始时间"
+            :disabled="activeScheduleIsHabit"
+            style="width: 100%;"
+          ></el-time-picker>
         </el-form-item>
         <el-form-item label="预计持续时间">
-          <el-input-number v-model="scheduleForm.durationMinutes" :min="1" :max="activeScheduleSlot ? activeScheduleSlot.duration : 999" :disabled="activeScheduleIsHabit"></el-input-number>
+          <el-input-number v-model="scheduleForm.durationMinutes" :min="1" :max="scheduleMaxDuration" :disabled="activeScheduleIsHabit"></el-input-number>
+          <span v-if="scheduleForm.startTime" class="habit-end-time">结束 {{ addMinutesToTime(scheduleForm.startTime, scheduleForm.durationMinutes) || '跨日' }}</span>
           <div v-if="activeScheduleIsHabit" class="day-subtitle">习惯实例的时间和时长请在“习惯”栏目统一修改。</div>
         </el-form-item>
         <el-form-item label="备注">
@@ -2623,7 +2593,7 @@
 
   <script src="./vendor/vue.global.prod.js"></script>
   <script src="./vendor/element-plus.full.min.js"></script>
-  <script src="./app.js?v=calendar-jump-20260616-3"></script>
+  <script src="./app.js?v=dynamic-daily-schedule-20260723-9"></script>
 </body>
 </html>
 
