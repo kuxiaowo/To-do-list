@@ -451,6 +451,51 @@ class ProjectWorkflowTests(unittest.TestCase):
         self.assertEqual(item['startTime'], '08:07')
         self.assertEqual(item['endTime'], '08:33')
 
+    def test_completed_schedule_item_does_not_conflict_with_active_item(self):
+        token, _ = self.register_user('completed-conflict-user')
+        date_key = '2026-06-22'
+        completed_task = self.create_task(token, 'task-completed-conflict')
+        active_task = self.create_task(token, 'task-active-conflict')
+        completed_item_id, _ = self.create_schedule_item(token, completed_task['id'], date_key, duration=30)
+        active_item_id, _ = self.create_schedule_item(token, active_task['id'], date_key, duration=30)
+
+        status, payload = self.request(
+            'GET',
+            f'/api/schedule-items?from={date_key}&to={date_key}',
+            token=token,
+        )
+        self.assertEqual(status, HTTPStatus.OK, payload)
+        overlapping = {
+            item['id']: item
+            for item in payload['items']
+            if item['id'] in {completed_item_id, active_item_id}
+        }
+        self.assertEqual(set(overlapping), {completed_item_id, active_item_id})
+        self.assertTrue(all(item['hasConflict'] for item in overlapping.values()))
+
+        status, payload = self.request('PUT', f"/api/tasks/{completed_task['id']}", {
+            **completed_task,
+            'completed': True,
+        }, token=token)
+        self.assertEqual(status, HTTPStatus.OK, payload)
+
+        status, payload = self.request(
+            'GET',
+            f'/api/schedule-items?from={date_key}&to={date_key}',
+            token=token,
+        )
+        self.assertEqual(status, HTTPStatus.OK, payload)
+        overlapping = {
+            item['id']: item
+            for item in payload['items']
+            if item['id'] in {completed_item_id, active_item_id}
+        }
+        self.assertEqual(set(overlapping), {completed_item_id, active_item_id})
+        self.assertTrue(overlapping[completed_item_id]['completed'])
+        self.assertFalse(overlapping[active_item_id]['completed'])
+        self.assertTrue(all(not item['hasConflict'] for item in overlapping.values()))
+        self.assertTrue(all(item['conflictIds'] == [] for item in overlapping.values()))
+
     def test_feedback_limits_admin_reply_and_permissions(self):
         admin_token, admin_user = self.register_user('admin', name='Admin')
         self.make_admin(admin_user['id'])

@@ -1476,6 +1476,8 @@ def annotate_schedule_conflicts(items: list[dict]) -> list[dict]:
     for item in items:
         item['conflictIds'] = []
         item['hasConflict'] = False
+        if item.get('completed'):
+            continue
         by_date.setdefault(str(item.get('date', '')), []).append(item)
 
     for day_items in by_date.values():

@@ -737,7 +737,8 @@ createApp({
       return this.activeHabits.length;
     },
     scheduleConflictTypes() {
-      const itemsById = new Map(this.scheduleItems.map(item => [item.id, item]));
+      const activeItems = this.scheduleItems.filter(item => !item.completed);
+      const itemsById = new Map(activeItems.map(item => [item.id, item]));
       const entities = new Map();
       const adjacency = new Map();
       const entityKey = item => item.habitId
@@ -754,8 +755,8 @@ createApp({
         }
         return key;
       };
-      for (const item of this.scheduleItems) ensureEntity(item);
-      for (const item of this.scheduleItems) {
+      for (const item of activeItems) ensureEntity(item);
+      for (const item of activeItems) {
         for (const conflictId of item.conflictIds || []) {
           const conflict = itemsById.get(conflictId);
           if (!conflict) continue;
@@ -831,8 +832,9 @@ createApp({
     activeScheduleConflictItems() {
       if (!this.activeScheduleItemId) return [];
       const item = this.scheduleItems.find(entry => entry.id === this.activeScheduleItemId);
+      if (!item || item.completed) return [];
       const ids = new Set(item && Array.isArray(item.conflictIds) ? item.conflictIds : []);
-      return this.scheduleItems.filter(entry => ids.has(entry.id));
+      return this.scheduleItems.filter(entry => !entry.completed && ids.has(entry.id));
     },
     activeScheduleConflictSummary() {
       return this.activeScheduleConflictItems
@@ -3608,13 +3610,15 @@ createApp({
           component.push(current);
           for (const conflictId of current.conflictIds || []) {
             const conflict = byId.get(conflictId);
-            if (conflict && !visited.has(conflict.id)) stack.push(conflict);
+            if (!current.completed && conflict && !conflict.completed && !visited.has(conflict.id)) {
+              stack.push(conflict);
+            }
           }
         }
         component.sort((left, right) => this.compareScheduleItems(left, right));
         groups.push({
           key: component.map(entry => entry.id).join('::'),
-          hasConflict: component.some(entry => entry.hasConflict),
+          hasConflict: component.length > 1,
           items: component
         });
       }
