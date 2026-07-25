@@ -14,7 +14,7 @@
       document.documentElement.lang = savedLocale === 'en' ? 'en' : 'zh-CN';
     })();
   </script>
-  <link rel="stylesheet" href="./style.css?v=dynamic-daily-schedule-20260723-9" />
+  <link rel="stylesheet" href="./style.css?v=nethub-footer-logo-20260725-1" />
 </head>
 <body>
   <div id="app" v-cloak>
@@ -458,7 +458,13 @@
       </main>
       <footer class="site-credit" aria-label="网站创建与维护者">
         <div class="site-credit-inner">
-          <img class="site-credit-logo" src="./assets/nethub-mark-transparent.png" alt="NetHub 小组图标" />
+          <div class="site-credit-logo-frame">
+            <img
+              class="site-credit-logo"
+              :src="isDarkMode ? './assets/nethub-logo-dark.png' : './assets/nethub-logo-light.png'"
+              alt="NetHub 小组 Logo"
+            />
+          </div>
           <div class="site-credit-copy">
             <span>由 <strong>NetHub</strong> 小组创建与维护</span>
           </div>
