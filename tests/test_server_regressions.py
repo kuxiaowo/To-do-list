@@ -2154,6 +2154,11 @@ class ServerRegressionTests(unittest.TestCase):
         self.assertIn('`${mixedArrangements.size} 个安排与 ${mixedHabits.size} 个习惯发生冲突`', app_js)
         self.assertIn('if (hasArrangements && hasHabits)', app_js)
         self.assertIn("else if (hasHabits)", app_js)
+        self.assertIn('const activeItems = this.scheduleItems.filter(item => !item.completed);', app_js)
+        self.assertIn('if (!item || item.completed) return [];', app_js)
+        self.assertIn('return this.scheduleItems.filter(entry => !entry.completed && ids.has(entry.id));', app_js)
+        self.assertIn('!current.completed && conflict && !conflict.completed', app_js)
+        self.assertIn('hasConflict: component.length > 1', app_js)
 
     def test_admin_user_list_renders_avatar_column(self):
         index_html = INDEX_HTML_PATH.read_text(encoding='utf-8')
