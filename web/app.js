@@ -945,6 +945,9 @@ createApp({
       }
       return days;
     },
+    ddlCalendarWeekCount() {
+      return Math.max(1, Math.ceil(this.ddlCalendarDays.length / 7));
+    },
     avatarText() {
       if (!this.currentUser) return '登';
       const source = this.currentUser.nickname || this.currentUser.name || '?';
