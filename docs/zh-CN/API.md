@@ -1,5 +1,7 @@
 # API 接口文档
 
+[中文](./API.md) | [English](../en/API.md)
+
 本文档描述 `server.py` 提供的 HTTP API。所有接口返回 JSON，除特别说明外，请求体也使用 JSON。
 
 ## 通用约定
@@ -867,10 +869,13 @@ Content-Type: application/json
     { "role": "user", "content": "上一轮用户消息" },
     { "role": "assistant", "content": "上一轮助手回复" }
   ],
+  "locale": "zh-CN",
   "clientNow": "2026-06-20T12:00:00.000Z",
   "timezone": "Asia/Shanghai"
 }
 ```
+
+`locale` 可选值为 `zh-CN` 或 `en`；传入 `en` 时，AI 助手的用户可见回复使用英语。未传时默认使用中文。
 
 响应：
 

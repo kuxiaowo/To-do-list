@@ -1,5 +1,7 @@
 # 安全说明
 
+[中文](./SECURITY.md) | [English](../en/SECURITY.md)
+
 本文档记录当前项目的安全边界、部署建议和剩余注意事项。
 
 ## 服务暴露
@@ -20,7 +22,7 @@
 - JSON API 只接受顶层对象，请求体最大 5 MiB。
 - 任务标题、科目、备注、日期和布尔字段都由后端校验，不只依赖前端。
 - 头像上传限制为 PNG/JPEG/WebP，检查扩展名、声明的 Content-Type 和文件魔数，单个头像最大 2 MiB。
-- 静态文件服务只允许 `index.html`、`app.js`、`style.css`、`vendor/` 和 `assets/`；头像文件名使用白名单校验，拒绝目录穿越。
+- 静态文件服务只允许 `index.html`、`app.js`、`i18n.js`、`style.css`、`vendor/` 和 `assets/`；头像文件名使用白名单校验，拒绝目录穿越。
 
 ## 管理员功能
 

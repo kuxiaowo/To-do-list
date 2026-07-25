@@ -9,7 +9,9 @@
   <script>
     (() => {
       const savedTheme = localStorage.getItem('todo-list-theme-v1') || 'light';
+      const savedLocale = localStorage.getItem('todo-list-locale-v1') || 'zh-CN';
       document.documentElement.dataset.theme = savedTheme === 'dark' ? 'dark' : 'light';
+      document.documentElement.lang = savedLocale === 'en' ? 'en' : 'zh-CN';
     })();
   </script>
   <link rel="stylesheet" href="./style.css?v=dynamic-daily-schedule-20260723-9" />
@@ -148,6 +150,13 @@
             <p>{{ activePage === 'ddl' ? '按截止日期自动排序' : (activePage === 'calendar' ? '用月历查看全部 DDL 任务' : '按开始时间排列每天的任务；重叠安排会标红提醒。') }}</p>
           </div>
           <div class="timeline-header-actions">
+            <label class="language-control">
+              <span>语言</span>
+              <select v-model="locale" aria-label="语言" @change="setLocale(locale)">
+                <option value="zh-CN">中文</option>
+                <option value="en">English</option>
+              </select>
+            </label>
             <div class="toolbar-row theme-toggle-row">
               <el-switch v-model="isDarkMode" active-text="深色模式" inactive-text="浅色模式" @change="setTheme"></el-switch>
             </div>
@@ -475,6 +484,13 @@
         </nav>
         <div class="admin-sidebar-footer">
           <div class="auth-status">当前管理员：{{ currentUser ? currentUser.nickname : '' }}</div>
+          <label class="language-control admin-language-control">
+            <span>语言</span>
+            <select v-model="locale" aria-label="语言" @change="setLocale(locale)">
+              <option value="zh-CN">中文</option>
+              <option value="en">English</option>
+            </select>
+          </label>
           <el-button plain @click="exitAdminMode">返回主页</el-button>
         </div>
       </aside>
@@ -2576,7 +2592,8 @@
 
   <script src="./vendor/vue.global.prod.js"></script>
   <script src="./vendor/element-plus.full.min.js"></script>
-  <script src="./app.js?v=dynamic-daily-schedule-20260723-9"></script>
+  <script src="./i18n.js?v=i18n-20260725-1"></script>
+  <script src="./app.js?v=i18n-20260725-1"></script>
 </body>
 </html>
 

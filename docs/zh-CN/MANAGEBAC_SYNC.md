@@ -1,5 +1,7 @@
 # ManageBac 同步接入说明
 
+[中文](./MANAGEBAC_SYNC.md) | [English](../en/MANAGEBAC_SYNC.md)
+
 ## 设计边界
 
 ManageBac 同步由三个部分组成：

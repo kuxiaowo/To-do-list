@@ -1052,6 +1052,33 @@ body {
   flex-wrap: nowrap;
 }
 
+.language-control {
+  min-height: 32px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 0.86rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.language-control select {
+  min-height: 32px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--panel);
+  color: var(--text);
+  padding: 4px 28px 4px 9px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.language-control select:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
+
 .timeline-title h2 {
   margin: 0;
   font-size: 1.3rem;
@@ -2783,6 +2810,10 @@ body.is-schedule-touch-dragging * {
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+
+.admin-language-control {
+  justify-content: space-between;
 }
 
 .admin-main,

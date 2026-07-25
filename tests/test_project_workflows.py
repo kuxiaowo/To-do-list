@@ -15,7 +15,7 @@ WEB_DIR = Path('web')
 INDEX_HTML_PATH = WEB_DIR / 'index.html'
 APP_JS_PATH = WEB_DIR / 'app.js'
 STYLE_CSS_PATH = WEB_DIR / 'style.css'
-API_DOC_PATH = Path('docs') / 'API.md'
+API_DOC_PATH = Path('docs') / 'zh-CN' / 'API.md'
 
 
 class ProjectWorkflowTests(unittest.TestCase):
@@ -635,7 +635,7 @@ class ProjectWorkflowTests(unittest.TestCase):
 
     def test_api_documentation_mentions_core_endpoints(self):
         api_doc = API_DOC_PATH.read_text(encoding='utf-8')
-        user_guide = Path('docs/USER_GUIDE.md').read_text(encoding='utf-8')
+        user_guide = Path('docs/zh-CN/USER_GUIDE.md').read_text(encoding='utf-8')
         deploy_script = Path('deploy-first-run.sh').read_text(encoding='utf-8')
 
         for endpoint in [
@@ -648,6 +648,11 @@ class ProjectWorkflowTests(unittest.TestCase):
             '/api/feedback',
         ]:
             self.assertIn(endpoint, api_doc)
+
+        english_api_doc = Path('docs/en/API.md').read_text(encoding='utf-8')
+        self.assertIn('/api/tasks', english_api_doc)
+        self.assertIn('[中文](../zh-CN/API.md)', english_api_doc)
+        self.assertIn('[English](../en/API.md)', api_doc)
 
         self.assertIn('TODO_PORT', deploy_script)
         self.assertIn('TODO_ADMIN_NICKNAME', deploy_script)

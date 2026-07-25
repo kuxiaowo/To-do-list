@@ -126,7 +126,7 @@ AVATAR_CONTENT_TYPES = {
 }
 AVATAR_EXTENSIONS = {'png', 'jpg', 'jpeg', 'webp'}
 DEFAULT_AVATAR_COLOR = '#6366f1'
-STATIC_FILE_PATHS = {'/index.html', '/app.js', '/style.css'}
+STATIC_FILE_PATHS = {'/index.html', '/app.js', '/i18n.js', '/style.css'}
 STATIC_DIRECTORY_PREFIXES = ('/vendor/', '/assets/')
 STATIC_GZIP_EXTENSIONS = {'.html', '.css', '.js', '.mjs', '.json', '.txt', '.svg'}
 STATIC_GZIP_MIN_BYTES = 512
@@ -2779,18 +2779,27 @@ class TodoHandler(SimpleHTTPRequestHandler):
         timezone_name: str,
         subject_names: list[str] | None = None,
         task_context: dict | None = None,
+        locale_name: str = 'zh-CN',
     ) -> list[dict]:
         if task_context is None:
             _, task_context = ai_context_tasks(tasks)
         context = {
             'clientNow': client_now,
             'timezone': timezone_name,
+            'locale': locale_name,
             'request': message,
             **ai_subject_context(subject_names or []),
             **task_context,
         }
         return [
-            {'role': 'system', 'content': AI_CHAT_SYSTEM_PROMPT},
+            {
+                'role': 'system',
+                'content': AI_CHAT_SYSTEM_PROMPT + (
+                    '\n\nLanguage requirement: write every user-facing reply in English.'
+                    if locale_name == 'en'
+                    else ''
+                ),
+            },
             *history,
             {
                 'role': 'user',
@@ -2808,18 +2817,27 @@ class TodoHandler(SimpleHTTPRequestHandler):
         timezone_name: str,
         subject_names: list[str] | None = None,
         task_context: dict | None = None,
+        locale_name: str = 'zh-CN',
     ) -> list[dict]:
         if task_context is None:
             _, task_context = ai_context_tasks(tasks)
         context = {
             'clientNow': client_now,
             'timezone': timezone_name,
+            'locale': locale_name,
             'request': message,
             **ai_subject_context(subject_names or []),
             **task_context,
         }
         return [
-            {'role': 'system', 'content': AI_STREAM_SYSTEM_PROMPT},
+            {
+                'role': 'system',
+                'content': AI_STREAM_SYSTEM_PROMPT + (
+                    '\n\nLanguage requirement: write every user-facing reply in English.'
+                    if locale_name == 'en'
+                    else ''
+                ),
+            },
             *history,
             {
                 'role': 'user',
@@ -2879,12 +2897,14 @@ class TodoHandler(SimpleHTTPRequestHandler):
         rejected_actions: list[dict],
         subject_names: list[str] | None = None,
         task_context: dict | None = None,
+        locale_name: str = 'zh-CN',
     ) -> list[dict]:
         if task_context is None:
             _, task_context = ai_context_tasks(tasks)
         context = {
             'clientNow': client_now,
             'timezone': timezone_name,
+            'locale': locale_name,
             'request': message,
             **ai_subject_context(subject_names or []),
             **task_context,
@@ -2898,7 +2918,14 @@ class TodoHandler(SimpleHTTPRequestHandler):
             },
         }
         return [
-            {'role': 'system', 'content': AI_REPAIR_SYSTEM_PROMPT},
+            {
+                'role': 'system',
+                'content': AI_REPAIR_SYSTEM_PROMPT + (
+                    '\n\nLanguage requirement: write every user-facing reply in English.'
+                    if locale_name == 'en'
+                    else ''
+                ),
+            },
             *history,
             {
                 'role': 'user',
@@ -2920,6 +2947,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
         rejected_actions: list[dict],
         subject_names: list[str] | None = None,
         task_context: dict | None = None,
+        locale_name: str = 'zh-CN',
     ) -> tuple[str, list[dict], list[dict]] | None:
         if not rejected_actions:
             return None
@@ -2934,6 +2962,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
             rejected_actions,
             subject_names or [],
             task_context,
+            locale_name,
         )
         self.ensure_ai_token_available(user_id)
         content = self.call_deepseek_chat_recorded(repair_messages, user_id, 'repair')
@@ -2944,7 +2973,10 @@ class TodoHandler(SimpleHTTPRequestHandler):
         repair_reply = str(repair_payload.get('reply', '') or '').strip()
         repair_actions, repair_rejected = normalize_ai_actions(repair_payload.get('actions'), visible_tasks, subject_names or [])
         if not repair_reply:
-            repair_reply = '我还需要更明确的信息。' if not repair_actions else '我修正好了可审批的操作。'
+            if locale_name == 'en':
+                repair_reply = 'I need more specific information.' if not repair_actions else 'I corrected the actions for your approval.'
+            else:
+                repair_reply = '我还需要更明确的信息。' if not repair_actions else '我修正好了可审批的操作。'
         return repair_reply[:2000], repair_actions, repair_rejected
 
     def stream_deepseek_chat(self, messages: list[dict]):
@@ -4353,6 +4385,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
 
         client_now = str(payload.get('clientNow', '') or '').strip()[:40]
         timezone_name = str(payload.get('timezone', 'Asia/Shanghai') or 'Asia/Shanghai').strip()[:64]
+        locale_name = 'en' if payload.get('locale') == 'en' else 'zh-CN'
         history = self.normalize_ai_history(payload.get('history'))
         with get_db() as conn:
             tasks, task_context = self.fetch_ai_context_tasks_for_user(conn, int(user['id']))
@@ -4366,6 +4399,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
             timezone_name,
             subject_names,
             task_context=task_context,
+            locale_name=locale_name,
         )
         try:
             content = self.call_deepseek_chat_recorded(messages, int(user['id']), 'chat')
@@ -4386,7 +4420,11 @@ class TodoHandler(SimpleHTTPRequestHandler):
         if parse_error:
             return self.write_json({
                 'ok': True,
-                'reply': 'AI 返回的格式不是可执行 JSON，我没有生成任何操作。',
+                'reply': (
+                    'The AI response was not valid executable JSON, so no actions were generated.'
+                    if locale_name == 'en'
+                    else 'AI 返回的格式不是可执行 JSON，我没有生成任何操作。'
+                ),
                 'actions': [],
                 'rejectedActions': [{'index': 0, 'reason': parse_error}],
             })
@@ -4396,7 +4434,10 @@ class TodoHandler(SimpleHTTPRequestHandler):
         raw_actions = ai_payload.get('actions')
         actions, rejected = normalize_ai_actions(raw_actions, visible_tasks, subject_names)
         if not reply:
-            reply = '我整理好了可审批的操作。' if actions else '我还需要更明确的信息。'
+            if locale_name == 'en':
+                reply = 'I prepared actions for your approval.' if actions else 'I need more specific information.'
+            else:
+                reply = '我整理好了可审批的操作。' if actions else '我还需要更明确的信息。'
         if rejected:
             try:
                 repaired = self.repair_ai_response(
@@ -4411,6 +4452,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
                     rejected,
                     subject_names,
                     task_context=task_context,
+                    locale_name=locale_name,
                 )
             except RuntimeError as error:
                 repaired = None
@@ -4450,6 +4492,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
 
         client_now = str(payload.get('clientNow', '') or '').strip()[:40]
         timezone_name = str(payload.get('timezone', 'Asia/Shanghai') or 'Asia/Shanghai').strip()[:64]
+        locale_name = 'en' if payload.get('locale') == 'en' else 'zh-CN'
         history = self.normalize_ai_history(payload.get('history'))
         with get_db() as conn:
             tasks, task_context = self.fetch_ai_context_tasks_for_user(conn, int(user['id']))
@@ -4463,6 +4506,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
             timezone_name,
             subject_names,
             task_context=task_context,
+            locale_name=locale_name,
         )
         self.start_sse()
         full_content = ''
@@ -4505,7 +4549,10 @@ class TodoHandler(SimpleHTTPRequestHandler):
             if parse_error:
                 rejected.append({'index': 0, 'reason': parse_error})
             if not reply:
-                reply = '我整理好了可审批的操作。' if actions else '我还需要更明确的信息。'
+                if locale_name == 'en':
+                    reply = 'I prepared actions for your approval.' if actions else 'I need more specific information.'
+                else:
+                    reply = '我整理好了可审批的操作。' if actions else '我还需要更明确的信息。'
             if rejected:
                 try:
                     repaired = self.repair_ai_response(
@@ -4520,6 +4567,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
                         rejected,
                         subject_names,
                         task_context=task_context,
+                        locale_name=locale_name,
                     )
                 except RuntimeError as error:
                     repaired = None
