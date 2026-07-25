@@ -62,23 +62,19 @@
         </div>
 
         <section v-if="showTaskPoolSection" class="summary-section">
-          <h3>
-            <span>待安排</span>
-            <span class="day-subtitle">{{ unscheduledCount }} 项</span>
-          </h3>
-          <p class="summary-subtitle">尚未确定截止时间，或需要灵活安排的任务。</p>
           <div class="summary-card" data-guide="task-pool">
             <div class="summary-card-header">
-              <div class="summary-card-title">按优先级排序</div>
+              <div class="summary-card-heading">
+                <div class="summary-card-title">待安排</div>
+                <div class="summary-card-description">未设置截止时间的任务</div>
+              </div>
               <el-button
-                v-if="activePage === 'daily'"
                 size="small"
                 type="primary"
                 plain
                 :disabled="!currentUser"
                 @click="openPoolTaskCreateDialog"
               >新增</el-button>
-              <span v-else class="day-subtitle">{{ unscheduledCount }} 项</span>
             </div>
             <template v-if="activePoolTasks.length">
               <div
@@ -111,17 +107,12 @@
         </section>
 
         <section v-if="showHabitPoolSection" class="summary-section habit-pool-section">
-          <h3>
-            <span>习惯池</span>
-            <span class="day-subtitle">{{ habitCount }} 项</span>
-          </h3>
-          <p class="summary-subtitle">按星期、开始时间和持续时长自动同步。</p>
           <div v-if="habitSyncConflicts.length" class="habit-conflict-banner">
             有 {{ habitSyncConflicts.length }} 个习惯日期未能同步。
           </div>
           <div class="summary-card">
             <div class="summary-card-header">
-              <div class="summary-card-title">习惯列表</div>
+              <div class="summary-card-title">习惯池</div>
               <el-button size="small" type="primary" plain :disabled="!currentUser" @click="openHabitDialog()">新增</el-button>
             </div>
             <template v-if="activeHabits.length">
@@ -146,7 +137,7 @@
         </div>
       </aside>
 
-      <main class="timeline-area">
+      <main class="timeline-area" :class="{ 'is-calendar-page': activePage === 'calendar' }">
         <div class="timeline-header">
           <div class="timeline-title">
             <div class="page-nav" data-guide="page-nav">
@@ -296,7 +287,7 @@
             <el-button plain @click="shiftDdlCalendarMonth(1)">下月</el-button>
           </div>
           <div class="ddl-calendar-panel">
-            <div class="ddl-calendar-grid">
+            <div class="ddl-calendar-grid" :style="{ '--ddl-calendar-week-count': ddlCalendarWeekCount }">
               <div v-for="weekday in ddlCalendarWeekdays" :key="weekday" class="ddl-calendar-weekday">{{ weekday }}</div>
               <section
                 v-for="day in ddlCalendarDays"
@@ -304,6 +295,7 @@
                 class="ddl-calendar-day"
                 :class="{ 'is-outside-month': !day.isCurrentMonth, 'is-today': day.isToday, 'is-selected': day.isSelected }"
                 :data-day="day.key"
+                @click="jumpDdlCalendarDayToTimeline(day.key)"
               >
                 <button
                   class="ddl-calendar-jump-button"
@@ -320,7 +312,7 @@
                     class="ddl-calendar-task"
                     :class="[priorityClass(task.priority), { completed: task.completed }]"
                     :title="`${formatTime(task.dueAt)} ${task.title}`"
-                    @click="openDdlCalendarTask(task)"
+                    @click.stop="openDdlCalendarTask(task)"
                   >
                     <span class="ddl-calendar-task-time">{{ formatTime(task.dueAt) }}</span>
                     <span class="ddl-calendar-task-title">{{ task.title }}</span>
@@ -407,9 +399,6 @@
                       v-if="isScheduleInsertIndex(day, visibleScheduleItemsForDate(day.key).length)"
                       class="schedule-insert-line"
                     ></div>
-                    <div v-if="!visibleScheduleItemsForDate(day.key).length" class="schedule-day-empty">
-                      拖入任务或点击右上角“+”
-                    </div>
                   </div>
 
                 </div>
@@ -1284,14 +1273,12 @@
                 </div>
               </div>
               <section v-if="showTaskPoolSection" class="summary-section">
-                <h3>
-                  <span>待安排</span>
-                  <span class="day-subtitle">{{ unscheduledCount }} 项</span>
-                </h3>
-                <p class="summary-subtitle">尚未确定截止时间，或需要灵活安排的任务。</p>
                 <div class="summary-card">
                   <div class="summary-card-header">
-                    <div class="summary-card-title">按优先级排序</div>
+                    <div class="summary-card-heading">
+                      <div class="summary-card-title">待安排</div>
+                      <div class="summary-card-description">未设置截止时间的任务</div>
+                    </div>
                     <span class="day-subtitle">{{ unscheduledCount }} 项</span>
                   </div>
                   <div v-if="activePoolTasks.length">
@@ -1314,17 +1301,12 @@
                 </div>
               </section>
               <section v-if="showHabitPoolSection" class="summary-section habit-pool-section">
-                <h3>
-                  <span>习惯池</span>
-                  <span class="day-subtitle">{{ habitCount }} 项</span>
-                </h3>
-                <p class="summary-subtitle">按星期、开始时间和持续时长自动同步。</p>
                 <div v-if="habitSyncConflicts.length" class="habit-conflict-banner">
                   有 {{ habitSyncConflicts.length }} 个习惯日期未能同步。
                 </div>
                 <div class="summary-card">
                   <div class="summary-card-header">
-                    <div class="summary-card-title">习惯列表</div>
+                    <div class="summary-card-title">习惯池</div>
                     <span class="day-subtitle">后台只读</span>
                   </div>
                   <template v-if="activeHabits.length">
@@ -1348,7 +1330,7 @@
               </section>
             </aside>
 
-            <main class="timeline-area">
+            <main class="timeline-area" :class="{ 'is-calendar-page': activePage === 'calendar' }">
               <div class="timeline-header">
                 <div class="timeline-title">
                   <div class="page-nav">
@@ -1406,7 +1388,7 @@
                   <el-button plain @click="shiftDdlCalendarMonth(1)">下月</el-button>
                 </div>
                 <div class="ddl-calendar-panel">
-                  <div class="ddl-calendar-grid">
+                  <div class="ddl-calendar-grid" :style="{ '--ddl-calendar-week-count': ddlCalendarWeekCount }">
                     <div v-for="weekday in ddlCalendarWeekdays" :key="weekday" class="ddl-calendar-weekday">{{ weekday }}</div>
                     <section
                       v-for="day in ddlCalendarDays"
@@ -1414,6 +1396,7 @@
                       class="ddl-calendar-day"
                       :class="{ 'is-outside-month': !day.isCurrentMonth, 'is-today': day.isToday, 'is-selected': day.isSelected }"
                       :data-day="day.key"
+                      @click="jumpDdlCalendarDayToTimeline(day.key)"
                     >
                       <button
                         class="ddl-calendar-jump-button"
