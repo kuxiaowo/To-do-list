@@ -28,6 +28,7 @@ const AVATAR_OUTPUT_SIZE = 512;
 const AVATAR_CROP_SIZE = 260;
 const AVATAR_ALLOWED_TYPES = ['image/png', 'image/jpeg', 'image/webp'];
 const DEFAULT_AVATAR_COLOR = '#6366f1';
+const WEEKDAY_TEXT_EN = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const AVATAR_QUICK_COLORS = [
   '#6366f1',
   '#0ea5e9',
@@ -172,6 +173,7 @@ createApp({
       sidebarCollapsed: typeof window !== 'undefined' && window.innerWidth <= SIDEBAR_AUTO_COLLAPSE_WIDTH,
       showCompleted: false,
       isDarkMode: (localStorage.getItem(THEME_STORAGE_KEY) || 'light') === 'dark',
+      locale: window.TodoI18n ? window.TodoI18n.getLocale() : 'zh-CN',
       activePage: 'ddl',
       ddlCalendarMonthKey: '',
       pageViewDateKeys: { ddl: '', calendar: '', daily: '' },
@@ -918,10 +920,13 @@ createApp({
     },
     ddlCalendarTitle() {
       const monthDate = this.parseDateKey(this.ddlCalendarMonthKey || this.currentViewDateKey || this.formatDateKey(new Date()));
+      if (this.locale === 'en') {
+        return monthDate.toLocaleDateString('en-US', { year: 'numeric', month: 'long' });
+      }
       return `${monthDate.getFullYear()} 年 ${monthDate.getMonth() + 1} 月`;
     },
     ddlCalendarWeekdays() {
-      return ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+      return this.locale === 'en' ? WEEKDAY_TEXT_EN : WEEKDAY_TEXT;
     },
     ddlCalendarDays() {
       const monthDate = this.parseDateKey(this.ddlCalendarMonthKey || this.currentViewDateKey || this.formatDateKey(new Date()));
@@ -1042,6 +1047,7 @@ createApp({
     }
   },
   async mounted() {
+    if (window.TodoI18n) window.TodoI18n.mount(this.locale);
     this.applyTheme();
     this.currentViewDateKey = this.formatDateKey(new Date());
     this.pageViewDateKeys.ddl = this.currentViewDateKey;
@@ -1065,6 +1071,7 @@ createApp({
     });
   },
   beforeUnmount() {
+    if (window.TodoI18n) window.TodoI18n.unmount();
     document.removeEventListener('click', this.closeAccountMenu);
     window.removeEventListener('resize', this.handleViewportResize);
     window.removeEventListener('scroll', this.updateGuideTarget, true);
@@ -1074,6 +1081,9 @@ createApp({
     this.scheduleDragPreview = null;
   },
   methods: {
+    setLocale(value) {
+      this.locale = window.TodoI18n ? window.TodoI18n.setLocale(value) : (value === 'en' ? 'en' : 'zh-CN');
+    },
     applyTheme() {
       const theme = this.isDarkMode ? 'dark' : 'light';
       document.documentElement.dataset.theme = theme;
@@ -1704,6 +1714,7 @@ createApp({
         const payload = await this.readAiChatStream({
           message,
           history,
+          locale: this.locale,
           clientNow: new Date().toISOString(),
           timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai'
         }, text => {
@@ -4516,7 +4527,8 @@ createApp({
     },
     formatDateLabel(dateLike) {
       const date = new Date(dateLike);
-      return `${date.getMonth() + 1}/${date.getDate()} ${WEEKDAY_TEXT[date.getDay()]}`;
+      const weekdays = this.locale === 'en' ? WEEKDAY_TEXT_EN : WEEKDAY_TEXT;
+      return `${date.getMonth() + 1}/${date.getDate()} ${weekdays[date.getDay()]}`;
     },
     formatTime(dateLike) {
       const date = new Date(dateLike);
@@ -4529,6 +4541,15 @@ createApp({
       return `${date.getFullYear()}-${this.pad(date.getMonth() + 1)}-${this.pad(date.getDate())} ${this.pad(date.getHours())}:${this.pad(date.getMinutes())}`;
     },
     relativeLabel(offset) {
+      if (this.locale === 'en') {
+        if (offset === 0) return 'Today';
+        if (offset === 1) return 'Tomorrow';
+        if (offset === 2) return 'In 2 days';
+        if (offset === -1) return 'Yesterday';
+        if (offset === -2) return '2 days ago';
+        if (offset > 0) return `In ${offset} days`;
+        return `${Math.abs(offset)} days ago`;
+      }
       if (offset === 0) return '今天';
       if (offset === 1) return '明天';
       if (offset === 2) return '后天';
@@ -4541,14 +4562,19 @@ createApp({
       return `priority-${priority}`;
     },
     priorityLabel(priority) {
+      if (this.locale === 'en') {
+        return { high: 'High priority', medium: 'Medium priority', low: 'Low priority' }[priority] || 'Uncategorized';
+      }
       return PRIORITY_LABELS[priority] || '未分类';
     },
     weekdayLabel(key) {
-      return WEEKDAY_TEXT[Number(key)] || key;
+      const weekdays = this.locale === 'en' ? WEEKDAY_TEXT_EN : WEEKDAY_TEXT;
+      return weekdays[Number(key)] || key;
     },
     habitWeekdaysLabel(habit) {
       const weekdays = Array.isArray(habit.weekdays) ? habit.weekdays : [];
-      return weekdays.map(key => this.weekdayLabel(key)).join('、') || '未设置';
+      return weekdays.map(key => this.weekdayLabel(key)).join(this.locale === 'en' ? ', ' : '、')
+        || (this.locale === 'en' ? 'Not set' : '未设置');
     },
     openHabitDialog(habit = null) {
       if (this.adminMode) return;

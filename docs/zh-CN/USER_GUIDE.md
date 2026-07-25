@@ -1,5 +1,7 @@
 # 用户功能手册
 
+[中文](./USER_GUIDE.md) | [English](../en/USER_GUIDE.md)
+
 本文档面向 To-Do List Timeline 的普通用户和管理员，说明页面里的主要功能、使用路径和限制。接口细节不在这里展开，需要开发者接口说明时请看 [API.md](./API.md)。
 
 ## 快速开始

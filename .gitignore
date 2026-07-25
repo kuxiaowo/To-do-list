@@ -1,4 +1,5 @@
 /data/
 .env
+__pycache__/
 /managebac-sync-helper/node_modules/
 /managebac-sync-helper/dist/

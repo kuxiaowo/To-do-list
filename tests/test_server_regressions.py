@@ -20,6 +20,7 @@ import server
 WEB_DIR = Path('web')
 INDEX_HTML_PATH = WEB_DIR / 'index.html'
 APP_JS_PATH = WEB_DIR / 'app.js'
+I18N_JS_PATH = WEB_DIR / 'i18n.js'
 STYLE_CSS_PATH = WEB_DIR / 'style.css'
 
 
@@ -124,7 +125,11 @@ class ServerRegressionTests(unittest.TestCase):
         status, headers, body = self.raw_request('GET', '/')
         self.assertEqual(status, 200)
         self.assertIn(b'app.js', body)
+        self.assertIn(b'i18n.js?v=i18n-20260725-2', body)
         self.assertIn(b'style.css', body)
+        self.assertEqual(body.count(b'<span>Language</span>'), 2)
+        self.assertEqual(body.count(b'aria-label="Language"'), 2)
+        self.assertNotIn('aria-label="语言"'.encode(), body)
         self.assertEqual(headers.get('X-Content-Type-Options'), 'nosniff')
         self.assertEqual(headers.get('X-Frame-Options'), 'DENY')
         self.assertEqual(headers.get('Cache-Control'), 'no-cache')
@@ -133,6 +138,16 @@ class ServerRegressionTests(unittest.TestCase):
         status, headers, body = self.raw_request('GET', '/app.js')
         self.assertEqual(status, 200)
         self.assertIn(b'MANAGEBAC_INSTALLER_DOWNLOAD_URL', body)
+        self.assertEqual(headers.get('Cache-Control'), 'no-cache')
+
+        status, headers, body = self.raw_request('GET', '/i18n.js')
+        self.assertEqual(status, 200)
+        self.assertIn(b'todo-list-locale-v1', body)
+        self.assertIn(b'TodoI18n', body)
+        self.assertIn('未设置截止时间的任务'.encode(), body)
+        self.assertIn(b'Tasks without a due date', body)
+        self.assertIn(b"translateValue(source, 'en')", body)
+        self.assertIn(b'current !== source && current !== english', body)
         self.assertEqual(headers.get('Cache-Control'), 'no-cache')
 
         status, headers, body = self.raw_request(
@@ -538,6 +553,38 @@ class ServerRegressionTests(unittest.TestCase):
         self.assertEqual(rejected, [])
         self.assertEqual(actions[0]['task']['subject'], 'Physics')
         self.assertEqual(actions[1]['task']['subject'], '天文学')
+
+    def test_ai_stream_prompt_respects_english_locale(self):
+        messages = server.TodoHandler.build_ai_stream_messages(
+            None,
+            'Summarize my tasks',
+            [],
+            [],
+            '2026-06-18T12:00:00Z',
+            'Asia/Shanghai',
+            [],
+            locale_name='en',
+        )
+        self.assertIn('write every user-facing reply in English', messages[0]['content'])
+        context = self.ai_request_context(messages)
+        self.assertEqual(context['locale'], 'en')
+
+        repair_messages = server.TodoHandler.build_ai_repair_messages(
+            None,
+            'Summarize my tasks',
+            [],
+            [],
+            '2026-06-18T12:00:00Z',
+            'Asia/Shanghai',
+            '',
+            [],
+            [{'index': 0, 'reason': 'invalid'}],
+            [],
+            locale_name='en',
+        )
+        self.assertIn('write every user-facing reply in English', repair_messages[0]['content'])
+        repair_context = self.ai_request_context(repair_messages)
+        self.assertEqual(repair_context['locale'], 'en')
 
     def test_ai_prompts_explain_subject_template_matching(self):
         prompts = [
