@@ -125,8 +125,11 @@ class ServerRegressionTests(unittest.TestCase):
         status, headers, body = self.raw_request('GET', '/')
         self.assertEqual(status, 200)
         self.assertIn(b'app.js', body)
-        self.assertIn(b'i18n.js', body)
+        self.assertIn(b'i18n.js?v=i18n-20260725-2', body)
         self.assertIn(b'style.css', body)
+        self.assertEqual(body.count(b'<span>Language</span>'), 2)
+        self.assertEqual(body.count(b'aria-label="Language"'), 2)
+        self.assertNotIn('aria-label="语言"'.encode(), body)
         self.assertEqual(headers.get('X-Content-Type-Options'), 'nosniff')
         self.assertEqual(headers.get('X-Frame-Options'), 'DENY')
         self.assertEqual(headers.get('Cache-Control'), 'no-cache')
@@ -143,6 +146,8 @@ class ServerRegressionTests(unittest.TestCase):
         self.assertIn(b'TodoI18n', body)
         self.assertIn('未设置截止时间的任务'.encode(), body)
         self.assertIn(b'Tasks without a due date', body)
+        self.assertIn(b"translateValue(source, 'en')", body)
+        self.assertIn(b'current !== source && current !== english', body)
         self.assertEqual(headers.get('Cache-Control'), 'no-cache')
 
         status, headers, body = self.raw_request(

@@ -806,8 +806,8 @@
     .map(([source, target]) => buildTemplate(source, target))
     .filter(Boolean);
 
-  function translateNormalized(value) {
-    if (locale !== 'en' || !value) return value;
+  function translateNormalized(value, targetLocale = locale) {
+    if (targetLocale !== 'en' || !value) return value;
     if (TRANSLATIONS[value]) return TRANSLATIONS[value];
     for (const template of templateTranslations) {
       const match = value.match(template.regex);
@@ -819,10 +819,10 @@
     return value;
   }
 
-  function translateValue(value) {
+  function translateValue(value, targetLocale = locale) {
     const normalized = normalize(value);
     if (!normalized) return value;
-    const translated = translateNormalized(normalized);
+    const translated = translateNormalized(normalized, targetLocale);
     const leading = String(value).match(/^\s*/)?.[0] || '';
     const trailing = String(value).match(/\s*$/)?.[0] || '';
     return leading + translated + trailing;
@@ -835,13 +835,13 @@
       source = current;
       originalText.set(node, source);
     } else {
-      const expected = locale === 'en' ? translateValue(source) : source;
-      if (current !== expected) {
+      const english = translateValue(source, 'en');
+      if (current !== source && current !== english) {
         source = current;
         originalText.set(node, source);
       }
     }
-    const next = locale === 'en' ? translateValue(source) : source;
+    const next = translateValue(source, locale);
     if (current !== next) node.nodeValue = next;
   }
 
@@ -859,13 +859,13 @@
         source = current;
         originals[attribute] = source;
       } else {
-        const expected = locale === 'en' ? translateValue(source) : source;
-        if (current !== expected) {
+        const english = translateValue(source, 'en');
+        if (current !== source && current !== english) {
           source = current;
           originals[attribute] = source;
         }
       }
-      const next = locale === 'en' ? translateValue(source) : source;
+      const next = translateValue(source, locale);
       if (current !== next) element.setAttribute(attribute, next);
     }
   }
