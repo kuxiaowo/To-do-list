@@ -113,7 +113,7 @@ body {
   border-top: 1px solid var(--line);
   display: flex;
   justify-content: center;
-  padding: 6px 0 0;
+  padding: 4px 0 0;
 }
 
 .app-shell.sidebar-collapsed > .site-credit {
@@ -123,26 +123,26 @@ body {
 .site-credit-inner {
   display: inline-flex;
   align-items: center;
-  gap: 10px;
-  min-height: 90px;
+  gap: 8px;
+  min-height: 70px;
   padding: 3px 8px;
   color: var(--muted);
 }
 
 .site-credit-logo-frame {
   position: relative;
-  width: 104px;
-  height: 84px;
+  width: 76px;
+  height: 62px;
   overflow: hidden;
-  border-radius: 10px;
+  border-radius: 8px;
   flex: 0 0 auto;
 }
 
 .site-credit-logo {
   position: absolute;
-  top: -20px;
+  top: -13px;
   left: 50%;
-  width: 220px;
+  width: 160px;
   max-width: none;
   height: auto;
   display: block;
