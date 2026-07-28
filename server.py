@@ -401,6 +401,19 @@ def init_db() -> None:
         )
         conn.execute(
             '''
+            CREATE TABLE IF NOT EXISTS habit_instance_exclusions (
+                user_id INTEGER NOT NULL,
+                habit_id TEXT NOT NULL,
+                schedule_date TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(user_id, habit_id, schedule_date),
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+                FOREIGN KEY(habit_id) REFERENCES habits(id) ON DELETE CASCADE
+            )
+            '''
+        )
+        conn.execute(
+            '''
             CREATE TABLE IF NOT EXISTS schedule_template_versions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
@@ -4946,10 +4959,30 @@ class TodoHandler(SimpleHTTPRequestHandler):
             params,
         ).fetchall()
 
+        excluded_dates: set[tuple[str, str]] = set()
+        if habits:
+            active_habit_ids = [str(habit['id']) for habit in habits]
+            placeholders = ','.join('?' for _ in active_habit_ids)
+            rows = conn.execute(
+                f'''
+                SELECT habit_id, schedule_date
+                FROM habit_instance_exclusions
+                WHERE user_id = ? AND habit_id IN ({placeholders})
+                  AND schedule_date >= ? AND schedule_date <= ?
+                ''',
+                [user_id, *active_habit_ids, window_start, window_end],
+            ).fetchall()
+            excluded_dates = {
+                (str(row['habit_id']), str(row['schedule_date']))
+                for row in rows
+            }
+
         conflicts = []
         inserts = []
         for habit in habits:
             for date_key in self.habit_date_keys(habit, window_start, window_end):
+                if (str(habit['id']), date_key) in excluded_dates:
+                    continue
                 existing = conn.execute(
                     '''
                     SELECT id, completed FROM schedule_items
@@ -5150,12 +5183,20 @@ class TodoHandler(SimpleHTTPRequestHandler):
         if not user:
             return
         with get_db() as conn:
+            conn.execute('BEGIN IMMEDIATE')
             existing = conn.execute('SELECT id FROM habits WHERE id = ? AND user_id = ? AND archived = 0', (habit_id, user['id'])).fetchone()
             if not existing:
                 return self.write_json({'error': 'habit not found'}, status=HTTPStatus.NOT_FOUND)
             now = now_iso()
             conn.execute('UPDATE habits SET archived = 1, active = 0, updated_at = ? WHERE id = ? AND user_id = ?', (now, habit_id, user['id']))
-            conn.execute('DELETE FROM schedule_items WHERE user_id = ? AND habit_id = ? AND schedule_date >= ?', (user['id'], habit_id, today_key()))
+            conn.execute(
+                'DELETE FROM schedule_items WHERE user_id = ? AND habit_id = ? AND completed = 0',
+                (user['id'], habit_id),
+            )
+            conn.execute(
+                'DELETE FROM habit_instance_exclusions WHERE user_id = ? AND habit_id = ?',
+                (user['id'], habit_id),
+            )
             self.log_operation(conn, int(user['id']), int(user['id']), 'habit.delete', 'habit', habit_id, {})
             conn.commit()
         return self.write_json({'ok': True})
@@ -5586,6 +5627,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
         if not user:
             return
         with get_db() as conn:
+            conn.execute('BEGIN IMMEDIATE')
             existing = conn.execute(
                 '''
                 SELECT schedule_items.task_id, schedule_items.habit_id, schedule_items.schedule_date,
@@ -5599,9 +5641,16 @@ class TodoHandler(SimpleHTTPRequestHandler):
             if not existing:
                 return self.write_json({'error': 'schedule item not found'}, status=HTTPStatus.NOT_FOUND)
             if existing['habit_id']:
-                return self.write_json({'error': 'habit schedule items must be deleted from the habit'}, status=HTTPStatus.BAD_REQUEST)
-            cursor = conn.execute('DELETE FROM schedule_items WHERE id = ? AND user_id = ?', (item_id, user['id']))
-            if existing['task_pool'] == 'schedule':
+                conn.execute(
+                    '''
+                    INSERT OR IGNORE INTO habit_instance_exclusions
+                    (user_id, habit_id, schedule_date, created_at)
+                    VALUES (?, ?, ?, ?)
+                    ''',
+                    (user['id'], existing['habit_id'], existing['schedule_date'], now_iso()),
+                )
+            conn.execute('DELETE FROM schedule_items WHERE id = ? AND user_id = ?', (item_id, user['id']))
+            if not existing['habit_id'] and existing['task_pool'] == 'schedule':
                 remaining = conn.execute(
                     'SELECT 1 FROM schedule_items WHERE user_id = ? AND task_id = ? LIMIT 1',
                     (user['id'], existing['task_id']),
@@ -5615,7 +5664,12 @@ class TodoHandler(SimpleHTTPRequestHandler):
                 'schedule_item.delete',
                 'schedule_item',
                 item_id,
-                {'taskId': existing['task_id'], 'date': existing['schedule_date'], 'slotLabel': existing['slot_label']},
+                {
+                    'taskId': existing['task_id'],
+                    'habitId': existing['habit_id'],
+                    'date': existing['schedule_date'],
+                    'slotLabel': existing['slot_label'],
+                },
             )
             conn.commit()
         return self.write_json({'ok': True})

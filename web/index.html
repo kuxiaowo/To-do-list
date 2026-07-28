@@ -2585,7 +2585,9 @@
             <el-button v-if="scheduleDialogMode === 'edit'" type="success" plain @click="toggleScheduleComplete">
               {{ scheduleForm.completed ? '取消完成' : '标记完成' }}
             </el-button>
-            <el-button v-if="scheduleDialogMode === 'edit' && !activeScheduleIsHabit" type="danger" plain @click="deleteScheduleItem">删除安排</el-button>
+            <el-button v-if="scheduleDialogMode === 'edit'" type="danger" plain @click="deleteScheduleItem">
+              {{ activeScheduleIsHabit ? '删除习惯任务' : '删除安排' }}
+            </el-button>
           </div>
           <div class="right-actions">
             <el-button @click="scheduleDialogVisible = false">取消</el-button>

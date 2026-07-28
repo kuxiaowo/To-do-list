@@ -420,6 +420,210 @@ class ProjectWorkflowTests(unittest.TestCase):
         self.assertEqual(status, HTTPStatus.OK)
         self.assertFalse(any(item['habitId'] == 'habit-review' for item in payload['items']))
 
+    def test_delete_habit_removes_all_incomplete_instances_and_keeps_completed_history(self):
+        token, user = self.register_user('habit-delete-all-user')
+        today = server.today_key()
+        past = server.add_days_key(today, -1)
+        future = server.add_days_key(today, 1)
+        weekday = server.weekday_for_date(today)
+        status, payload = self.request('POST', '/api/habits', {
+            'id': 'habit-delete-all',
+            'title': 'Delete incomplete habit instances',
+            'subject': 'Math',
+            'weekdays': [weekday],
+            'startTime': '08:00',
+            'durationMinutes': 30,
+            'startDate': today,
+            'endDate': today,
+            'priority': 'medium',
+            'note': '',
+            'active': True,
+        }, token=token)
+        self.assertEqual(status, HTTPStatus.CREATED, payload)
+        task_id = payload['habit']['taskId']
+
+        now = server.now_iso()
+        with server.get_db() as conn:
+            conn.execute(
+                'DELETE FROM schedule_items WHERE user_id = ? AND habit_id = ?',
+                (user['id'], 'habit-delete-all'),
+            )
+            for date_key in (past, today, future):
+                for completed in (0, 1):
+                    suffix = 'complete' if completed else 'incomplete'
+                    conn.execute(
+                        '''
+                        INSERT INTO schedule_items
+                        (id, user_id, task_id, habit_id, schedule_date, slot_key, slot_label,
+                         slot_start, slot_end, item_start, item_end, duration_minutes, sort_order,
+                         note, completed, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, 'Habit', '08:00', '08:30', '08:00', '08:30',
+                                30, 1024, '', ?, ?, ?)
+                        ''',
+                        (
+                            f'instance-{date_key}-{suffix}',
+                            user['id'],
+                            task_id,
+                            'habit-delete-all',
+                            date_key,
+                            f'{date_key}-habit-0800',
+                            completed,
+                            now,
+                            now,
+                        ),
+                    )
+            conn.execute(
+                '''
+                INSERT INTO habit_instance_exclusions
+                (user_id, habit_id, schedule_date, created_at)
+                VALUES (?, ?, ?, ?)
+                ''',
+                (user['id'], 'habit-delete-all', today, now),
+            )
+            conn.commit()
+
+        status, payload = self.request('DELETE', '/api/habits/habit-delete-all', token=token)
+        self.assertEqual(status, HTTPStatus.OK, payload)
+
+        with server.get_db() as conn:
+            remaining = conn.execute(
+                '''
+                SELECT id, completed
+                FROM schedule_items
+                WHERE user_id = ? AND habit_id = ?
+                ORDER BY id
+                ''',
+                (user['id'], 'habit-delete-all'),
+            ).fetchall()
+            archived = conn.execute(
+                'SELECT archived, active FROM habits WHERE user_id = ? AND id = ?',
+                (user['id'], 'habit-delete-all'),
+            ).fetchone()
+            exclusion_count = conn.execute(
+                'SELECT COUNT(*) FROM habit_instance_exclusions WHERE user_id = ? AND habit_id = ?',
+                (user['id'], 'habit-delete-all'),
+            ).fetchone()[0]
+        self.assertEqual(len(remaining), 3)
+        self.assertTrue(all(bool(row['completed']) for row in remaining))
+        self.assertEqual((archived['archived'], archived['active']), (1, 0))
+        self.assertEqual(exclusion_count, 0)
+
+        status, payload = self.request(
+            'GET',
+            f'/api/schedule-items?from={past}&to={future}&syncFrom={today}&syncTo={future}',
+            token=token,
+        )
+        self.assertEqual(status, HTTPStatus.OK, payload)
+        retained = [item for item in payload['items'] if item['habitId'] == 'habit-delete-all']
+        self.assertEqual(len(retained), 3)
+        self.assertTrue(all(item['completed'] for item in retained))
+
+    def test_delete_habit_instance_permanently_skips_only_that_date(self):
+        token, user = self.register_user('habit-instance-delete-user')
+        other_token, _ = self.register_user('habit-instance-delete-other')
+        today = server.today_key()
+        tomorrow = server.add_days_key(today, 1)
+        habit_payload = {
+            'id': 'habit-instance-delete',
+            'title': 'Delete one habit instance',
+            'subject': 'English',
+            'weekdays': sorted({
+                int(server.weekday_for_date(today)),
+                int(server.weekday_for_date(tomorrow)),
+            }),
+            'startTime': '09:00',
+            'durationMinutes': 20,
+            'startDate': today,
+            'endDate': tomorrow,
+            'priority': 'low',
+            'note': '',
+            'active': True,
+        }
+        status, payload = self.request('POST', '/api/habits', habit_payload, token=token)
+        self.assertEqual(status, HTTPStatus.CREATED, payload)
+
+        schedule_path = (
+            f'/api/schedule-items?from={today}&to={tomorrow}'
+            f'&syncFrom={today}&syncTo={tomorrow}'
+        )
+        status, payload = self.request('GET', schedule_path, token=token)
+        self.assertEqual(status, HTTPStatus.OK, payload)
+        instances = {
+            item['date']: item
+            for item in payload['items']
+            if item['habitId'] == 'habit-instance-delete'
+        }
+        self.assertEqual(set(instances), {today, tomorrow})
+
+        today_id = instances[today]['id']
+        status, payload = self.request(
+            'DELETE',
+            f'/api/schedule-items/{today_id}',
+            token=other_token,
+        )
+        self.assertEqual(status, HTTPStatus.NOT_FOUND, payload)
+
+        status, payload = self.request('DELETE', f'/api/schedule-items/{today_id}', token=token)
+        self.assertEqual(status, HTTPStatus.OK, payload)
+        status, payload = self.request('DELETE', f'/api/schedule-items/{today_id}', token=token)
+        self.assertEqual(status, HTTPStatus.NOT_FOUND, payload)
+
+        status, payload = self.request('GET', schedule_path, token=token)
+        self.assertEqual(status, HTTPStatus.OK, payload)
+        instances = [
+            item for item in payload['items']
+            if item['habitId'] == 'habit-instance-delete'
+        ]
+        self.assertEqual([item['date'] for item in instances], [tomorrow])
+
+        status, payload = self.request('PUT', '/api/habits/habit-instance-delete', {
+            **habit_payload,
+            'title': 'Updated habit after one skipped date',
+        }, token=token)
+        self.assertEqual(status, HTTPStatus.OK, payload)
+        status, payload = self.request('GET', schedule_path, token=token)
+        self.assertEqual(status, HTTPStatus.OK, payload)
+        instances = [
+            item for item in payload['items']
+            if item['habitId'] == 'habit-instance-delete'
+        ]
+        self.assertEqual([item['date'] for item in instances], [tomorrow])
+
+        tomorrow_id = instances[0]['id']
+        status, payload = self.request(
+            'PUT',
+            f'/api/schedule-items/{tomorrow_id}',
+            {'completed': True},
+            token=token,
+        )
+        self.assertEqual(status, HTTPStatus.OK, payload)
+        status, payload = self.request(
+            'DELETE',
+            f'/api/schedule-items/{tomorrow_id}',
+            token=token,
+        )
+        self.assertEqual(status, HTTPStatus.OK, payload)
+
+        status, payload = self.request('GET', schedule_path, token=token)
+        self.assertEqual(status, HTTPStatus.OK, payload)
+        self.assertFalse(any(
+            item['habitId'] == 'habit-instance-delete'
+            for item in payload['items']
+        ))
+        with server.get_db() as conn:
+            excluded_dates = {
+                row['schedule_date']
+                for row in conn.execute(
+                    '''
+                    SELECT schedule_date
+                    FROM habit_instance_exclusions
+                    WHERE user_id = ? AND habit_id = ?
+                    ''',
+                    (user['id'], 'habit-instance-delete'),
+                ).fetchall()
+            }
+        self.assertEqual(excluded_dates, {today, tomorrow})
+
     def test_habit_uses_exact_start_time_without_template_slot(self):
         token, _ = self.register_user('exact-habit-user')
         date_key = server.today_key()

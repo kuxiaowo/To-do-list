@@ -906,6 +906,27 @@ class ServerRegressionTests(unittest.TestCase):
             [('08:00', '08:20'), ('08:20', '08:50')],
         )
 
+    def test_habit_instance_exclusion_migration_is_idempotent(self):
+        with server.get_db() as conn:
+            conn.execute('DROP TABLE habit_instance_exclusions')
+            conn.commit()
+
+        server.init_db()
+        server.init_db()
+
+        with server.get_db() as conn:
+            columns = conn.execute(
+                'PRAGMA table_info(habit_instance_exclusions)'
+            ).fetchall()
+        self.assertEqual(
+            [row['name'] for row in columns],
+            ['user_id', 'habit_id', 'schedule_date', 'created_at'],
+        )
+        self.assertEqual(
+            [row['name'] for row in columns if row['pk']],
+            ['user_id', 'habit_id', 'schedule_date'],
+        )
+
     def test_ai_chat_requires_login_and_configured_key(self):
         original_key = os.environ.pop('DEEPSEEK_API_KEY', None)
         try:
@@ -2185,6 +2206,11 @@ class ServerRegressionTests(unittest.TestCase):
         self.assertIn('.daily-board > .timeline-scroll-frame {', style_css)
         self.assertNotIn('min-height: max(360px, calc(100vh - 240px));', style_css)
         self.assertIn('.settings-row', style_css)
+        self.assertIn('const isHabitInstance = this.activeScheduleIsHabit;', app_js)
+        self.assertNotIn(
+            "scheduleDialogMode === 'edit' && !activeScheduleIsHabit",
+            index_html,
+        )
 
     def test_ddl_calendar_is_standalone_and_conflicts_use_group_overlay(self):
         index_html = INDEX_HTML_PATH.read_text(encoding='utf-8')
