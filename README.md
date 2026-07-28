@@ -1,27 +1,37 @@
 <div align="center">
 
-# To-Do List Timeline
+<br>
 
-**A self-hosted study planner that turns deadlines into a practical daily schedule.**
+<img src="./web/assets/favicon.png" alt="To-Do List Timeline logo" width="144" height="144">
 
-[![Tests](https://github.com/kuxiaowo/To-do-list/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/kuxiaowo/To-do-list/actions/workflows/tests.yml)
-[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![Vue 3](https://img.shields.io/badge/Vue-3-42b883?logo=vuedotjs&logoColor=white)](https://vuejs.org/)
-[![SQLite](https://img.shields.io/badge/Database-SQLite-003B57?logo=sqlite&logoColor=white)](https://www.sqlite.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-97CA00)](./LICENSE)
+<h1>To-Do List Timeline</h1>
 
-[![GitHub stars](https://img.shields.io/github/stars/kuxiaowo/To-do-list?style=flat&logo=github&label=Stars)](https://github.com/kuxiaowo/To-do-list/stargazers)
-[![Last commit](https://img.shields.io/github/last-commit/kuxiaowo/To-do-list?logo=git&label=Last%20commit)](https://github.com/kuxiaowo/To-do-list/commits/main)
-[![No build step](https://img.shields.io/badge/Frontend-No%20build%20step-6E40C9)](./docs/en/README.md#development-instructions)
+<p><strong>A self-hosted study planner that turns deadlines into a practical daily schedule.</strong></p>
 
-[**English**](./README.md) | [**简体中文**](./docs/zh-CN/README.md)
+<p>
+  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&amp;logoColor=white" alt="Python 3.10+"></a>
+  <a href="https://vuejs.org/"><img src="https://img.shields.io/badge/Frontend-Vue%203-42b883?logo=vuedotjs&amp;logoColor=white" alt="Vue 3"></a>
+  <a href="https://www.sqlite.org/"><img src="https://img.shields.io/badge/Database-SQLite-003B57?logo=sqlite&amp;logoColor=white" alt="SQLite"></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/License-MIT-8A2BE2" alt="MIT License"></a>
+</p>
 
-[![Read the docs](https://img.shields.io/badge/Docs-Read%20the%20guide-0969DA?logo=readthedocs&logoColor=white)](./docs/en/README.md)
-[![API reference](https://img.shields.io/badge/API-Reference-00897B?logo=bookstack&logoColor=white)](./docs/en/API.md)
-[![User guide](https://img.shields.io/badge/Guide-User%20manual-F57C00?logo=gitbook&logoColor=white)](./docs/en/USER_GUIDE.md)
-[![Security](https://img.shields.io/badge/Security-Notes-C62828?logo=securityscorecard&logoColor=white)](./docs/en/SECURITY.md)
+<p>
+  <a href="https://github.com/kuxiaowo/To-do-list/actions/workflows/tests.yml"><img src="https://github.com/kuxiaowo/To-do-list/actions/workflows/tests.yml/badge.svg?branch=main" alt="Tests"></a>
+  <a href="https://github.com/kuxiaowo/To-do-list/stargazers"><img src="https://img.shields.io/github/stars/kuxiaowo/To-do-list?style=flat&amp;logo=github&amp;label=Stars" alt="GitHub stars"></a>
+  <a href="https://github.com/kuxiaowo/To-do-list/commits/main"><img src="https://img.shields.io/github/last-commit/kuxiaowo/To-do-list?logo=git&amp;label=Last%20commit" alt="Last commit"></a>
+</p>
+
+<p><strong>English</strong> | <a href="./README.zh-CN.md">简体中文</a></p>
+
+<p>
+  <a href="./docs/en/README.md"><img src="https://img.shields.io/badge/Docs-Setup%20guide-0969DA?logo=readthedocs&amp;logoColor=white" alt="Setup guide"></a>
+  <a href="./docs/en/API.md"><img src="https://img.shields.io/badge/API-Reference-00897B?logo=bookstack&amp;logoColor=white" alt="API reference"></a>
+  <a href="./docs/en/USER_GUIDE.md"><img src="https://img.shields.io/badge/Guide-User%20manual-F57C00?logo=gitbook&amp;logoColor=white" alt="User guide"></a>
+</p>
 
 </div>
+
+---
 
 ## Overview
 
