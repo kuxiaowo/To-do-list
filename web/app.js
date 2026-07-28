@@ -4184,7 +4184,12 @@ createApp({
     },
     deleteScheduleItem() {
       if (!this.activeScheduleItemId) return;
-      ElementPlus.ElMessageBox.confirm('删除这个安排？不会删除原任务。', '删除安排', {
+      const isHabitInstance = this.activeScheduleIsHabit;
+      const message = isHabitInstance
+        ? '删除这个习惯任务？只删除本次记录，不影响该习惯的其他日期。'
+        : '删除这个安排？不会删除原任务。';
+      const title = isHabitInstance ? '删除习惯任务' : '删除安排';
+      ElementPlus.ElMessageBox.confirm(message, title, {
         confirmButtonText: '删除',
         cancelButtonText: '取消',
         type: 'warning'
@@ -4193,7 +4198,7 @@ createApp({
           await this.apiJson(`${SCHEDULE_API}/${this.activeScheduleItemId}`, { method: 'DELETE' });
           this.scheduleDialogVisible = false;
           await this.loadScheduleItems();
-          ElementPlus.ElMessage.success('安排已删除。');
+          ElementPlus.ElMessage.success(isHabitInstance ? '习惯任务已删除。' : '安排已删除。');
         } catch (error) {
           ElementPlus.ElMessage.error(`删除失败：${error.message}`);
         }
@@ -4650,7 +4655,7 @@ createApp({
     deleteHabit(habit) {
       if (!habit || !this.currentUser) return;
       ElementPlus.ElMessageBox.confirm(
-        `删除习惯「${habit.title}」？今天及未来的相关安排会一起删除，过去记录保留。`,
+        `删除习惯「${habit.title}」？所有未完成的相关安排会一起删除，已完成记录保留。`,
         '删除习惯',
         {
           confirmButtonText: '删除',

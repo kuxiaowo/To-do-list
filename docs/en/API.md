@@ -542,6 +542,8 @@ Response:
 }
 ```
 
+Note: Deleting a regular daily schedule does not delete its source task. Deleting a habit instance permanently skips that date for the habit without affecting the habit definition or its other dates; subsequent synchronization will not recreate it.
+
 ## Time grid configuration interface
 
 ### Get time grid configuration
@@ -775,7 +777,7 @@ Response:
 }
 ```
 
-Note: Deleting a habit will archive the habit and delete relevant daily schedules for today and the future.
+Note: Deleting a habit archives it and deletes all incomplete instances across every date. Completed instances are retained as historical records.
 
 ## User feedback interface
 
