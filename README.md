@@ -73,6 +73,7 @@ Python 3.10 or newer is required.
 ```bash
 git clone https://github.com/kuxiaowo/To-do-list.git
 cd To-do-list
+python -m pip install -r requirements.txt
 python server.py
 ```
 
@@ -86,12 +87,8 @@ environment example first:
 cp .env.example .env
 ```
 
-If you enable Alibaba Cloud OSS downloads for the ManageBac Helper installer,
-install the optional dependency:
-
-```bash
-python -m pip install -r requirements.txt
-```
+Pillow is used to compress and migrate avatars; the Alibaba Cloud SDK supports
+the optional ManageBac Helper OSS download.
 
 See the [English documentation](./docs/en/README.md) or
 [中文文档](./docs/zh-CN/README.md) for complete configuration and deployment
@@ -110,7 +107,7 @@ instructions.
 │   ├── en/                    # English documentation
 │   └── zh-CN/                 # Simplified Chinese documentation
 ├── deploy-first-run.sh        # First-run Linux deployment helper
-├── requirements.txt           # Optional OSS dependency
+├── requirements.txt           # Avatar compression and optional OSS dependencies
 └── LICENSE
 ```
 

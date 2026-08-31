@@ -2,7 +2,7 @@
 
 [中文](../zh-CN/README.md) | [English](./README.md)
 
-A to-do list web application for learning task management. The project uses a static front end, Python standard library HTTP service and SQLite database storage, and does not require the Node.js build process; if you enable OSS installation package download, you need to install the Python dependencies in `requirements.txt`.
+A to-do list web application for learning task management. The project uses a static front end, Python standard library HTTP service and SQLite database storage, and does not require the Node.js build process; `requirements.txt` includes Pillow for avatar migration and the SDK for optional OSS downloads.
 
 ## Function
 
@@ -39,7 +39,7 @@ A to-do list web application for learning task management. The project uses a st
 ├── server.py            # Static file service、API Services and SQLite initialization
 ├── managebac-sync-helper/ # ManageBac local Helper
 ├── deploy-first-run.sh  # Linux First deployment script
-├── requirements.txt     # Optional OSS Download dependencies
+├── requirements.txt     # Avatar compression and optional OSS download dependencies
 ├── .env.example         # Environment variable example
 ├── docs/                # Project documentation separated into zh-CN and en
 ├── LICENSE              # MIT License
@@ -59,14 +59,11 @@ data/
 Make sure Python 3 is installed, then run:
 
 ```bash
+pip install -r requirements.txt
 python server.py
 ```
 
-If you need to enable the OSS pre-signed download of the ManageBac Helper installation package, first install the optional dependencies:
-
-```bash
-pip install -r requirements.txt
-```
+Pillow automatically compresses and migrates old avatars; the Alibaba Cloud SDK supports optional ManageBac Helper OSS pre-signed downloads.
 
 The installation package download interface requires user login. The "Download Statistics" page in the administrator's backend allows you to view the number of generations and configure global or single-user rolling window limits.
 

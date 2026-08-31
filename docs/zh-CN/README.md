@@ -2,7 +2,7 @@
 
 [中文](./README.md) | [English](../en/README.md)
 
-一个面向学习任务管理的待办清单 Web 应用。项目使用静态前端、Python 标准库 HTTP 服务和 SQLite 数据库存储，不需要 Node.js 构建流程；如启用 OSS 安装包下载，需要安装 `requirements.txt` 中的 Python 依赖。
+一个面向学习任务管理的待办清单 Web 应用。项目使用静态前端、Python 标准库 HTTP 服务和 SQLite 数据库存储，不需要 Node.js 构建流程；`requirements.txt` 包含头像迁移所需的 Pillow 和可选 OSS 下载所需的 SDK。
 
 ## 功能
 
@@ -39,7 +39,7 @@
 ├── server.py            # 静态文件服务、API 服务和 SQLite 初始化
 ├── managebac-sync-helper/ # ManageBac 本地 Helper
 ├── deploy-first-run.sh  # Linux 首次部署脚本
-├── requirements.txt     # 可选 OSS 下载依赖
+├── requirements.txt     # 头像压缩与可选 OSS 下载依赖
 ├── .env.example         # 环境变量示例
 ├── docs/                # 按 zh-CN 和 en 分开的项目文档
 ├── LICENSE              # MIT 许可证
@@ -59,14 +59,11 @@ data/
 确保已安装 Python 3，然后在项目根目录运行：
 
 ```bash
+pip install -r requirements.txt
 python server.py
 ```
 
-如果需要启用 ManageBac Helper 安装包的 OSS 预签名下载，先安装可选依赖：
-
-```bash
-pip install -r requirements.txt
-```
+Pillow 用于自动压缩和迁移旧头像；阿里云 SDK 用于可选的 ManageBac Helper OSS 预签名下载。
 
 安装包下载接口需要用户登录。管理员后台的“下载统计”页可以查看生成次数，并配置全局或单用户的滚动窗口限制。
 

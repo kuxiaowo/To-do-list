@@ -21,7 +21,7 @@ This document records the security boundaries, deployment recommendations, and r
 
 - The JSON API only accepts top-level objects, with a maximum request body of 5 MiB.
 - Task title, account, notes, date and Boolean fields are all verified by the backend, not just the frontend.
-- Avatar upload is limited to PNG/JPEG/WebP, checks extension, declared Content-Type and file magic number, maximum single avatar is 2 MiB.
+- Avatar upload is limited to PNG/JPEG/WebP and checks the extension, declared Content-Type, and file signature; the frontend compresses avatars to WebP at up to 256×256, and each avatar is limited to 64 KiB.
 - Static file service only allows `index.html`, `app.js`, `i18n.js`, `style.css`, `vendor/`, and `assets/`; avatar file names use allow-list validation to reject directory traversal.
 
 ## Administrator function

@@ -71,6 +71,7 @@ conda create -n todo-list python=3.10
 conda activate todo-list
 git clone https://github.com/kuxiaowo/To-do-list.git
 cd To-do-list
+python -m pip install -r requirements.txt
 python server.py
 ```
 
@@ -82,11 +83,7 @@ python server.py
 cp .env.example .env
 ```
 
-如果需要通过阿里云 OSS 提供 ManageBac Helper 安装包下载，请安装可选依赖：
-
-```bash
-python -m pip install -r requirements.txt
-```
+依赖中的 Pillow 用于自动压缩和迁移头像；阿里云 SDK 用于可选的 ManageBac Helper OSS 下载。
 
 完整配置和部署方式请阅读[中文部署文档](./docs/zh-CN/README.md)。
 
@@ -103,7 +100,7 @@ python -m pip install -r requirements.txt
 │   ├── en/                    # 英文文档
 │   └── zh-CN/                 # 简体中文文档
 ├── deploy-first-run.sh        # Linux 首次部署脚本
-├── requirements.txt           # 可选 OSS 依赖
+├── requirements.txt           # 头像压缩与可选 OSS 依赖
 └── LICENSE
 ```
 
