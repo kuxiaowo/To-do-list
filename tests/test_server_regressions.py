@@ -15,6 +15,8 @@ import urllib.request
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
+from PIL import Image
+
 import server
 
 WEB_DIR = Path('web')
@@ -2062,6 +2064,44 @@ class ServerRegressionTests(unittest.TestCase):
         self.assertEqual(body['user']['avatarUrl'], '')
         self.assertFalse((server.avatar_dir() / second_filename).exists())
 
+    def test_existing_avatar_migration_compresses_to_webp_once(self):
+        _, user = self.register_user('legacy-avatar-user')
+        old_filename = f'legacy-avatar-{user["id"]}.png'
+        old_path = server.avatar_dir() / old_filename
+        Image.new('RGB', (640, 480), (48, 96, 160)).save(old_path, format='PNG')
+        with server.get_db() as conn:
+            conn.execute(
+                'UPDATE users SET avatar_file = ?, avatar_updated_at = ? WHERE id = ?',
+                (old_filename, '2026-01-01T00:00:00Z', user['id']),
+            )
+            conn.commit()
+
+        server.init_db()
+
+        with server.get_db() as conn:
+            migrated = conn.execute(
+                'SELECT avatar_file, avatar_updated_at FROM users WHERE id = ?',
+                (user['id'],),
+            ).fetchone()
+        new_filename = migrated['avatar_file']
+        new_path = server.avatar_dir() / new_filename
+        self.assertTrue(new_filename.endswith('.webp'))
+        self.assertNotEqual(new_filename, old_filename)
+        self.assertNotEqual(migrated['avatar_updated_at'], '2026-01-01T00:00:00Z')
+        self.assertFalse(old_path.exists())
+        self.assertLessEqual(new_path.stat().st_size, server.MAX_AVATAR_BYTES)
+        with Image.open(new_path) as image:
+            self.assertEqual(image.format, 'WEBP')
+            self.assertLessEqual(max(image.size), 256)
+
+        server.init_db()
+        with server.get_db() as conn:
+            rerun_filename = conn.execute(
+                'SELECT avatar_file FROM users WHERE id = ?',
+                (user['id'],),
+            ).fetchone()['avatar_file']
+        self.assertEqual(rerun_filename, new_filename)
+
     def test_avatar_upload_rejects_unauthorized_and_invalid_images(self):
         status, body = self.request('POST', '/api/auth/avatar', self.avatar_payload())
         self.assertEqual(status, 401, body)
@@ -2095,6 +2135,12 @@ class ServerRegressionTests(unittest.TestCase):
 
     def test_avatar_static_path_rejects_traversal(self):
         status, _, _ = self.raw_request('GET', '/uploads/avatars/../todo-list.db')
+        self.assertEqual(status, 404)
+
+    def test_avatar_static_file_rejects_oversized_legacy_file(self):
+        filename = 'oversized-legacy-avatar.png'
+        (server.avatar_dir() / filename).write_bytes(b'x' * (server.MAX_AVATAR_BYTES + 1))
+        status, _, _ = self.raw_request('GET', f'/uploads/avatars/{filename}')
         self.assertEqual(status, 404)
 
     def test_admin_users_include_avatar_fields(self):
@@ -2155,6 +2201,17 @@ class ServerRegressionTests(unittest.TestCase):
         self.assertIn('allow-create', index_html)
         self.assertIn('v-for="subject in enabledSubjectOptions"', index_html)
         self.assertIn('placeholder="选择或输入科目"', index_html)
+
+    def test_custom_subject_input_commits_immediately(self):
+        index_html = INDEX_HTML_PATH.read_text(encoding='utf-8')
+        app_js = APP_JS_PATH.read_text(encoding='utf-8')
+
+        self.assertIn('@input.capture="commitSubjectInput(form, $event)"', index_html)
+        self.assertIn('@input.capture="commitSubjectInput(habitForm, $event)"', index_html)
+        self.assertIn('@input.capture="commitSubjectInput(scheduleForm, $event)"', index_html)
+        self.assertIn('@input.capture="commitSubjectInput(task, $event)"', index_html)
+        self.assertIn('@input.capture="commitSubjectInput(action.draft, $event)"', index_html)
+        self.assertIn('commitSubjectInput(target, event)', app_js)
 
     def test_ai_approval_does_not_show_pending_status_text(self):
         index_html = INDEX_HTML_PATH.read_text(encoding='utf-8')

@@ -6,6 +6,7 @@ import binascii
 import gzip
 import hashlib
 import hmac
+import io
 import ipaddress
 import json
 import math
@@ -118,7 +119,7 @@ MAX_TASK_DUE_AT_LENGTH = 32
 MAX_TASK_NOTE_LENGTH = 4000
 HABIT_SYNC_FUTURE_DAYS = 90
 MAX_HABIT_SYNC_FUTURE_DAYS = 365
-MAX_AVATAR_BYTES = 2 * 1024 * 1024
+MAX_AVATAR_BYTES = 64 * 1024
 AVATAR_CONTENT_TYPES = {
     'image/png': 'png',
     'image/jpeg': 'jpg',
@@ -708,6 +709,7 @@ def init_db() -> None:
         conn.execute('CREATE INDEX IF NOT EXISTS idx_operation_logs_target_created ON operation_logs(target_user_id, created_at)')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_feedback_user_created ON feedback(user_id, created_at)')
         conn.commit()
+        migrate_existing_avatars(conn)
 
 
 def get_db() -> sqlite3.Connection:
@@ -1110,6 +1112,103 @@ def cleanup_avatar_file(filename: str) -> None:
             path.unlink()
     except OSError:
         pass
+
+
+def compressed_avatar_webp(source_path: Path) -> bytes:
+    try:
+        from PIL import Image, ImageOps, UnidentifiedImageError
+    except ImportError as exc:
+        raise RuntimeError(
+            'Pillow is required to compress existing avatars; run '
+            '`python -m pip install -r requirements.txt`.'
+        ) from exc
+
+    try:
+        with Image.open(source_path) as source:
+            image = ImageOps.exif_transpose(source)
+            image.load()
+            if image.mode not in {'RGB', 'RGBA'}:
+                image = image.convert('RGBA' if 'transparency' in image.info else 'RGB')
+
+            smallest = b''
+            for size in (256, 224, 192):
+                resized = image.copy()
+                resized.thumbnail((size, size), Image.Resampling.LANCZOS)
+                for quality in (62, 46, 32):
+                    output = io.BytesIO()
+                    resized.save(
+                        output,
+                        format='WEBP',
+                        quality=quality,
+                        method=6,
+                    )
+                    raw = output.getvalue()
+                    if not smallest or len(raw) < len(smallest):
+                        smallest = raw
+                    if len(raw) <= MAX_AVATAR_BYTES:
+                        return raw
+            return smallest
+    except (OSError, UnidentifiedImageError, ValueError) as exc:
+        raise ValueError(f'avatar image cannot be compressed: {source_path.name}') from exc
+
+
+def migrate_existing_avatars(conn: sqlite3.Connection) -> int:
+    rows = conn.execute(
+        "SELECT id, avatar_file FROM users WHERE avatar_file IS NOT NULL AND avatar_file != ''"
+    ).fetchall()
+    candidates: list[tuple[int, str, Path]] = []
+    for row in rows:
+        user_id = int(row[0])
+        filename = str(row[1] or '').strip()
+        if not is_safe_avatar_filename(filename):
+            continue
+        source_path = avatar_dir() / filename
+        try:
+            source_size = source_path.stat().st_size
+        except OSError:
+            continue
+        if source_path.suffix.lower() == '.webp' and source_size <= MAX_AVATAR_BYTES:
+            continue
+        candidates.append((user_id, filename, source_path))
+
+    migrated = 0
+    for user_id, old_filename, source_path in candidates:
+        new_filename = ''
+        temporary_path: Path | None = None
+        try:
+            raw = compressed_avatar_webp(source_path)
+            if not raw or len(raw) > MAX_AVATAR_BYTES or avatar_magic_type(raw) != 'image/webp':
+                raise ValueError(f'compressed avatar exceeds {MAX_AVATAR_BYTES} bytes')
+            new_filename = f'user-{user_id}-{secrets.token_urlsafe(12)}.webp'
+            target_path = avatar_dir() / new_filename
+            temporary_path = avatar_dir() / f'.{new_filename}.tmp'
+            temporary_path.write_bytes(raw)
+            os.replace(temporary_path, target_path)
+            cursor = conn.execute(
+                '''
+                UPDATE users
+                SET avatar_file = ?, avatar_updated_at = ?
+                WHERE id = ? AND avatar_file = ?
+                ''',
+                (new_filename, now_iso(), user_id, old_filename),
+            )
+            if cursor.rowcount != 1:
+                cleanup_avatar_file(new_filename)
+                continue
+            conn.commit()
+            cleanup_avatar_file(old_filename)
+            migrated += 1
+        except (OSError, ValueError, sqlite3.Error) as exc:
+            conn.rollback()
+            if temporary_path is not None:
+                try:
+                    temporary_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            if new_filename:
+                cleanup_avatar_file(new_filename)
+            print(f'Warning: kept existing avatar {old_filename!r}: {exc}')
+    return migrated
 
 
 def default_subject_template() -> list[dict]:
@@ -2515,8 +2614,15 @@ class TodoHandler(SimpleHTTPRequestHandler):
             self.send_error(HTTPStatus.NOT_FOUND, 'Not found')
             return
         try:
-            raw = file_path.read_bytes() if send_body else b''
             size = file_path.stat().st_size
+        except OSError:
+            self.send_error(HTTPStatus.NOT_FOUND, 'Not found')
+            return
+        if size > MAX_AVATAR_BYTES:
+            self.send_error(HTTPStatus.NOT_FOUND, 'Not found')
+            return
+        try:
+            raw = file_path.read_bytes() if send_body else b''
         except OSError:
             self.send_error(HTTPStatus.NOT_FOUND, 'Not found')
             return
@@ -5805,7 +5911,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
         if not raw:
             return self.write_json({'error': 'avatar data is empty'}, status=HTTPStatus.BAD_REQUEST)
         if len(raw) > MAX_AVATAR_BYTES:
-            return self.write_json({'error': 'avatar must be at most 2MB'}, status=HTTPStatus.BAD_REQUEST)
+            return self.write_json({'error': 'avatar must be at most 64KB'}, status=HTTPStatus.BAD_REQUEST)
         if avatar_magic_type(raw) != content_type:
             return self.write_json({'error': 'avatar content does not match image type'}, status=HTTPStatus.BAD_REQUEST)
 

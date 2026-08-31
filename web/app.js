@@ -23,8 +23,11 @@ const SIDEBAR_AUTO_COLLAPSE_WIDTH = 1100;
 const DATE_RANGE_EXPAND_MARGIN = 21;
 const HABIT_SYNC_FUTURE_DAYS = 90;
 const AVATAR_SOURCE_MAX_BYTES = 8 * 1024 * 1024;
-const AVATAR_UPLOAD_MAX_BYTES = 2 * 1024 * 1024;
-const AVATAR_OUTPUT_SIZE = 512;
+const AVATAR_UPLOAD_MAX_BYTES = 64 * 1024;
+const AVATAR_OUTPUT_TYPE = 'image/webp';
+const AVATAR_OUTPUT_FILENAME = 'avatar.webp';
+const AVATAR_OUTPUT_SIZES = [256, 224, 192];
+const AVATAR_OUTPUT_QUALITIES = [0.62, 0.46, 0.32];
 const AVATAR_CROP_SIZE = 260;
 const AVATAR_ALLOWED_TYPES = ['image/png', 'image/jpeg', 'image/webp'];
 const DEFAULT_AVATAR_COLOR = '#6366f1';
@@ -2043,6 +2046,19 @@ createApp({
       this.form.subject = this.lastSubjectBeforeTemplateEdit || '';
       this.openSubjectTemplateDialog();
     },
+    commitSubjectInput(target, event) {
+      if (!target || typeof target !== 'object') return;
+      const inputValue = event && event.target && 'value' in event.target
+        ? event.target.value
+        : '';
+      const subject = String(inputValue || '').trim();
+      if (!subject) {
+        target.subject = '';
+        return;
+      }
+      if (subject === SUBJECT_TEMPLATE_EDIT_VALUE || subject === '编辑科目模板') return;
+      target.subject = subject;
+    },
     openSubjectTemplateDialog() {
       this.subjectTemplateDraft = this.normalizeSubjectTemplate(this.subjectTemplate);
       this.newSubjectName = '';
@@ -3197,6 +3213,37 @@ createApp({
       );
       return canvas;
     },
+    encodeAvatarCanvas(canvas, quality) {
+      return new Promise((resolve, reject) => {
+        canvas.toBlob(blob => {
+          if (!blob || blob.type !== AVATAR_OUTPUT_TYPE) {
+            reject(new Error('当前浏览器无法生成 WebP 头像。'));
+            return;
+          }
+          resolve(blob);
+        }, AVATAR_OUTPUT_TYPE, quality);
+      });
+    },
+    async buildCompressedAvatar() {
+      let smallestBlob = null;
+      for (const size of AVATAR_OUTPUT_SIZES) {
+        const canvas = this.renderAvatarCanvas(size);
+        for (const quality of AVATAR_OUTPUT_QUALITIES) {
+          const blob = await this.encodeAvatarCanvas(canvas, quality);
+          if (!smallestBlob || blob.size < smallestBlob.size) smallestBlob = blob;
+          if (blob.size <= AVATAR_UPLOAD_MAX_BYTES) return blob;
+        }
+      }
+      return smallestBlob;
+    },
+    blobToBase64(blob) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || '').split(',', 2)[1] || '');
+        reader.onerror = () => reject(new Error('压缩后的头像读取失败。'));
+        reader.readAsDataURL(blob);
+      });
+    },
     isValidHexColor(color) {
       return /^#[0-9a-f]{6}$/i.test(String(color || '').trim());
     },
@@ -3235,17 +3282,16 @@ createApp({
       this.avatarLoading = true;
       try {
         if (this.avatarImage) {
-          const dataUrl = this.renderAvatarCanvas(AVATAR_OUTPUT_SIZE).toDataURL('image/png');
-          const base64 = dataUrl.split(',', 2)[1] || '';
-          const byteLength = Math.ceil(base64.length * 3 / 4);
-          if (byteLength > AVATAR_UPLOAD_MAX_BYTES) {
-            throw new Error('裁剪后的头像不能超过 2MB。');
+          const compressedAvatar = await this.buildCompressedAvatar();
+          if (!compressedAvatar || compressedAvatar.size > AVATAR_UPLOAD_MAX_BYTES) {
+            throw new Error('压缩后的头像不能超过 64KB。');
           }
+          const base64 = await this.blobToBase64(compressedAvatar);
           const payload = await this.apiJson(`${AUTH_API}/avatar`, {
             method: 'POST',
             body: JSON.stringify({
-              filename: 'avatar.png',
-              contentType: 'image/png',
+              filename: AVATAR_OUTPUT_FILENAME,
+              contentType: AVATAR_OUTPUT_TYPE,
               data: base64
             })
           });
