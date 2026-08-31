@@ -1744,6 +1744,7 @@
                     default-first-option
                     placeholder="科目"
                     class="managebac-subject-select"
+                    @input.capture="commitSubjectInput(task, $event)"
                   >
                     <el-option
                       v-for="subject in enabledSubjectOptions"
@@ -1887,6 +1888,7 @@
                     class="subject-select"
                     :class="{ 'ai-edited-field': aiActionFieldChanged(action, field.field) }"
                     :disabled="aiActionLocked(action)"
+                    @input.capture="commitSubjectInput(action.draft, $event)"
                   >
                     <el-option
                       v-for="subject in enabledSubjectOptions"
@@ -2236,6 +2238,7 @@
             class="subject-select"
             @focus="rememberSubjectBeforeTemplateEdit"
             @change="handleSubjectSelectChange"
+            @input.capture="commitSubjectInput(form, $event)"
           >
             <el-option
               v-for="subject in enabledSubjectOptions"
@@ -2326,6 +2329,7 @@
             default-first-option
             placeholder="选择或输入科目"
             class="subject-select"
+            @input.capture="commitSubjectInput(habitForm, $event)"
           >
             <el-option
               v-for="subject in enabledSubjectOptions"
@@ -2527,6 +2531,7 @@
               default-first-option
               placeholder="选择或输入科目"
               class="subject-select"
+              @input.capture="commitSubjectInput(scheduleForm, $event)"
             >
               <el-option
                 v-for="subject in enabledSubjectOptions"

@@ -2202,6 +2202,17 @@ class ServerRegressionTests(unittest.TestCase):
         self.assertIn('v-for="subject in enabledSubjectOptions"', index_html)
         self.assertIn('placeholder="选择或输入科目"', index_html)
 
+    def test_custom_subject_input_commits_immediately(self):
+        index_html = INDEX_HTML_PATH.read_text(encoding='utf-8')
+        app_js = APP_JS_PATH.read_text(encoding='utf-8')
+
+        self.assertIn('@input.capture="commitSubjectInput(form, $event)"', index_html)
+        self.assertIn('@input.capture="commitSubjectInput(habitForm, $event)"', index_html)
+        self.assertIn('@input.capture="commitSubjectInput(scheduleForm, $event)"', index_html)
+        self.assertIn('@input.capture="commitSubjectInput(task, $event)"', index_html)
+        self.assertIn('@input.capture="commitSubjectInput(action.draft, $event)"', index_html)
+        self.assertIn('commitSubjectInput(target, event)', app_js)
+
     def test_ai_approval_does_not_show_pending_status_text(self):
         index_html = INDEX_HTML_PATH.read_text(encoding='utf-8')
         app_js = APP_JS_PATH.read_text(encoding='utf-8')

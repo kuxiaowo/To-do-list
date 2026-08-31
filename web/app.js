@@ -2046,6 +2046,19 @@ createApp({
       this.form.subject = this.lastSubjectBeforeTemplateEdit || '';
       this.openSubjectTemplateDialog();
     },
+    commitSubjectInput(target, event) {
+      if (!target || typeof target !== 'object') return;
+      const inputValue = event && event.target && 'value' in event.target
+        ? event.target.value
+        : '';
+      const subject = String(inputValue || '').trim();
+      if (!subject) {
+        target.subject = '';
+        return;
+      }
+      if (subject === SUBJECT_TEMPLATE_EDIT_VALUE || subject === '编辑科目模板') return;
+      target.subject = subject;
+    },
     openSubjectTemplateDialog() {
       this.subjectTemplateDraft = this.normalizeSubjectTemplate(this.subjectTemplate);
       this.newSubjectName = '';
