@@ -1045,7 +1045,7 @@ body {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   align-items: stretch;
-  gap: 12px;
+  gap: 0;
 }
 
 .timeline-title {
@@ -1056,7 +1056,7 @@ body {
   width: 100%;
   min-width: 0;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: flex-start;
   gap: 12px;
   flex-wrap: nowrap;
@@ -3599,7 +3599,7 @@ body.is-schedule-touch-dragging * {
 
   .timeline-header-actions {
     width: 100%;
-    align-items: center;
+    align-items: flex-start;
     justify-content: flex-start;
   }
 
