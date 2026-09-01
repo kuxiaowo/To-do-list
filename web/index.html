@@ -157,7 +157,28 @@
               </select>
             </label>
             <div class="toolbar-row theme-toggle-row">
-              <el-switch v-model="isDarkMode" active-text="深色模式" inactive-text="浅色模式" @change="setTheme"></el-switch>
+              <button
+                class="theme-mode-toggle"
+                :class="{ 'is-dark': isDarkMode }"
+                type="button"
+                role="switch"
+                :aria-checked="isDarkMode"
+                :aria-label="isDarkMode ? '浅色模式' : '深色模式'"
+                :title="isDarkMode ? '浅色模式' : '深色模式'"
+                @click="setTheme(!isDarkMode)"
+              >
+                <span class="theme-mode-toggle-label" aria-hidden="true">{{ isDarkMode ? '深色模式' : '浅色模式' }}</span>
+                <span class="theme-mode-toggle-knob" aria-hidden="true">
+                  <svg v-if="isDarkMode" viewBox="0 0 24 24" focusable="false">
+                    <path d="M20 15.2A8.4 8.4 0 0 1 8.8 4a8.5 8.5 0 1 0 11.2 11.2Z"></path>
+                    <path class="theme-mode-star" d="m17.8 4.2.7 1.5 1.5.7-1.5.7-.7 1.5-.7-1.5-1.5-.7 1.5-.7.7-1.5Z"></path>
+                  </svg>
+                  <svg v-else viewBox="0 0 24 24" focusable="false">
+                    <circle cx="12" cy="12" r="4"></circle>
+                    <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"></path>
+                  </svg>
+                </span>
+              </button>
             </div>
 
             <div class="feedback-quick-action">
