@@ -1145,9 +1145,9 @@ body {
 
 .theme-mode-toggle {
   position: relative;
-  width: 84px;
+  width: 64px;
   height: 32px;
-  flex: 0 0 84px;
+  flex: 0 0 64px;
   overflow: hidden;
   padding: 0;
   border: 1px solid var(--line);
@@ -1173,6 +1173,11 @@ body {
   border-color: #334155;
   color: #94a3b8;
   box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.34);
+}
+
+.theme-mode-toggle.is-english {
+  width: 74px;
+  flex-basis: 74px;
 }
 
 .theme-mode-toggle-label {
@@ -1211,10 +1216,14 @@ body {
 }
 
 .theme-mode-toggle.is-dark .theme-mode-toggle-knob {
-  transform: translateX(54px);
+  transform: translateX(34px);
   background: #64748b;
   color: #e2e8f0;
   border-color: rgba(148, 163, 184, 0.58);
+}
+
+.theme-mode-toggle.is-dark.is-english .theme-mode-toggle-knob {
+  transform: translateX(44px);
 }
 
 .theme-mode-toggle-knob svg {
