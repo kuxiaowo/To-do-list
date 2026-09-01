@@ -1043,16 +1043,22 @@ body {
   box-shadow: var(--shadow);
   padding: 18px 20px;
   display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  align-items: stretch;
-  gap: 0;
+  grid-template-columns: max-content minmax(0, 1fr);
+  grid-template-areas:
+    "navigation actions"
+    "subtitle subtitle";
+  align-items: start;
+  column-gap: 16px;
+  row-gap: 0;
 }
 
 .timeline-title {
+  grid-area: navigation;
   min-width: 0;
 }
 
 .timeline-header-actions {
+  grid-area: actions;
   width: 100%;
   min-width: 0;
   display: flex;
@@ -1104,7 +1110,8 @@ body {
   font-size: 1.3rem;
 }
 
-.timeline-title p {
+.timeline-subtitle {
+  grid-area: subtitle;
   margin: 6px 0 0;
   color: var(--muted);
   font-size: 0.94rem;
@@ -1641,7 +1648,7 @@ body {
 .page-nav {
   display: flex;
   gap: 10px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
 }
 

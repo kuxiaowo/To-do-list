@@ -147,7 +147,6 @@
               <button class="page-nav-button" :class="{ active: activePage === 'ddl' }" type="button" @click="switchPage('ddl')">DDL 时间线</button>
               <button class="page-nav-button" :class="{ active: activePage === 'daily' }" type="button" data-guide="daily-tab" @click="switchPage('daily')">每日安排</button>
             </div>
-            <p>{{ activePage === 'ddl' ? '按截止日期自动排序' : (activePage === 'calendar' ? '用月历查看全部 DDL 任务' : '按开始时间排列每天的任务；重叠安排会标红提醒。') }}</p>
           </div>
           <div class="timeline-header-actions">
             <label class="language-control">
@@ -236,6 +235,7 @@
               </div>
             </div>
           </div>
+          <p class="timeline-subtitle">{{ activePage === 'ddl' ? '按截止日期自动排序' : (activePage === 'calendar' ? '用月历查看全部 DDL 任务' : '按开始时间排列每天的任务；重叠安排会标红提醒。') }}</p>
         </div>
 
         <div v-if="activePage === 'ddl'" class="ddl-view" data-guide="ddl-timeline">
@@ -1360,8 +1360,8 @@
                     <button class="page-nav-button" :class="{ active: activePage === 'ddl' }" type="button" @click="switchPage('ddl')">DDL 时间线</button>
                     <button class="page-nav-button" :class="{ active: activePage === 'daily' }" type="button" @click="switchPage('daily')">每日安排</button>
                   </div>
-                  <p>只读查看 {{ selectedAdminUser.name }} 的时间表。</p>
                 </div>
+                <p class="timeline-subtitle">只读查看 {{ selectedAdminUser.name }} 的时间表。</p>
               </div>
 
               <div v-if="activePage === 'ddl'" class="ddl-view">
