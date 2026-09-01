@@ -160,7 +160,7 @@
               <div class="toolbar-row theme-toggle-row">
                 <button
                   class="theme-mode-toggle"
-                  :class="{ 'is-dark': isDarkMode }"
+                  :class="{ 'is-dark': isDarkMode, 'is-english': locale === 'en' }"
                   type="button"
                   role="switch"
                   :aria-checked="isDarkMode"
