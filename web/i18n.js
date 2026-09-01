@@ -468,6 +468,7 @@
   "跳过": "Skip",
   "跳转到 ${day.key} 的时间线": "Jump to ${day.key}'s timeline",
   "同步 ManageBac": "Sync ManageBac",
+  "同步 MB": "Sync MB",
   "统计 DeepSeek 调用返回的输入和输出 token，并按滚动窗口限制 AI 使用量。": "Count the input and output tokens returned by DeepSeek calls and limit AI usage by rolling window.",
   "统计 ManageBac Helper 安装包下载链接生成次数，并按滚动窗口限制每个用户的生成频率。": "Count the number of times the ManageBac Helper installation package download link is generated, and limit the generation frequency for each user according to a rolling window.",
   "统计主页和管理员后台的页面访问，不包含静态资源和普通 API 请求。": "Counts page visits to the homepage and administrator backend, excluding static resources and ordinary API requests.",
