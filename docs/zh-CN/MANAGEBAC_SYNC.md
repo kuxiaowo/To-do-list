@@ -71,4 +71,4 @@ X-Forwarded-Proto: https
 - 登录和抓取只返回预览，不直接创建本站任务。
 - 用户确认后才调用现有任务接口导入。
 - 网页从 `className/rawCourseName` 推断科目，无法识别时需要用户补全。
-- 导入时保留 `ManageBac: core_task:<id>` 备注，用于识别重复任务。
+- 导入时在备注中保留 `ManageBac: core_task:<id>` 和原任务详情链接，用于识别重复任务；在本站任务详情中可直接打开该链接。

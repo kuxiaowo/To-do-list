@@ -2342,12 +2342,22 @@
         </el-form-item>
 
         <el-form-item label="备注">
-          <el-input
-            v-model="form.note"
-            type="textarea"
-            :rows="4"
-            placeholder="补充任务说明、地点、材料、提醒内容……"
-          ></el-input>
+          <div class="task-note-editor">
+            <el-input
+              v-model="form.note"
+              type="textarea"
+              :rows="4"
+              placeholder="补充任务说明、地点、材料、提醒内容……"
+            ></el-input>
+            <el-link
+              v-if="manageBacSourceUrlFromNote(form.note)"
+              class="managebac-task-source-link"
+              :href="manageBacSourceUrlFromNote(form.note)"
+              target="_blank"
+              rel="noopener noreferrer"
+              type="primary"
+            >打开 ManageBac 原任务</el-link>
+          </div>
         </el-form-item>
       </el-form>
 

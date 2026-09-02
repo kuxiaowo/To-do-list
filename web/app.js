@@ -1422,6 +1422,34 @@ createApp({
     manageBacTaskKey(task) {
       return task.sourceId || task.sourceUrl || `${task.title}-${task.dueAt}`;
     },
+    normalizeManageBacTaskUrl(value) {
+      const rawUrl = String(value || '').trim();
+      if (!rawUrl) return '';
+      try {
+        const url = new URL(rawUrl);
+        const isTaskPath = /^\/student\/classes\/\d+\/core_tasks\/\d+\/?$/.test(url.pathname);
+        if (url.protocol !== 'https:' || url.hostname !== 'sdgj.managebac.cn' || !isTaskPath) return '';
+        url.search = '';
+        url.hash = '';
+        return url.toString();
+      } catch (_error) {
+        return '';
+      }
+    },
+    manageBacSourceUrlFromNote(note) {
+      const match = String(note || '').match(
+        /https:\/\/sdgj\.managebac\.cn\/student\/classes\/\d+\/core_tasks\/\d+\/?/i
+      );
+      return match ? this.normalizeManageBacTaskUrl(match[0]) : '';
+    },
+    manageBacImportNote(task) {
+      const sourceUrl = this.normalizeManageBacTaskUrl(task && task.sourceUrl);
+      const originalNote = String((task && task.note) || '').trim();
+      if (!sourceUrl || originalNote.includes(sourceUrl)) return originalNote.slice(0, 4000);
+      const noteLimit = Math.max(0, 4000 - sourceUrl.length - 1);
+      const prefix = originalNote.slice(0, noteLimit).trimEnd();
+      return prefix ? `${prefix}\n${sourceUrl}` : sourceUrl;
+    },
     normalizeManageBacPreviewTask(task) {
       const rawCourseName = String(task.rawCourseName || task.className || task.courseName || '').trim();
       const subject = String(task.subject || '').trim() || this.inferManageBacSubject(rawCourseName);
@@ -1457,8 +1485,10 @@ createApp({
     },
     isManageBacDuplicateTask(task) {
       const sourceId = String(task.sourceId || '');
+      const sourceUrl = this.normalizeManageBacTaskUrl(task.sourceUrl);
       return this.tasks.some(existing => {
         if (sourceId && String(existing.note || '').includes(sourceId)) return true;
+        if (sourceUrl && String(existing.note || '').includes(sourceUrl)) return true;
         return String(existing.title || '').trim() === String(task.title || '').trim() &&
           String(existing.dueAt || '') === String(task.dueAt || '') &&
           String(existing.subject || '').trim() === String(task.subject || '').trim();
@@ -1494,7 +1524,7 @@ createApp({
             dueAt: String(task.dueAt || '').trim(),
             pool: 'todo',
             priority: ['high', 'medium', 'low'].includes(task.priority) ? task.priority : 'medium',
-            note: String(task.note || '').slice(0, 4000),
+            note: this.manageBacImportNote(task),
             completed: false
           };
           const savedTask = await this.createTaskOnServer(payload);

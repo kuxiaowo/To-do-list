@@ -2360,6 +2360,19 @@ class ServerRegressionTests(unittest.TestCase):
         self.assertIn('@input.capture="commitSubjectInput(action.draft, $event)"', index_html)
         self.assertIn('commitSubjectInput(target, event)', app_js)
 
+    def test_managebac_import_note_contains_clickable_source_url(self):
+        index_html = INDEX_HTML_PATH.read_text(encoding='utf-8')
+        app_js = APP_JS_PATH.read_text(encoding='utf-8')
+
+        self.assertIn('note: this.manageBacImportNote(task)', app_js)
+        self.assertIn('manageBacImportNote(task)', app_js)
+        self.assertIn("url.hostname !== 'sdgj.managebac.cn'", app_js)
+        self.assertIn('if (sourceUrl && String(existing.note || \'\').includes(sourceUrl)) return true;', app_js)
+        self.assertIn(':href="manageBacSourceUrlFromNote(form.note)"', index_html)
+        self.assertIn('rel="noopener noreferrer"', index_html)
+        self.assertIn('>打开 ManageBac 原任务</el-link>', index_html)
+        self.assertIn('"打开 ManageBac 原任务": "Open original ManageBac task"', I18N_JS_PATH.read_text(encoding='utf-8'))
+
     def test_ai_approval_does_not_show_pending_status_text(self):
         index_html = INDEX_HTML_PATH.read_text(encoding='utf-8')
         app_js = APP_JS_PATH.read_text(encoding='utf-8')

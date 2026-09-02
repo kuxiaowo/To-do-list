@@ -71,4 +71,4 @@ Plain HTTP remains allowed for local `localhost` development.
 - Sign-in and fetching return a preview and do not create site tasks directly.
 - Tasks are imported only after user confirmation through the existing task API.
 - The frontend infers subjects from `className/rawCourseName`; users must complete unresolved subjects.
-- Imports preserve the `ManageBac: core_task:<id>` note for duplicate detection.
+- Imports preserve the `ManageBac: core_task:<id>` marker and original task URL in the note for duplicate detection; the URL can be opened directly from the local task details.

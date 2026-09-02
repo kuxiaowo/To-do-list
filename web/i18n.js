@@ -113,6 +113,7 @@
   "从 {{ slotEditorDate }} 开始，未单独自定义的日期会使用这个一周模板。": "Starting from {{ slotEditorDate }}, dates that are not individually customized will use this week template.",
   "从这里新增任务": "Add new tasks from here",
   "打开登录窗口": "Open login window",
+  "打开 ManageBac 原任务": "Open original ManageBac task",
   "带截止时间的任务会自动落到对应日期列。可以用定位今天、快捷定位、后一周快速移动。": "Tasks with deadlines will automatically fall into the corresponding date column. You can use positioning today, quick positioning, and quick movement in the next week.",
   "待安排": "Unscheduled",
   "待安排的截止任务": "To-be-scheduled deadline tasks",

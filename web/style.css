@@ -1052,6 +1052,15 @@ body {
   row-gap: 0;
 }
 
+.task-note-editor {
+  width: 100%;
+}
+
+.managebac-task-source-link {
+  margin-top: 8px;
+  max-width: 100%;
+}
+
 .timeline-title {
   grid-area: navigation;
   min-width: 0;
