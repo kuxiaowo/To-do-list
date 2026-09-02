@@ -127,7 +127,7 @@ class ServerRegressionTests(unittest.TestCase):
         status, headers, body = self.raw_request('GET', '/')
         self.assertEqual(status, 200)
         self.assertIn(b'app.js', body)
-        self.assertIn(b'i18n.js?v=managebac-backend-20260902-1', body)
+        self.assertIn(b'i18n.js?v=managebac-methods-20260902-2', body)
         self.assertIn(b'style.css', body)
         self.assertEqual(body.count(b'<span>Language</span>'), 2)
         self.assertEqual(body.count(b'aria-label="Language"'), 2)
@@ -2373,6 +2373,22 @@ class ServerRegressionTests(unittest.TestCase):
         self.assertIn('>打开 ManageBac 原任务</el-link>', index_html)
         self.assertIn('"打开 ManageBac 原任务": "Open original ManageBac task"', I18N_JS_PATH.read_text(encoding='utf-8'))
 
+    def test_managebac_sync_supports_credentials_and_local_helper_modes(self):
+        index_html = INDEX_HTML_PATH.read_text(encoding='utf-8')
+        app_js = APP_JS_PATH.read_text(encoding='utf-8')
+
+        self.assertIn("manageBacMethod: 'credentials'", app_js)
+        self.assertIn("this.manageBacMethod = 'credentials';", app_js)
+        self.assertIn('v-model="manageBacMethod"', index_html)
+        self.assertIn('<el-option label="账号密码登录" value="credentials"></el-option>', index_html)
+        self.assertIn('<el-option label="本地 Helper" value="helper"></el-option>', index_html)
+        self.assertIn('v-if="manageBacMethod === \'helper\'"', index_html)
+        self.assertEqual(index_html.count('@click="downloadManageBacInstaller"'), 1)
+        self.assertIn("const MANAGEBAC_HELPER_BASE = 'http://127.0.0.1:27654';", app_js)
+        self.assertIn("return this.manageBacHelperFetch('/v1/health'", app_js)
+        self.assertIn("await this.previewManageBacHelperTasks();", app_js)
+        self.assertIn("await this.previewManageBacServerTasks();", app_js)
+
     def test_ai_approval_does_not_show_pending_status_text(self):
         index_html = INDEX_HTML_PATH.read_text(encoding='utf-8')
         app_js = APP_JS_PATH.read_text(encoding='utf-8')
@@ -2439,6 +2455,24 @@ class ServerRegressionTests(unittest.TestCase):
         self.assertIn('DDL 日历', index_html)
         self.assertIn('aspect-ratio: 1 / 1;', style_css)
         self.assertIn('grid-template-columns: repeat(7, var(--ddl-calendar-cell-size));', style_css)
+        self.assertIn('container-type: inline-size;', style_css)
+        self.assertIn('--ddl-calendar-cell-size: var(--ddl-calendar-cell-by-width);', style_css)
+        self.assertNotIn('--ddl-calendar-cell-by-height:', style_css)
+        self.assertIn(
+            '.app-shell:not(.admin-readonly-board) .ddl-calendar-page {\n'
+            '  width: calc(100% - 360px);\n'
+            '  margin-left: 360px;',
+            style_css,
+        )
+        self.assertIn(
+            '.app-shell.sidebar-collapsed:not(.admin-readonly-board) .ddl-calendar-page {\n'
+            '  margin-inline: auto;',
+            style_css,
+        )
+        self.assertIn(
+            '.timeline-scroll .task-card .task-note-preview {\n  -webkit-line-clamp: 1;',
+            style_css,
+        )
         self.assertIn("'--ddl-calendar-week-count': ddlCalendarWeekCount", index_html)
         self.assertIn('ddlCalendarWeekCount()', app_js)
         self.assertIn('.timeline-area.is-calendar-page {', style_css)

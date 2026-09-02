@@ -1001,7 +1001,7 @@ body {
 }
 
 .timeline-scroll .task-card .task-note-preview {
-  -webkit-line-clamp: 2;
+  -webkit-line-clamp: 1;
 }
 
 .summary-task[draggable="true"] {
@@ -1343,7 +1343,7 @@ body {
   flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .ddl-calendar-page > .ddl-calendar-nav {
@@ -1364,12 +1364,13 @@ body {
 }
 
 .ddl-calendar-panel {
-  container-type: size;
+  container-type: inline-size;
   display: flex;
-  flex: 1 1 auto;
+  flex: 0 0 auto;
   justify-content: center;
   min-height: 0;
   overflow-x: hidden;
+  overflow-y: visible;
   padding-bottom: 10px;
 }
 
@@ -1377,11 +1378,7 @@ body {
   --ddl-calendar-gap: 8px;
   --ddl-calendar-weekday-height: 42px;
   --ddl-calendar-cell-by-width: calc((100cqw - 6 * var(--ddl-calendar-gap)) / 7);
-  --ddl-calendar-cell-by-height: calc(
-    (100cqh - var(--ddl-calendar-weekday-height) - var(--ddl-calendar-week-count) * var(--ddl-calendar-gap))
-    / var(--ddl-calendar-week-count)
-  );
-  --ddl-calendar-cell-size: min(var(--ddl-calendar-cell-by-width), var(--ddl-calendar-cell-by-height));
+  --ddl-calendar-cell-size: var(--ddl-calendar-cell-by-width);
   width: calc(7 * var(--ddl-calendar-cell-size) + 6 * var(--ddl-calendar-gap));
   min-width: 0;
   display: grid;
@@ -2379,6 +2376,23 @@ body.is-schedule-touch-dragging * {
   display: flex;
   flex-direction: column;
   gap: 14px;
+}
+
+.managebac-method-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.managebac-method-label {
+  flex: 0 0 auto;
+  color: var(--text-strong);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.managebac-method-select {
+  width: min(260px, 100%);
 }
 
 .managebac-status-panel {
@@ -3768,6 +3782,16 @@ body.is-schedule-touch-dragging * {
     justify-content: flex-start;
   }
 
+  .managebac-method-row {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .managebac-method-select {
+    width: 100%;
+  }
+
   .managebac-login-fields {
     grid-template-columns: 1fr;
   }
@@ -3917,7 +3941,7 @@ body.is-schedule-touch-dragging * {
 }
 
 .app-shell:not(.admin-readonly-board) > .timeline-area.is-calendar-page {
-  height: calc(100dvh - 40px);
+  min-height: calc(100dvh - 40px);
 }
 
 .app-shell:not(.admin-readonly-board) .ddl-view,
@@ -3946,17 +3970,24 @@ body.is-schedule-touch-dragging * {
 }
 
 .app-shell:not(.admin-readonly-board):not(.sidebar-collapsed) .timeline-header,
-.app-shell:not(.admin-readonly-board):not(.sidebar-collapsed) .ddl-calendar-page,
 .app-shell:not(.admin-readonly-board):not(.sidebar-collapsed) .daily-tools,
 .app-shell:not(.admin-readonly-board):not(.sidebar-collapsed) .schedule-conflict-summary {
   margin-left: 360px;
 }
 
 .app-shell.sidebar-collapsed:not(.admin-readonly-board) .timeline-header,
-.app-shell.sidebar-collapsed:not(.admin-readonly-board) .ddl-calendar-page,
 .app-shell.sidebar-collapsed:not(.admin-readonly-board) .daily-tools,
 .app-shell.sidebar-collapsed:not(.admin-readonly-board) .schedule-conflict-summary {
   margin-left: 72px;
+}
+
+.app-shell:not(.admin-readonly-board) .ddl-calendar-page {
+  width: calc(100% - 360px);
+  margin-left: 360px;
+}
+
+.app-shell.sidebar-collapsed:not(.admin-readonly-board) .ddl-calendar-page {
+  margin-inline: auto;
 }
 
 @media (max-width: 720px) {
@@ -3973,7 +4004,7 @@ body.is-schedule-touch-dragging * {
   }
 
   .app-shell:not(.admin-readonly-board) > .timeline-area.is-calendar-page {
-    height: calc(100dvh - 24px);
+    min-height: calc(100dvh - 24px);
   }
 
   .app-shell:not(.admin-readonly-board) > .summary-panel {
@@ -3985,17 +4016,20 @@ body.is-schedule-touch-dragging * {
   }
 
   .app-shell:not(.admin-readonly-board):not(.sidebar-collapsed) .timeline-header,
-  .app-shell:not(.admin-readonly-board):not(.sidebar-collapsed) .ddl-calendar-page,
   .app-shell:not(.admin-readonly-board):not(.sidebar-collapsed) .daily-tools,
   .app-shell:not(.admin-readonly-board):not(.sidebar-collapsed) .schedule-conflict-summary {
     margin-left: 0;
   }
 
   .app-shell.sidebar-collapsed:not(.admin-readonly-board) .timeline-header,
-  .app-shell.sidebar-collapsed:not(.admin-readonly-board) .ddl-calendar-page,
   .app-shell.sidebar-collapsed:not(.admin-readonly-board) .daily-tools,
   .app-shell.sidebar-collapsed:not(.admin-readonly-board) .schedule-conflict-summary {
     margin-left: 58px;
+  }
+
+  .app-shell:not(.admin-readonly-board) .ddl-calendar-page {
+    width: 100%;
+    margin-inline: 0;
   }
 
   .app-shell:not(.admin-readonly-board) .timeline-header-actions {

@@ -14,7 +14,7 @@
       document.documentElement.lang = savedLocale === 'en' ? 'en' : 'zh-CN';
     })();
   </script>
-  <link rel="stylesheet" href="./style.css?v=managebac-backend-20260902-1" />
+  <link rel="stylesheet" href="./style.css?v=calendar-layout-20260902-4" />
 </head>
 <body>
   <div id="app" v-cloak>
@@ -1694,48 +1694,111 @@
               </template>
               <div class="ai-help-content">
                 <div class="ai-help-title">ManageBac 同步说明</div>
-                <div class="ai-help-section">
-                  <div class="ai-help-section-title">同步如何工作</div>
-                  <p>后端使用你的 ManageBac 登录态读取任务页面，并把页面解析成可预览的任务列表。</p>
-                </div>
-                <div class="ai-help-section">
-                  <div class="ai-help-section-title">账号密码如何处理</div>
-                  <p>账号密码会通过 HTTPS 发给本站后端，仅用于当次登录，不写入数据库；登录成功后只保存加密的 Cookie。</p>
-                </div>
-                <div class="ai-help-section">
-                  <div class="ai-help-section-title">登录过期</div>
-                  <p>Cookie 失效后，后端会删除旧登录态，并要求你重新输入 ManageBac 账号密码。</p>
-                </div>
+                <template v-if="manageBacMethod === 'credentials'">
+                  <div class="ai-help-section">
+                    <div class="ai-help-section-title">同步如何工作</div>
+                    <p>后端使用你的 ManageBac 登录态读取任务页面，并把页面解析成可预览的任务列表。</p>
+                  </div>
+                  <div class="ai-help-section">
+                    <div class="ai-help-section-title">账号密码如何处理</div>
+                    <p>账号密码会通过 HTTPS 发给本站后端，仅用于当次登录，不写入数据库；登录成功后只保存加密的 Cookie。</p>
+                  </div>
+                  <div class="ai-help-section">
+                    <div class="ai-help-section-title">登录过期</div>
+                    <p>Cookie 失效后，后端会删除旧登录态，并要求你重新输入 ManageBac 账号密码。</p>
+                  </div>
+                </template>
+                <template v-else>
+                  <div class="ai-help-section">
+                    <div class="ai-help-section-title">这个辅助程序做什么</div>
+                    <p>它是 nethub.wiki 的本地 Helper，用来打开 ManageBac 登录窗口、读取你自己账号下的任务页面，并把页面解析成可预览的任务列表。</p>
+                  </div>
+                  <div class="ai-help-section">
+                    <div class="ai-help-section-title">Windows 弹窗怎么处理</div>
+                    <p>点击连接时，浏览器或 Windows 可能询问是否打开本地应用；如果你正在 nethub.wiki 上操作，可以确认打开。</p>
+                  </div>
+                  <div class="ai-help-section">
+                    <div class="ai-help-section-title">账号密码如何处理</div>
+                    <p>账号密码只在 Helper 打开的 ManageBac 窗口中输入，登录 Cookie 保存在本机，本站不会接收账号密码。</p>
+                  </div>
+                </template>
               </div>
             </el-popover>
           </div>
+          <el-button
+            v-if="manageBacMethod === 'helper'"
+            plain
+            size="small"
+            @click="downloadManageBacInstaller"
+          >下载安装包</el-button>
         </div>
       </template>
       <div class="managebac-sync">
+        <section class="managebac-method-row">
+          <span class="managebac-method-label">获取方式</span>
+          <el-select
+            v-model="manageBacMethod"
+            class="managebac-method-select"
+            :disabled="manageBacLoading"
+            @change="changeManageBacMethod"
+          >
+            <el-option label="账号密码登录" value="credentials"></el-option>
+            <el-option label="本地 Helper" value="helper"></el-option>
+          </el-select>
+        </section>
+
         <section class="managebac-status-panel">
           <div>
             <div class="managebac-status-label">{{ manageBacStatusText }}</div>
-            <div class="managebac-status-message">{{ manageBacStatusMessage || '正在检查后端保存的 ManageBac 登录状态。' }}</div>
+            <div class="managebac-status-message">{{ manageBacStatusMessage || (manageBacMethod === 'helper' ? '请连接本地 Helper 后获取任务。' : '正在检查后端保存的 ManageBac 登录状态。') }}</div>
           </div>
           <div class="managebac-actions">
-            <el-button
-              v-if="manageBacConnected"
-              plain
-              :disabled="manageBacLoading"
-              @click="disconnectManageBac"
-            >清除登录状态</el-button>
-            <el-button
-              v-if="manageBacStatus === 'error'"
-              plain
-              :loading="manageBacLoading"
-              @click="openManageBacSyncDialog"
-            >重新检查</el-button>
-            <el-button
-              type="primary"
-              :disabled="!manageBacConnected"
-              :loading="manageBacLoading"
-              @click="previewManageBacTasks"
-            >获取任务</el-button>
+            <template v-if="manageBacMethod === 'credentials'">
+              <el-button
+                v-if="manageBacConnected"
+                plain
+                :disabled="manageBacLoading"
+                @click="disconnectManageBac"
+              >清除登录状态</el-button>
+              <el-button
+                v-if="manageBacStatus === 'error'"
+                plain
+                :loading="manageBacLoading"
+                @click="retryManageBacConnection"
+              >重新检查</el-button>
+              <el-button
+                type="primary"
+                :disabled="!manageBacConnected"
+                :loading="manageBacLoading"
+                @click="previewManageBacTasks"
+              >获取任务</el-button>
+            </template>
+            <template v-else>
+              <el-button
+                v-if="!manageBacClientToken"
+                plain
+                :loading="manageBacLoading"
+                @click="connectManageBacHelper"
+              >连接 Helper</el-button>
+              <el-button
+                v-else
+                plain
+                :disabled="manageBacLoading"
+                @click="connectManageBacHelper"
+              >重新连接</el-button>
+              <el-button
+                v-if="manageBacClientToken && !manageBacConnected"
+                plain
+                :disabled="manageBacLoading"
+                @click="openManageBacLogin"
+              >{{ manageBacLoginButtonText }}</el-button>
+              <el-button
+                type="primary"
+                :disabled="!manageBacClientToken"
+                :loading="manageBacLoading"
+                @click="previewManageBacTasks"
+              >获取任务</el-button>
+            </template>
           </div>
         </section>
 
@@ -2672,8 +2735,8 @@
 
   <script src="./vendor/vue.global.prod.js"></script>
   <script src="./vendor/element-plus.full.min.js"></script>
-  <script src="./i18n.js?v=managebac-backend-20260902-1"></script>
-  <script src="./app.js?v=managebac-backend-20260902-1"></script>
+  <script src="./i18n.js?v=managebac-methods-20260902-2"></script>
+  <script src="./app.js?v=managebac-methods-20260902-2"></script>
 </body>
 </html>
 
