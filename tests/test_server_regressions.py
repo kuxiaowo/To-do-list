@@ -127,7 +127,7 @@ class ServerRegressionTests(unittest.TestCase):
         status, headers, body = self.raw_request('GET', '/')
         self.assertEqual(status, 200)
         self.assertIn(b'app.js', body)
-        self.assertIn(b'i18n.js?v=i18n-20260725-2', body)
+        self.assertIn(b'i18n.js?v=managebac-methods-20260902-2', body)
         self.assertIn(b'style.css', body)
         self.assertEqual(body.count(b'<span>Language</span>'), 2)
         self.assertEqual(body.count(b'aria-label="Language"'), 2)
@@ -139,7 +139,7 @@ class ServerRegressionTests(unittest.TestCase):
 
         status, headers, body = self.raw_request('GET', '/app.js')
         self.assertEqual(status, 200)
-        self.assertIn(b'MANAGEBAC_INSTALLER_DOWNLOAD_URL', body)
+        self.assertIn(b'MANAGEBAC_API_BASE', body)
         self.assertEqual(headers.get('Cache-Control'), 'no-cache')
 
         status, headers, body = self.raw_request('GET', '/i18n.js')
@@ -161,7 +161,7 @@ class ServerRegressionTests(unittest.TestCase):
         self.assertEqual(headers.get('Content-Encoding'), 'gzip')
         self.assertEqual(headers.get('Vary'), 'Accept-Encoding')
         self.assertEqual(headers.get('Cache-Control'), 'public, max-age=31536000, immutable')
-        self.assertIn(b'MANAGEBAC_INSTALLER_DOWNLOAD_URL', gzip.decompress(body))
+        self.assertIn(b'MANAGEBAC_API_BASE', gzip.decompress(body))
 
         status, headers, body = self.raw_request(
             'HEAD',
@@ -192,7 +192,7 @@ class ServerRegressionTests(unittest.TestCase):
                 )
                 self.assertEqual(status, 200)
                 self.assertEqual(headers.get('Content-Encoding'), 'gzip')
-                self.assertIn(b'MANAGEBAC_INSTALLER_DOWNLOAD_URL', gzip.decompress(body))
+                self.assertIn(b'MANAGEBAC_API_BASE', gzip.decompress(body))
         finally:
             server.gzip.compress = original_compress
             server.STATIC_GZIP_CACHE.clear()
@@ -221,6 +221,153 @@ class ServerRegressionTests(unittest.TestCase):
         status, payload = self.request('POST', '/api/no-such-endpoint', {})
         self.assertEqual(status, 404, payload)
         self.assertEqual(payload['error'], 'not found')
+
+    def test_managebac_backend_login_stores_only_encrypted_cookie_and_reauthenticates(self):
+        token, user = self.register_user('managebac-backend-user')
+        original_key = os.environ.get('MANAGEBAC_COOKIE_ENCRYPTION_KEY')
+        original_authenticate = server.authenticate_managebac
+        original_fetch = server.fetch_managebac_preview
+        os.environ['MANAGEBAC_COOKIE_ENCRYPTION_KEY'] = base64.urlsafe_b64encode(b'k' * 32).decode('ascii')
+        credentials_seen = []
+
+        def fake_authenticate(account, password):
+            credentials_seen.append((account, password))
+            return types.SimpleNamespace(
+                cookie_jar_json='plain-cookie-jar-one',
+                tasks=[{'sourceId': 'core_task:1', 'title': 'First task'}],
+                meta={'cookieCount': 1, 'fetchedAt': '2026-09-02T00:00:00Z'},
+            )
+
+        def fake_fetch(cookie_jar_json):
+            self.assertEqual(cookie_jar_json, 'plain-cookie-jar-one')
+            return types.SimpleNamespace(
+                cookie_jar_json='plain-cookie-jar-two',
+                tasks=[{'sourceId': 'core_task:2', 'title': 'Second task'}],
+                meta={'cookieCount': 1, 'fetchedAt': '2026-09-02T01:00:00Z'},
+            )
+
+        server.authenticate_managebac = fake_authenticate
+        server.fetch_managebac_preview = fake_fetch
+        try:
+            status, body = self.request('GET', '/api/managebac/session', token=token)
+            self.assertEqual(status, 200, body)
+            self.assertFalse(body['connected'])
+            self.assertTrue(body['requiresLogin'])
+
+            status, body = self.request('POST', '/api/managebac/session', {
+                'account': 'student@example.com',
+                'password': 'managebac-password',
+            }, token=token)
+            self.assertEqual(status, 200, body)
+            self.assertTrue(body['connected'])
+            self.assertEqual(body['tasks'][0]['sourceId'], 'core_task:1')
+            self.assertEqual(credentials_seen, [('student@example.com', 'managebac-password')])
+
+            with server.get_db() as conn:
+                row = conn.execute(
+                    'SELECT encrypted_cookie_jar FROM managebac_sessions WHERE user_id = ?',
+                    (user['id'],),
+                ).fetchone()
+                columns = [column[1] for column in conn.execute('PRAGMA table_info(managebac_sessions)')]
+                managebac_log_details = '\n'.join(
+                    log['detail_json'] for log in conn.execute(
+                        "SELECT detail_json FROM operation_logs WHERE action LIKE 'managebac.%'"
+                    ).fetchall()
+                )
+            self.assertIsNotNone(row)
+            self.assertNotIn('plain-cookie-jar-one', row['encrypted_cookie_jar'])
+            self.assertNotIn('student@example.com', row['encrypted_cookie_jar'])
+            self.assertNotIn('managebac-password', row['encrypted_cookie_jar'])
+            self.assertNotIn('account', columns)
+            self.assertNotIn('password', columns)
+            self.assertNotIn('student@example.com', managebac_log_details)
+            self.assertNotIn('managebac-password', managebac_log_details)
+
+            status, body = self.request('POST', '/api/managebac/tasks/preview', token=token)
+            self.assertEqual(status, 200, body)
+            self.assertEqual(body['tasks'][0]['sourceId'], 'core_task:2')
+            with server.get_db() as conn:
+                rotated = conn.execute(
+                    'SELECT encrypted_cookie_jar FROM managebac_sessions WHERE user_id = ?',
+                    (user['id'],),
+                ).fetchone()['encrypted_cookie_jar']
+            self.assertEqual(server.decrypt_cookie_jar(rotated, user['id']), 'plain-cookie-jar-two')
+
+            def expired_fetch(_cookie_jar_json):
+                raise server.ManageBacSessionExpired('ManageBac 登录已失效，需要重新登录。')
+
+            server.fetch_managebac_preview = expired_fetch
+            status, body = self.request('POST', '/api/managebac/tasks/preview', token=token)
+            self.assertEqual(status, 409, body)
+            self.assertEqual(body['error'], 'managebac_reauth_required')
+            self.assertTrue(body['requiresLogin'])
+            with server.get_db() as conn:
+                self.assertEqual(conn.execute(
+                    'SELECT COUNT(*) FROM managebac_sessions WHERE user_id = ?',
+                    (user['id'],),
+                ).fetchone()[0], 0)
+        finally:
+            server.authenticate_managebac = original_authenticate
+            server.fetch_managebac_preview = original_fetch
+            if original_key is None:
+                os.environ.pop('MANAGEBAC_COOKIE_ENCRYPTION_KEY', None)
+            else:
+                os.environ['MANAGEBAC_COOKIE_ENCRYPTION_KEY'] = original_key
+
+    def test_managebac_backend_endpoints_require_login_and_limit_failed_credentials(self):
+        for method, path in (
+            ('GET', '/api/managebac/session'),
+            ('POST', '/api/managebac/session'),
+            ('POST', '/api/managebac/tasks/preview'),
+            ('DELETE', '/api/managebac/session'),
+        ):
+            status, body = self.request(method, path, {} if method == 'POST' else None)
+            self.assertEqual(status, 401, (method, path, body))
+
+        token, _user = self.register_user('managebac-login-limit-user')
+        original_key = os.environ.get('MANAGEBAC_COOKIE_ENCRYPTION_KEY')
+        original_authenticate = server.authenticate_managebac
+        os.environ['MANAGEBAC_COOKIE_ENCRYPTION_KEY'] = base64.urlsafe_b64encode(b'r' * 32).decode('ascii')
+        attempts = []
+
+        def reject_credentials(account, password):
+            attempts.append((account, password))
+            raise server.ManageBacAuthenticationError('rejected')
+
+        server.authenticate_managebac = reject_credentials
+        try:
+            insecure_request = types.SimpleNamespace(
+                client_address=('127.0.0.1', 12345),
+                headers={'Host': 'todo.example.test'},
+            )
+            secure_proxy_request = types.SimpleNamespace(
+                client_address=('127.0.0.1', 12345),
+                headers={'Host': 'todo.example.test', 'X-Forwarded-Proto': 'https'},
+            )
+            self.assertFalse(server.TodoHandler.managebac_credentials_transport_is_secure(insecure_request))
+            self.assertTrue(server.TodoHandler.managebac_credentials_transport_is_secure(secure_proxy_request))
+
+            for _index in range(server.MANAGEBAC_LOGIN_FAILURE_LIMIT):
+                status, body = self.request('POST', '/api/managebac/session', {
+                    'account': 'student@example.com',
+                    'password': 'wrong-password',
+                }, token=token)
+                self.assertEqual(status, 401, body)
+                self.assertEqual(body['error'], 'managebac_invalid_credentials')
+
+            status, body = self.request('POST', '/api/managebac/session', {
+                'account': 'student@example.com',
+                'password': 'wrong-password',
+            }, token=token)
+            self.assertEqual(status, 429, body)
+            self.assertEqual(body['error'], 'managebac_login_rate_limited')
+            self.assertEqual(len(attempts), server.MANAGEBAC_LOGIN_FAILURE_LIMIT)
+        finally:
+            server.authenticate_managebac = original_authenticate
+            if original_key is None:
+                os.environ.pop('MANAGEBAC_COOKIE_ENCRYPTION_KEY', None)
+            else:
+                os.environ['MANAGEBAC_COOKIE_ENCRYPTION_KEY'] = original_key
 
     def test_registration_ip_attempt_limit_and_admin_setting(self):
         admin_token, admin = self.register_user('registration-limit-admin')
@@ -2213,6 +2360,35 @@ class ServerRegressionTests(unittest.TestCase):
         self.assertIn('@input.capture="commitSubjectInput(action.draft, $event)"', index_html)
         self.assertIn('commitSubjectInput(target, event)', app_js)
 
+    def test_managebac_import_note_contains_clickable_source_url(self):
+        index_html = INDEX_HTML_PATH.read_text(encoding='utf-8')
+        app_js = APP_JS_PATH.read_text(encoding='utf-8')
+
+        self.assertIn('note: this.manageBacImportNote(task)', app_js)
+        self.assertIn('manageBacImportNote(task)', app_js)
+        self.assertIn("url.hostname !== 'sdgj.managebac.cn'", app_js)
+        self.assertIn('if (sourceUrl && String(existing.note || \'\').includes(sourceUrl)) return true;', app_js)
+        self.assertIn(':href="manageBacSourceUrlFromNote(form.note)"', index_html)
+        self.assertIn('rel="noopener noreferrer"', index_html)
+        self.assertIn('>打开 ManageBac 原任务</el-link>', index_html)
+        self.assertIn('"打开 ManageBac 原任务": "Open original ManageBac task"', I18N_JS_PATH.read_text(encoding='utf-8'))
+
+    def test_managebac_sync_supports_credentials_and_local_helper_modes(self):
+        index_html = INDEX_HTML_PATH.read_text(encoding='utf-8')
+        app_js = APP_JS_PATH.read_text(encoding='utf-8')
+
+        self.assertIn("manageBacMethod: 'credentials'", app_js)
+        self.assertIn("this.manageBacMethod = 'credentials';", app_js)
+        self.assertIn('v-model="manageBacMethod"', index_html)
+        self.assertIn('<el-option label="账号密码登录" value="credentials"></el-option>', index_html)
+        self.assertIn('<el-option label="本地 Helper" value="helper"></el-option>', index_html)
+        self.assertIn('v-if="manageBacMethod === \'helper\'"', index_html)
+        self.assertEqual(index_html.count('@click="downloadManageBacInstaller"'), 1)
+        self.assertIn("const MANAGEBAC_HELPER_BASE = 'http://127.0.0.1:27654';", app_js)
+        self.assertIn("return this.manageBacHelperFetch('/v1/health'", app_js)
+        self.assertIn("await this.previewManageBacHelperTasks();", app_js)
+        self.assertIn("await this.previewManageBacServerTasks();", app_js)
+
     def test_ai_approval_does_not_show_pending_status_text(self):
         index_html = INDEX_HTML_PATH.read_text(encoding='utf-8')
         app_js = APP_JS_PATH.read_text(encoding='utf-8')
@@ -2279,6 +2455,24 @@ class ServerRegressionTests(unittest.TestCase):
         self.assertIn('DDL 日历', index_html)
         self.assertIn('aspect-ratio: 1 / 1;', style_css)
         self.assertIn('grid-template-columns: repeat(7, var(--ddl-calendar-cell-size));', style_css)
+        self.assertIn('container-type: inline-size;', style_css)
+        self.assertIn('--ddl-calendar-cell-size: var(--ddl-calendar-cell-by-width);', style_css)
+        self.assertNotIn('--ddl-calendar-cell-by-height:', style_css)
+        self.assertIn(
+            '.app-shell:not(.admin-readonly-board) .ddl-calendar-page {\n'
+            '  width: calc(100% - 360px);\n'
+            '  margin-left: 360px;',
+            style_css,
+        )
+        self.assertIn(
+            '.app-shell.sidebar-collapsed:not(.admin-readonly-board) .ddl-calendar-page {\n'
+            '  margin-inline: auto;',
+            style_css,
+        )
+        self.assertIn(
+            '.timeline-scroll .task-card .task-note-preview {\n  -webkit-line-clamp: 1;',
+            style_css,
+        )
         self.assertIn("'--ddl-calendar-week-count': ddlCalendarWeekCount", index_html)
         self.assertIn('ddlCalendarWeekCount()', app_js)
         self.assertIn('.timeline-area.is-calendar-page {', style_css)
@@ -2368,7 +2562,6 @@ class ServerRegressionTests(unittest.TestCase):
         self.assertIn("`${ADMIN_API}/installer-downloads/summary", app_js)
         self.assertIn("`${ADMIN_API}/installer-downloads/global-limit`", app_js)
         self.assertIn("`${ADMIN_API}/installer-downloads/clear-user-limits`", app_js)
-        self.assertIn('contentDispositionFilename', app_js)
         self.assertIn('.installer-download-line', style_css)
         self.assertIn('.installer-download-limit-fields', style_css)
 

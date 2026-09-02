@@ -2,7 +2,7 @@
 
 [中文](../zh-CN/README.md) | [English](./README.md)
 
-A to-do list web application for learning task management. The project uses a static front end, Python standard library HTTP service and SQLite database storage, and does not require the Node.js build process; `requirements.txt` includes Pillow for avatar migration and the SDK for optional OSS downloads.
+A to-do list web application for learning task management. The project uses a static front end, Python standard library HTTP service and SQLite database storage, and does not require a Node.js build process; `requirements.txt` includes dependencies for avatar migration, ManageBac cookie encryption, and optional OSS downloads.
 
 ## Function
 
@@ -16,7 +16,7 @@ A to-do list web application for learning task management. The project uses a st
 - Supports one-week time grid template and single-day time grid overlay.
 - Time period capacity verification to avoid scheduling longer than available time.
 - Light/dark theme switching.
-- Supports importing ManageBac DDL tasks via local ManageBac Helper preview.
+- Supports importing ManageBac deadlines through backend-stored encrypted cookies.
 
 ## Technology stack
 
@@ -37,9 +37,10 @@ A to-do list web application for learning task management. The project uses a st
 │   ├── vendor/          # Vue and Element Plus Local dependencies
 │   └── assets/          # Static resources such as icons
 ├── server.py            # Static file service、API Services and SQLite initialization
-├── managebac-sync-helper/ # ManageBac local Helper
+├── managebac_backend.py   # ManageBac backend sign-in, cookie encryption, and task parsing
+├── managebac-sync-helper/ # Legacy ManageBac local Helper
 ├── deploy-first-run.sh  # Linux First deployment script
-├── requirements.txt     # Avatar compression and optional OSS download dependencies
+├── requirements.txt     # Avatar, cookie encryption, and optional OSS dependencies
 ├── .env.example         # Environment variable example
 ├── docs/                # Project documentation separated into zh-CN and en
 ├── LICENSE              # MIT License
@@ -63,7 +64,7 @@ pip install -r requirements.txt
 python server.py
 ```
 
-Pillow automatically compresses and migrates old avatars; the Alibaba Cloud SDK supports optional ManageBac Helper OSS pre-signed downloads.
+Pillow compresses and migrates old avatars, `cryptography` encrypts ManageBac cookies, and the Alibaba Cloud SDK supports optional legacy Helper OSS downloads.
 
 The installation package download interface requires user login. The "Download Statistics" page in the administrator's backend allows you to view the number of generations and configure global or single-user rolling window limits.
 
@@ -89,6 +90,7 @@ TODO_PORT=8092
 DEEPSEEK_API_KEY=your-deepseek-api-key
 DEEPSEEK_MODEL=deepseek-v4-flash
 DEEPSEEK_TIMEOUT_SECONDS=20
+MANAGEBAC_COOKIE_ENCRYPTION_KEY=replace-with-generated-key
 ```
 
 Native access typically uses:
@@ -110,42 +112,27 @@ The page can be opened when not logged in, but the task list and daily schedule 
 
 ## Linux deployment
 
-It is recommended to create `.env` in the project root directory first:
+Install Miniconda or Anaconda first and make sure `conda` is available in the current shell. The project provides a first-run deployment script:
 
 ```bash
 cd /root/To-do-list
-cp .env.example .env
-nano .env
-```
-
-Example content:
-
-```env
-TODO_HOST=127.0.0.1
-TODO_PORT=8092
-DEEPSEEK_API_KEY=your-deepseek-api-key
-DEEPSEEK_MODEL=deepseek-v4-flash
-DEEPSEEK_TIMEOUT_SECONDS=20
-```
-
-If you have used Caddy or Nginx for reverse generation, `TODO_HOST` is recommended to keep `127.0.0.1` and do not open the Python service to the public network.
-
-project provides the first deployment script:
-
-```bash
 chmod +x deploy-first-run.sh
 ./deploy-first-run.sh
 ```
 
 The script will:
 
-- Check `python3`.
-- Creates the `data/` directory.
-- Initializes the SQLite database.
-- Creates and starts the systemd user service `todo-list.service` by default.
-- `.env` will not be created, and running environment variables such as `TODO_PORT` and `DEEPSEEK_API_KEY` will not be written to the systemd service.
+- Check `conda` and the required project files.
+- Create `.env` from `.env.example` when it is missing and set mode `600`; an existing `.env` is never overwritten.
+- Validate `MANAGEBAC_COOKIE_ENCRYPTION_KEY`: keep a valid value, or generate a new random 32-byte key when it is missing or invalid, without printing the key.
+- Create the `todo-list` Conda environment with Python 3.12, or reuse it when it already exists.
+- Upgrade pip and install or update `requirements.txt` in that environment.
+- Create `data/` with mode `700` and initialize or migrate the SQLite database.
+- Create, enable, and start the `todo-list.service` systemd user service by default, using the exact Python executable from the Conda environment.
 
-Only initializes the database and does not create systemd services:
+To set the port, AI, or administrator options before the first run, create `.env` manually; otherwise the script copies the template and you can edit it afterward. With a Caddy or Nginx reverse proxy, keep `TODO_HOST=127.0.0.1` instead of exposing the Python service publicly.
+
+Initialize `.env`, the Conda environment, dependencies, and the database without creating a systemd service:
 
 ```bash
 ./deploy-first-run.sh --no-systemd
@@ -180,13 +167,18 @@ If only `TODO_ADMIN_NICKNAME` or only `TODO_ADMIN_PASSWORD` is set, the script w
 
 Other environment variables:
 
+- `TODO_CONDA_ENV`: Conda environment name, default `todo-list`.
+- `TODO_PYTHON_VERSION`: Python version used only when creating a new environment, default `3.12`; an existing environment is not changed.
 - `TODO_SERVICE_NAME`: systemd user service name, default `todo-list.service`.
-- `TODO_PORT`: only used for the last output access address prompt of the script; the actual listening port is determined by `.env`, external environment variables or program default values.
+- `TODO_PORT`: overrides the actual listener port; otherwise the value comes from `.env` or the program default. The script prints the port read by the backend at the end.
 
-Note: `TODO_SERVICE_NAME` is a variable read at the beginning of the shell script and will not take effect through `.env`. If you need to customize the service name, please pass it in directly when running the script:
+`TODO_CONDA_ENV`, `TODO_PYTHON_VERSION`, and `TODO_SERVICE_NAME` are initialization parameters read by the shell script and do not take effect through `.env`. Pass them directly when running the script:
 
 ```bash
-TODO_SERVICE_NAME=my-todo-list.service ./deploy-first-run.sh
+TODO_CONDA_ENV=my-todo-list \
+TODO_PYTHON_VERSION=3.12 \
+TODO_SERVICE_NAME=my-todo-list.service \
+./deploy-first-run.sh
 ```
 
 Default location of user service generated by script:
@@ -204,7 +196,7 @@ After=network.target
 
 [Service]
 WorkingDirectory=/root/To-do-list
-ExecStart=/usr/bin/env python3 /root/To-do-list/server.py
+ExecStart="/root/miniconda3/envs/todo-list/bin/python" "/root/To-do-list/server.py"
 Restart=always
 RestartSec=3
 
@@ -240,7 +232,7 @@ For complete interface description, see [API.md](./API.md).
 
 For function descriptions for ordinary users and administrators, see [User Function Manual](./USER_GUIDE.md).
 
-For local Helper startup and API details, see the [ManageBac Sync Integration Guide](./MANAGEBAC_SYNC.md).
+For backend sign-in, cookie encryption, and reauthentication details, see the [ManageBac Sync Integration Guide](./MANAGEBAC_SYNC.md).
 
 See [Security Notes](./SECURITY.md) for security boundaries, deployment considerations, and known residual risks.
 

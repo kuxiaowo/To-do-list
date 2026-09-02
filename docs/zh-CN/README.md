@@ -2,7 +2,7 @@
 
 [中文](./README.md) | [English](../en/README.md)
 
-一个面向学习任务管理的待办清单 Web 应用。项目使用静态前端、Python 标准库 HTTP 服务和 SQLite 数据库存储，不需要 Node.js 构建流程；`requirements.txt` 包含头像迁移所需的 Pillow 和可选 OSS 下载所需的 SDK。
+一个面向学习任务管理的待办清单 Web 应用。项目使用静态前端、Python 标准库 HTTP 服务和 SQLite 数据库存储，不需要 Node.js 构建流程；`requirements.txt` 包含头像迁移、ManageBac Cookie 加密和可选 OSS 下载所需的依赖。
 
 ## 功能
 
@@ -16,7 +16,7 @@
 - 支持一周时间格子模板和单日时间格子覆盖。
 - 时间段容量校验，避免安排时长超过可用时间。
 - 浅色/深色主题切换。
-- 支持通过本地 ManageBac Helper 预览导入 ManageBac DDL 任务。
+- 支持由后端使用加密 Cookie 预览导入 ManageBac DDL 任务。
 
 ## 技术栈
 
@@ -37,9 +37,10 @@
 │   ├── vendor/          # Vue 和 Element Plus 本地依赖
 │   └── assets/          # 图标等静态资源
 ├── server.py            # 静态文件服务、API 服务和 SQLite 初始化
-├── managebac-sync-helper/ # ManageBac 本地 Helper
+├── managebac_backend.py   # ManageBac 后端登录、Cookie 加密和任务解析
+├── managebac-sync-helper/ # 旧版 ManageBac 本地 Helper
 ├── deploy-first-run.sh  # Linux 首次部署脚本
-├── requirements.txt     # 头像压缩与可选 OSS 下载依赖
+├── requirements.txt     # 头像压缩、Cookie 加密与可选 OSS 下载依赖
 ├── .env.example         # 环境变量示例
 ├── docs/                # 按 zh-CN 和 en 分开的项目文档
 ├── LICENSE              # MIT 许可证
@@ -63,7 +64,7 @@ pip install -r requirements.txt
 python server.py
 ```
 
-Pillow 用于自动压缩和迁移旧头像；阿里云 SDK 用于可选的 ManageBac Helper OSS 预签名下载。
+Pillow 用于自动压缩和迁移旧头像，`cryptography` 用于加密 ManageBac Cookie；阿里云 SDK 用于旧版 Helper 的可选 OSS 预签名下载。
 
 安装包下载接口需要用户登录。管理员后台的“下载统计”页可以查看生成次数，并配置全局或单用户的滚动窗口限制。
 
@@ -89,6 +90,7 @@ TODO_PORT=8092
 DEEPSEEK_API_KEY=your-deepseek-api-key
 DEEPSEEK_MODEL=deepseek-v4-flash
 DEEPSEEK_TIMEOUT_SECONDS=20
+MANAGEBAC_COOKIE_ENCRYPTION_KEY=replace-with-generated-key
 ```
 
 本机访问通常使用：
@@ -110,42 +112,27 @@ http://localhost:8092
 
 ## Linux 部署
 
-建议先在项目根目录创建 `.env`：
+需要预先安装 Miniconda 或 Anaconda，并确保当前 shell 可以运行 `conda`。项目提供首次部署脚本：
 
 ```bash
 cd /root/To-do-list
-cp .env.example .env
-nano .env
-```
-
-示例内容：
-
-```env
-TODO_HOST=127.0.0.1
-TODO_PORT=8092
-DEEPSEEK_API_KEY=your-deepseek-api-key
-DEEPSEEK_MODEL=deepseek-v4-flash
-DEEPSEEK_TIMEOUT_SECONDS=20
-```
-
-如果已经用 Caddy 或 Nginx 反代，`TODO_HOST` 建议保持 `127.0.0.1`，不要开放 Python 服务到公网。
-
-项目提供首次部署脚本：
-
-```bash
 chmod +x deploy-first-run.sh
 ./deploy-first-run.sh
 ```
 
 脚本会：
 
-- 检查 `python3`。
-- 创建 `data/` 目录。
-- 初始化 SQLite 数据库。
-- 默认创建并启动 systemd 用户服务 `todo-list.service`。
-- 不会创建 `.env`，也不会向 systemd service 写入 `TODO_PORT`、`DEEPSEEK_API_KEY` 等运行环境变量。
+- 检查 `conda` 和项目必需文件。
+- 当 `.env` 不存在时，从 `.env.example` 创建，并将权限设置为 `600`；已有 `.env` 不会被覆盖。
+- 检查 `MANAGEBAC_COOKIE_ENCRYPTION_KEY`：有效密钥保持不变，缺失或无效时生成新的 32 字节随机密钥，且不会把密钥打印到终端。
+- 创建 Conda 环境 `todo-list`（Python 3.12），已存在时直接复用。
+- 在该环境中升级 pip，并安装或更新 `requirements.txt`。
+- 创建权限为 `700` 的 `data/`，初始化或迁移 SQLite 数据库。
+- 默认创建、启用并启动 systemd 用户服务 `todo-list.service`，服务固定使用该 Conda 环境中的 Python。
 
-只初始化数据库、不创建 systemd 服务：
+如需提前设置端口、AI 或管理员配置，可以在首次运行前手动创建 `.env`；否则脚本会自动复制模板，之后再编辑即可。如果使用 Caddy 或 Nginx 反代，`TODO_HOST` 建议保持 `127.0.0.1`，不要开放 Python 服务到公网。
+
+初始化 `.env`、Conda 环境、依赖和数据库，但不创建 systemd 服务：
 
 ```bash
 ./deploy-first-run.sh --no-systemd
@@ -180,13 +167,18 @@ TODO_ADMIN_PASSWORD=change-this-password
 
 其他环境变量：
 
+- `TODO_CONDA_ENV`：Conda 环境名，默认 `todo-list`。
+- `TODO_PYTHON_VERSION`：新建 Conda 环境时使用的 Python 版本，默认 `3.12`；复用已有环境时不会改版本。
 - `TODO_SERVICE_NAME`：systemd 用户服务名，默认 `todo-list.service`。
-- `TODO_PORT`：只用于脚本最后输出访问地址提示；实际监听端口由 `.env`、外部环境变量或程序默认值决定。
+- `TODO_PORT`：覆盖实际监听端口；未通过 shell 设置时读取 `.env` 或程序默认值。脚本最后会打印后端实际读取到的端口。
 
-注意：`TODO_SERVICE_NAME` 是 shell 脚本开头读取的变量，不会通过 `.env` 生效。如需自定义服务名，请在运行脚本时直接传入：
+注意：`TODO_CONDA_ENV`、`TODO_PYTHON_VERSION` 和 `TODO_SERVICE_NAME` 是 shell 脚本读取的初始化参数，不会通过 `.env` 生效。如需自定义，请在运行脚本时直接传入：
 
 ```bash
-TODO_SERVICE_NAME=my-todo-list.service ./deploy-first-run.sh
+TODO_CONDA_ENV=my-todo-list \
+TODO_PYTHON_VERSION=3.12 \
+TODO_SERVICE_NAME=my-todo-list.service \
+./deploy-first-run.sh
 ```
 
 脚本生成的用户服务默认位置：
@@ -204,7 +196,7 @@ After=network.target
 
 [Service]
 WorkingDirectory=/root/To-do-list
-ExecStart=/usr/bin/env python3 /root/To-do-list/server.py
+ExecStart="/root/miniconda3/envs/todo-list/bin/python" "/root/To-do-list/server.py"
 Restart=always
 RestartSec=3
 
@@ -240,7 +232,7 @@ your-domain.com {
 
 面向普通用户和管理员的功能说明见 [用户功能手册](./USER_GUIDE.md)。
 
-ManageBac 本地 Helper 的唤起和本地 API 说明见 [ManageBac 同步接入说明](./MANAGEBAC_SYNC.md)。
+后端登录、Cookie 加密配置和过期重登流程见 [ManageBac 同步接入说明](./MANAGEBAC_SYNC.md)。
 
 安全边界、部署注意事项和已知剩余风险见 [安全说明](./SECURITY.md)。
 

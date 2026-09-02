@@ -58,7 +58,7 @@ dist/
 $env:MANAGEBAC_ALLOWED_ORIGINS="https://example.com,http://localhost:8092"
 ```
 
-默认允许本地开发来源 `localhost:8092` 和 `127.0.0.1:8092`。
+默认允许本地开发来源 `localhost:8092`、`127.0.0.1:8092`，以及正式站点 `nethub.wiki`、`www.nethub.wiki` 和 `todolist.nethub.wiki`。
 
 ## 安全边界
 

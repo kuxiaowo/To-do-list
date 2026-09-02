@@ -221,7 +221,66 @@ Response:
 }
 ```
 
-## ManageBac Helper installation package download
+## ManageBac backend synchronization
+
+All endpoints require this site's `Authorization: Bearer <token>` and responses are not cacheable. Credentials may be submitted only over HTTPS, except for local `localhost` development.
+
+### Read sign-in state
+
+```http
+GET /api/managebac/session
+```
+
+Returns whether a decryptable cookie is stored, the connection time, and the last verification time. This endpoint does not contact ManageBac and therefore does not prove that the cookie has not expired.
+
+### Sign in and get a preview
+
+```http
+POST /api/managebac/session
+Content-Type: application/json
+
+{
+  "account": "student@example.com",
+  "password": "ManageBac password"
+}
+```
+
+The backend signs in once, persists only the AES-GCM-encrypted cookie jar, and immediately returns parsed `tasks` and `meta`. The account and password are not written to the database or operation log.
+
+Possible statuses:
+
+- `200 OK`: Sign-in succeeded and the task preview is returned.
+- `401 Unauthorized`: ManageBac rejected the credentials.
+- `426 Upgrade Required`: A production request did not use HTTPS.
+- `429 Too Many Requests`: Too many recent failed sign-ins.
+- `502 Bad Gateway`: ManageBac is unavailable or its page protocol is not recognized.
+- `503 Service Unavailable`: The cookie encryption key is missing or invalid.
+
+### Get a preview with the saved cookie
+
+```http
+POST /api/managebac/tasks/preview
+```
+
+On success, returns `tasks` and `meta` and persists cookie rotation from ManageBac. An expired cookie returns:
+
+```json
+{
+  "error": "managebac_reauth_required",
+  "message": "ManageBac sign-in has expired.",
+  "requiresLogin": true
+}
+```
+
+### Clear the sign-in
+
+```http
+DELETE /api/managebac/session
+```
+
+Deletes the ManageBac cookie stored for the current site user.
+
+## Legacy ManageBac Helper installation package download
 
 ### Get the installation package download
 

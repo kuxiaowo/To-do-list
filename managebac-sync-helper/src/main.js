@@ -4,8 +4,9 @@ const crypto = require("node:crypto");
 const path = require("node:path");
 const { URL } = require("node:url");
 
+const { fetchManageBacTasksPage } = require("./managebacClient");
 const { parseManageBacTasks } = require("./managebacParser");
-const { TARGET_ORIGIN, isAllowedManageBacWindowUrl } = require("./urlPolicy");
+const { TARGET_ORIGIN, isAllowedClientOrigin, isAllowedManageBacWindowUrl } = require("./urlPolicy");
 
 const PROTOCOL = "managebac-sync";
 const HOST = "127.0.0.1";
@@ -13,8 +14,6 @@ const PORT = 27654;
 const TASKS_URL = `${TARGET_ORIGIN}/student/tasks_and_deadlines`;
 const PARTITION = "persist:managebac-sync-helper";
 const TOKEN_TTL_MS = 10 * 60 * 1000;
-const USER_AGENT =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36";
 const APP_DISPLAY_NAME = "nethub.wiki ManageBac 同步辅助程序";
 
 const clientSessions = new Map();
@@ -33,26 +32,6 @@ let protocolRegistration = {
 
 app.setAppUserModelId("cn.managebac.sync.helper");
 
-function configuredOrigins() {
-  const configured = String(process.env.MANAGEBAC_ALLOWED_ORIGINS || "")
-    .split(",")
-    .map((item) => item.trim())
-    .filter(Boolean);
-  return new Set([
-    "http://localhost:8092",
-    "http://127.0.0.1:8092",
-    "https://nethub.wiki",
-    "https://www.nethub.wiki",
-    ...configured
-  ]);
-}
-
-function isAllowedOrigin(origin) {
-  if (!origin) return true;
-  if (origin === "null") return false;
-  return configuredOrigins().has(origin);
-}
-
 function getManageBacSession() {
   return session.fromPartition(PARTITION);
 }
@@ -68,10 +47,6 @@ async function getCookieStatus() {
     cookieCount: cookies.length,
     hasManageBacSession: cookies.some((cookie) => cookie.name === "_managebac_session")
   };
-}
-
-function buildCookieHeader(cookies) {
-  return cookies.map((cookie) => `${cookie.name}=${cookie.value}`).join("; ");
 }
 
 function extractTitle(html) {
@@ -359,7 +334,7 @@ function corsHeaders(origin) {
     "Cache-Control": "no-store",
     "Vary": "Origin"
   };
-  if (origin && isAllowedOrigin(origin)) {
+  if (origin && isAllowedClientOrigin(origin)) {
     headers["Access-Control-Allow-Origin"] = origin;
     headers["Access-Control-Allow-Headers"] = "Content-Type, X-ManageBac-Client-Token";
     headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS";
@@ -404,7 +379,7 @@ function readJsonBody(req) {
 
 function rejectBadOrigin(req, res) {
   const origin = req.headers.origin || "";
-  if (origin && !isAllowedOrigin(origin)) {
+  if (origin && !isAllowedClientOrigin(origin)) {
     writeJson(req, res, 403, { error: "origin_not_allowed" });
     return true;
   }
@@ -429,18 +404,7 @@ async function fetchTasksPreview() {
     throw error;
   }
 
-  const response = await fetch(TASKS_URL, {
-    redirect: "follow",
-    headers: {
-      accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-      "accept-language": "zh-CN,zh;q=0.9,en-GB;q=0.8,en-US;q=0.7,en;q=0.6",
-      "cache-control": "no-cache",
-      cookie: buildCookieHeader(cookies),
-      pragma: "no-cache",
-      "upgrade-insecure-requests": "1",
-      "user-agent": USER_AGENT
-    }
-  });
+  const response = await fetchManageBacTasksPage(getManageBacSession(), TASKS_URL);
   const html = await response.text();
   const meta = {
     fetchedAt: new Date().toISOString(),
@@ -481,7 +445,7 @@ async function clearManageBacSession() {
 async function handleRequest(req, res) {
   const origin = req.headers.origin || "";
   if (req.method === "OPTIONS") {
-    res.writeHead(isAllowedOrigin(origin) ? 204 : 403, corsHeaders(origin));
+    res.writeHead(isAllowedClientOrigin(origin) ? 204 : 403, corsHeaders(origin));
     res.end();
     return;
   }
