@@ -1,4 +1,6 @@
+import base64
 import json
+import os
 import sqlite3
 import tempfile
 import threading
@@ -860,7 +862,46 @@ class ProjectWorkflowTests(unittest.TestCase):
 
         self.assertIn('TODO_PORT', deploy_script)
         self.assertIn('TODO_ADMIN_NICKNAME', deploy_script)
+        self.assertIn('TODO_CONDA_ENV', deploy_script)
+        self.assertIn('TODO_PYTHON_VERSION', deploy_script)
+        self.assertIn('conda create --yes --name', deploy_script)
+        self.assertIn('"$PYTHON_BIN" -m pip install --upgrade -r', deploy_script)
+        self.assertIn('MANAGEBAC_COOKIE_ENCRYPTION_KEY', deploy_script)
+        self.assertIn('cp "$APP_DIR/.env.example" "$APP_DIR/.env"', deploy_script)
+        self.assertIn('web/index.html', deploy_script)
+        self.assertIn('ExecStart="$PYTHON_BIN"', deploy_script)
+        self.assertNotIn('! -f index.html', deploy_script)
         self.assertIn('管理员', user_guide)
+
+    def test_deploy_script_generates_managebac_key_once(self):
+        deploy_script = Path('deploy-first-run.sh').read_text(encoding='utf-8')
+        start_marker = 'TODO_ENV_PATH="$APP_DIR/.env" "$PYTHON_BIN" - <<\'PY\'\n'
+        end_marker = '\nPY\n\nlog "在 Conda 环境中安装或更新 Python 依赖。"'
+        self.assertIn(start_marker, deploy_script)
+        bootstrap_code = deploy_script.split(start_marker, 1)[1].split(end_marker, 1)[0]
+
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            env_path = Path(temp_dir) / '.env'
+            env_path.write_text('TODO_HOST=127.0.0.1\n', encoding='utf-8')
+            previous_path = os.environ.get('TODO_ENV_PATH')
+            os.environ['TODO_ENV_PATH'] = str(env_path)
+            try:
+                exec(compile(bootstrap_code, 'deploy-first-run-key-bootstrap', 'exec'), {})
+                first_text = env_path.read_text(encoding='utf-8')
+                first_key = next(
+                    line.split('=', 1)[1]
+                    for line in first_text.splitlines()
+                    if line.startswith('MANAGEBAC_COOKIE_ENCRYPTION_KEY=')
+                )
+                self.assertEqual(len(base64.b64decode(first_key, altchars=b'-_', validate=True)), 32)
+
+                exec(compile(bootstrap_code, 'deploy-first-run-key-bootstrap', 'exec'), {})
+                self.assertEqual(env_path.read_text(encoding='utf-8'), first_text)
+            finally:
+                if previous_path is None:
+                    os.environ.pop('TODO_ENV_PATH', None)
+                else:
+                    os.environ['TODO_ENV_PATH'] = previous_path
 
 
 if __name__ == '__main__':

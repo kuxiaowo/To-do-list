@@ -24,7 +24,9 @@ ManageBac 同步由本站后端完成：
 python -m pip install -r requirements.txt
 ```
 
-生成一枚 32 字节 URL-safe Base64 密钥：
+使用 Linux 首次部署脚本时，脚本会在 `.env` 不存在时复制 `.env.example`，并在密钥缺失或无效时自动生成随机密钥；已有有效密钥不会被轮换。
+
+不使用部署脚本时，可手动生成一枚 32 字节 URL-safe Base64 密钥：
 
 ```bash
 python -c "import base64,secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())"

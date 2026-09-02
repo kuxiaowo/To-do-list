@@ -24,7 +24,9 @@ Install dependencies:
 python -m pip install -r requirements.txt
 ```
 
-Generate a 32-byte URL-safe Base64 key:
+The Linux first-run script copies `.env.example` when `.env` is missing and generates a random key when the key is missing or invalid. It never rotates an existing valid key.
+
+When not using the deployment script, generate a 32-byte URL-safe Base64 key manually:
 
 ```bash
 python -c "import base64,secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())"
