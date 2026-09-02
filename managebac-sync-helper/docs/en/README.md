@@ -58,7 +58,7 @@ To allow additional website sources to access the local API, you can set:
 $env:MANAGEBAC_ALLOWED_ORIGINS="https://example.com,http://localhost:8092"
 ```
 
-Local development sources `localhost:8092` and `127.0.0.1:8092` are allowed by default.
+Local development origins `localhost:8092` and `127.0.0.1:8092`, plus the production sites `nethub.wiki`, `www.nethub.wiki`, and `todolist.nethub.wiki`, are allowed by default.
 
 ## Security boundary
 

@@ -30,12 +30,15 @@
 - 删除用户会级联清理该用户任务、安排、习惯、会话、反馈和相关日志。
 - 下载统计、AI token 限额和安装包下载限额都只在管理员后台开放。
 
-## ManageBac Helper
+## ManageBac 后端同步
 
-- Helper 只监听 `127.0.0.1:27654`。
-- Helper 默认只允许 `http://localhost:8092`、`http://127.0.0.1:8092`、`https://nethub.wiki` 和 `https://www.nethub.wiki` 访问本地 API。
-- Helper 只读取自己 Electron profile 中的 ManageBac cookie，不读取 Chrome/Edge cookie，也不把 cookie 返回给网站。
-- 受保护的 Helper 接口需要短期 `X-ManageBac-Client-Token`。
+- ManageBac 账号密码仅用于一次登录，不写入数据库或操作日志；生产环境拒绝通过非 HTTPS 请求提交凭据。
+- 后端只持久化 AES-GCM 加密的 Cookie Jar，密钥来自 `MANAGEBAC_COOKIE_ENCRYPTION_KEY`，不得与数据库一起保存。
+- Cookie 不返回前端，也不会发送给 `sdgj.managebac.cn` 之外的主机；跨域重定向会被拒绝。
+- Cookie 失效后立即删除远端登录态，要求用户重新输入账号密码。
+- 每个本站用户和来源 IP 的失败登录次数受短期限制，以降低密码撞库风险。
+- 不要在反向代理、APM 或调试中记录 `/api/managebac/session` 的请求体，否则“后端不持久化密码”的边界会被日志绕过。
+- Cookie 在有效期内仍等同登录凭证；应用服务器与加密密钥同时失陷时，攻击者仍可能解密 Cookie。
 
 ## 仍需人工关注
 

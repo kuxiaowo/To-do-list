@@ -221,7 +221,66 @@ POST /api/auth/logout
 }
 ```
 
-## ManageBac Helper 安装包下载
+## ManageBac 后端同步
+
+以下接口都需要本站 `Authorization: Bearer <token>`，响应均禁止缓存。账号密码只允许通过 HTTPS 提交；本机 `localhost` 开发除外。
+
+### 查询登录状态
+
+```http
+GET /api/managebac/session
+```
+
+返回是否保存了可解密的 Cookie、连接时间和上次验证时间。此接口不访问 ManageBac，不保证 Cookie 尚未过期。
+
+### 登录并获取预览
+
+```http
+POST /api/managebac/session
+Content-Type: application/json
+
+{
+  "account": "student@example.com",
+  "password": "ManageBac password"
+}
+```
+
+后端完成一次 ManageBac 登录，只持久化 AES-GCM 加密的 Cookie Jar，并立即返回解析后的 `tasks` 和 `meta`。账号和密码不会写入数据库或操作日志。
+
+可能状态：
+
+- `200 OK`：登录成功并返回任务预览。
+- `401 Unauthorized`：ManageBac 拒绝账号密码。
+- `426 Upgrade Required`：生产请求未使用 HTTPS。
+- `429 Too Many Requests`：短时间内登录失败次数过多。
+- `502 Bad Gateway`：ManageBac 不可用或页面协议无法识别。
+- `503 Service Unavailable`：Cookie 加密密钥缺失或无效。
+
+### 使用 Cookie 获取预览
+
+```http
+POST /api/managebac/tasks/preview
+```
+
+成功时返回 `tasks` 和 `meta`，并保存 ManageBac 响应产生的 Cookie 轮换。Cookie 失效时返回：
+
+```json
+{
+  "error": "managebac_reauth_required",
+  "message": "ManageBac 登录已失效，需要重新登录。",
+  "requiresLogin": true
+}
+```
+
+### 清除登录状态
+
+```http
+DELETE /api/managebac/session
+```
+
+删除当前本站用户保存的 ManageBac Cookie。
+
+## 旧版 ManageBac Helper 安装包下载
 
 ### 获取安装包下载
 

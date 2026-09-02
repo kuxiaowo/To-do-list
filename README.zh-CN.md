@@ -46,7 +46,7 @@
 - 管理周期性习惯，并标记相互重叠的时间冲突。
 - 按用户隔离账号、任务、每日安排和个性化设置。
 - 使用可选 AI 助手分析任务，并在执行修改前进行审批。
-- 通过本地 ManageBac Helper 预览并导入 DDL。
+- 通过后端保存的加密 ManageBac Cookie 预览并导入 DDL。
 - 支持简体中文、英文以及浅色、深色主题。
 - 可直接使用 Python 运行，也可通过脚本部署为 systemd 用户服务。
 
@@ -57,8 +57,7 @@
 | 前端 | Vue 3、Element Plus、原生 JavaScript |
 | 后端 | Python 标准库 `http.server` |
 | 数据库 | SQLite |
-| 可选集成 | DeepSeek API、阿里云 OSS |
-| 桌面 Helper | Electron |
+| 可选集成 | DeepSeek API、ManageBac、阿里云 OSS |
 
 前端依赖已保存在 `web/vendor`，生产环境不依赖外部 CDN。
 
@@ -83,7 +82,7 @@ python server.py
 cp .env.example .env
 ```
 
-依赖中的 Pillow 用于自动压缩和迁移头像；阿里云 SDK 用于可选的 ManageBac Helper OSS 下载。
+依赖中的 Pillow 用于自动压缩和迁移头像，`cryptography` 用于加密 ManageBac Cookie；阿里云 SDK 用于旧版 Helper 的可选 OSS 下载。
 
 完整配置和部署方式请阅读[中文部署文档](./docs/zh-CN/README.md)。
 
@@ -93,14 +92,15 @@ cp .env.example .env
 .
 ├── web/                       # Vue 静态前端
 ├── server.py                  # HTTP 服务、API 和数据库初始化
+├── managebac_backend.py       # ManageBac 登录、Cookie 加密和任务解析
 ├── ai_prompts.json            # AI 助手提示词
-├── managebac-sync-helper/     # 可选 Electron 桌面 Helper
+├── managebac-sync-helper/     # 旧版 Electron Helper（主站不再依赖）
 ├── tests/                     # 后端与工作流回归测试
 ├── docs/
 │   ├── en/                    # 英文文档
 │   └── zh-CN/                 # 简体中文文档
 ├── deploy-first-run.sh        # Linux 首次部署脚本
-├── requirements.txt           # 头像压缩与可选 OSS 依赖
+├── requirements.txt           # 头像、Cookie 加密与可选 OSS 依赖
 └── LICENSE
 ```
 
@@ -113,7 +113,6 @@ cp .env.example .env
 | 用户指南 | [阅读](./docs/zh-CN/USER_GUIDE.md) | [Read](./docs/en/USER_GUIDE.md) |
 | ManageBac 集成 | [阅读](./docs/zh-CN/MANAGEBAC_SYNC.md) | [Read](./docs/en/MANAGEBAC_SYNC.md) |
 | 安全说明 | [阅读](./docs/zh-CN/SECURITY.md) | [Read](./docs/en/SECURITY.md) |
-| ManageBac Helper | [阅读](./managebac-sync-helper/docs/zh-CN/README.md) | [Read](./managebac-sync-helper/docs/en/README.md) |
 
 ## 开发
 

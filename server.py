@@ -25,6 +25,19 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
+from managebac_backend import (
+    ManageBacAuthenticationError,
+    ManageBacConfigurationError,
+    ManageBacProtocolError,
+    ManageBacRemoteError,
+    ManageBacSessionExpired,
+    authenticate_managebac,
+    decrypt_cookie_jar,
+    encrypt_cookie_jar,
+    fetch_managebac_preview,
+    validate_cookie_encryption_configuration,
+)
+
 BASE_DIR = Path(__file__).resolve().parent
 WEB_DIR = BASE_DIR / 'web'
 AI_PROMPTS_PATH = BASE_DIR / 'ai_prompts.json'
@@ -120,6 +133,11 @@ MAX_TASK_NOTE_LENGTH = 4000
 HABIT_SYNC_FUTURE_DAYS = 90
 MAX_HABIT_SYNC_FUTURE_DAYS = 365
 MAX_AVATAR_BYTES = 64 * 1024
+MAX_MANAGEBAC_ACCOUNT_LENGTH = 254
+MAX_MANAGEBAC_PASSWORD_LENGTH = 1024
+MANAGEBAC_LOGIN_FAILURE_LIMIT = 5
+MANAGEBAC_LOGIN_FAILURE_WINDOW_MINUTES = 15
+MANAGEBAC_USER_LOCKS = tuple(threading.Lock() for _ in range(32))
 AVATAR_CONTENT_TYPES = {
     'image/png': 'png',
     'image/jpeg': 'jpg',
@@ -587,6 +605,18 @@ def init_db() -> None:
         )
         conn.execute(
             '''
+            CREATE TABLE IF NOT EXISTS managebac_sessions (
+                user_id INTEGER PRIMARY KEY,
+                encrypted_cookie_jar TEXT NOT NULL,
+                connected_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                last_verified_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            '''
+        )
+        conn.execute(
+            '''
             INSERT OR IGNORE INTO app_settings (key, value, updated_at)
             VALUES (?, ?, ?)
             ''',
@@ -725,6 +755,15 @@ def get_db() -> sqlite3.Connection:
 
 def now_iso() -> str:
     return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+
+
+def managebac_user_lock(user_id: int) -> threading.Lock:
+    return MANAGEBAC_USER_LOCKS[int(user_id) % len(MANAGEBAC_USER_LOCKS)]
+
+
+def managebac_login_failure_window_start() -> str:
+    start = datetime.now(timezone.utc) - timedelta(minutes=MANAGEBAC_LOGIN_FAILURE_WINDOW_MINUTES)
+    return start.strftime('%Y-%m-%dT%H:%M:%SZ')
 
 
 def hash_password(password: str) -> str:
@@ -2479,6 +2518,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return self.handle_list_feedback()
         if path == '/api/auth/me':
             return self.handle_auth_me()
+        if path == '/api/managebac/session':
+            return self.handle_managebac_session_status()
         if path == '/api/health':
             return self.write_json({'ok': True})
         if path.startswith('/api/'):
@@ -2515,6 +2556,10 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return self.handle_auth_logout()
         if path == '/api/auth/avatar':
             return self.handle_auth_update_avatar()
+        if path == '/api/managebac/session':
+            return self.handle_managebac_login()
+        if path == '/api/managebac/tasks/preview':
+            return self.handle_managebac_tasks_preview()
         if path == '/api/ai/chat':
             return self.handle_ai_chat()
         if path == '/api/ai/chat-stream':
@@ -2587,6 +2632,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return self.handle_delete_feedback(path.rsplit('/', 1)[-1])
         if path == '/api/auth/avatar':
             return self.handle_auth_delete_avatar()
+        if path == '/api/managebac/session':
+            return self.handle_managebac_disconnect()
         if path.startswith('/api/admin/users/'):
             return self.handle_admin_delete_user(path.rsplit('/', 1)[-1])
         if path.startswith('/api/tasks/'):
@@ -2633,6 +2680,302 @@ class TodoHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         if send_body:
             self.wfile.write(raw)
+
+    def managebac_login_failure_count(self, conn: sqlite3.Connection, user_id: int, ip: str) -> int:
+        window_start = managebac_login_failure_window_start()
+        last_success = conn.execute(
+            '''
+            SELECT MAX(created_at)
+            FROM operation_logs
+            WHERE target_user_id = ? AND action = 'managebac.login'
+            ''',
+            (user_id,),
+        ).fetchone()[0]
+        cutoff = max(window_start, str(last_success or ''))
+        return int(conn.execute(
+            '''
+            SELECT COUNT(*)
+            FROM operation_logs
+            WHERE target_user_id = ?
+              AND action = 'managebac.login_failed'
+              AND ip = ?
+              AND created_at > ?
+            ''',
+            (user_id, ip, cutoff),
+        ).fetchone()[0])
+
+    def handle_managebac_session_status(self):
+        user = self.require_user()
+        if not user:
+            return
+        user_id = int(user['id'])
+        with get_db() as conn:
+            row = conn.execute(
+                '''
+                SELECT encrypted_cookie_jar, connected_at, updated_at, last_verified_at
+                FROM managebac_sessions
+                WHERE user_id = ?
+                ''',
+                (user_id,),
+            ).fetchone()
+        if not row:
+            return self.write_json({
+                'connected': False,
+                'requiresLogin': True,
+                'status': 'disconnected',
+            })
+        try:
+            decrypt_cookie_jar(row['encrypted_cookie_jar'], user_id)
+        except ManageBacConfigurationError as error:
+            return self.write_json(
+                {'error': 'managebac_cookie_configuration_error', 'message': str(error)},
+                status=HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+        return self.write_json({
+            'connected': True,
+            'requiresLogin': False,
+            'status': 'connected',
+            'connectedAt': row['connected_at'],
+            'updatedAt': row['updated_at'],
+            'lastVerifiedAt': row['last_verified_at'],
+        })
+
+    def handle_managebac_login(self):
+        user = self.require_user()
+        if not user:
+            return
+        if not self.managebac_credentials_transport_is_secure():
+            return self.write_json(
+                {
+                    'error': 'managebac_https_required',
+                    'message': 'ManageBac 账号密码只能通过 HTTPS 提交。',
+                },
+                status=HTTPStatus.UPGRADE_REQUIRED,
+            )
+        payload = self.read_json_body()
+        if payload is None:
+            return
+        account = str(payload.get('account', '')).strip()
+        password = str(payload.get('password', ''))
+        if not account or not password:
+            payload['password'] = ''
+            return self.write_json(
+                {'error': 'managebac_credentials_required', 'message': '请填写 ManageBac 账号和密码。'},
+                status=HTTPStatus.BAD_REQUEST,
+            )
+        if len(account) > MAX_MANAGEBAC_ACCOUNT_LENGTH or len(password) > MAX_MANAGEBAC_PASSWORD_LENGTH:
+            payload['password'] = ''
+            return self.write_json(
+                {'error': 'managebac_credentials_too_long', 'message': 'ManageBac 账号或密码长度超出限制。'},
+                status=HTTPStatus.BAD_REQUEST,
+            )
+
+        user_id = int(user['id'])
+        ip = self.request_ip()
+        with managebac_user_lock(user_id):
+            with get_db() as conn:
+                failure_count = self.managebac_login_failure_count(conn, user_id, ip)
+            if failure_count >= MANAGEBAC_LOGIN_FAILURE_LIMIT:
+                payload['password'] = ''
+                return self.write_json({
+                    'error': 'managebac_login_rate_limited',
+                    'message': f'ManageBac 登录失败次数过多，请 {MANAGEBAC_LOGIN_FAILURE_WINDOW_MINUTES} 分钟后重试。',
+                    'attemptLimit': MANAGEBAC_LOGIN_FAILURE_LIMIT,
+                    'windowMinutes': MANAGEBAC_LOGIN_FAILURE_WINDOW_MINUTES,
+                }, status=HTTPStatus.TOO_MANY_REQUESTS)
+
+            try:
+                validate_cookie_encryption_configuration()
+                preview = authenticate_managebac(account, password)
+                encrypted_cookie_jar = encrypt_cookie_jar(preview.cookie_jar_json, user_id)
+            except ManageBacAuthenticationError as error:
+                with get_db() as conn:
+                    self.log_operation(
+                        conn,
+                        user_id,
+                        user_id,
+                        'managebac.login_failed',
+                        'managebac_session',
+                        str(user_id),
+                        {'reason': 'credentials_rejected'},
+                    )
+                    conn.commit()
+                return self.write_json(
+                    {'error': 'managebac_invalid_credentials', 'message': str(error)},
+                    status=HTTPStatus.UNAUTHORIZED,
+                )
+            except ManageBacConfigurationError as error:
+                return self.write_json(
+                    {'error': 'managebac_cookie_configuration_error', 'message': str(error)},
+                    status=HTTPStatus.SERVICE_UNAVAILABLE,
+                )
+            except ManageBacRemoteError as error:
+                return self.write_json(
+                    {'error': 'managebac_unavailable', 'message': str(error)},
+                    status=HTTPStatus.BAD_GATEWAY,
+                )
+            except ManageBacProtocolError as error:
+                return self.write_json(
+                    {'error': 'managebac_protocol_error', 'message': str(error)},
+                    status=HTTPStatus.BAD_GATEWAY,
+                )
+            finally:
+                payload['password'] = ''
+                password = ''
+
+            timestamp = now_iso()
+            with get_db() as conn:
+                conn.execute(
+                    '''
+                    INSERT INTO managebac_sessions
+                    (user_id, encrypted_cookie_jar, connected_at, updated_at, last_verified_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(user_id) DO UPDATE SET
+                        encrypted_cookie_jar = excluded.encrypted_cookie_jar,
+                        connected_at = excluded.connected_at,
+                        updated_at = excluded.updated_at,
+                        last_verified_at = excluded.last_verified_at
+                    ''',
+                    (user_id, encrypted_cookie_jar, timestamp, timestamp, timestamp),
+                )
+                self.log_operation(
+                    conn,
+                    user_id,
+                    user_id,
+                    'managebac.login',
+                    'managebac_session',
+                    str(user_id),
+                    {'cookieCount': preview.meta.get('cookieCount', 0)},
+                )
+                conn.commit()
+            return self.write_json({
+                'ok': True,
+                'connected': True,
+                'requiresLogin': False,
+                'tasks': preview.tasks,
+                'meta': preview.meta,
+                'connectedAt': timestamp,
+                'lastVerifiedAt': timestamp,
+            })
+
+    def handle_managebac_tasks_preview(self):
+        user = self.require_user()
+        if not user:
+            return
+        user_id = int(user['id'])
+        with managebac_user_lock(user_id):
+            with get_db() as conn:
+                row = conn.execute(
+                    'SELECT encrypted_cookie_jar FROM managebac_sessions WHERE user_id = ?',
+                    (user_id,),
+                ).fetchone()
+            if not row:
+                return self.write_json(
+                    {
+                        'error': 'managebac_reauth_required',
+                        'message': '请先输入 ManageBac 账号和密码完成登录。',
+                        'requiresLogin': True,
+                    },
+                    status=HTTPStatus.CONFLICT,
+                )
+            try:
+                cookie_jar_json = decrypt_cookie_jar(row['encrypted_cookie_jar'], user_id)
+                preview = fetch_managebac_preview(cookie_jar_json)
+                encrypted_cookie_jar = encrypt_cookie_jar(preview.cookie_jar_json, user_id)
+            except ManageBacSessionExpired as error:
+                with get_db() as conn:
+                    conn.execute('DELETE FROM managebac_sessions WHERE user_id = ?', (user_id,))
+                    self.log_operation(
+                        conn,
+                        user_id,
+                        user_id,
+                        'managebac.session_expired',
+                        'managebac_session',
+                        str(user_id),
+                    )
+                    conn.commit()
+                return self.write_json(
+                    {'error': 'managebac_reauth_required', 'message': str(error), 'requiresLogin': True},
+                    status=HTTPStatus.CONFLICT,
+                )
+            except ManageBacConfigurationError as error:
+                return self.write_json(
+                    {'error': 'managebac_cookie_configuration_error', 'message': str(error)},
+                    status=HTTPStatus.SERVICE_UNAVAILABLE,
+                )
+            except ManageBacRemoteError as error:
+                return self.write_json(
+                    {'error': 'managebac_unavailable', 'message': str(error)},
+                    status=HTTPStatus.BAD_GATEWAY,
+                )
+            except ManageBacProtocolError as error:
+                return self.write_json(
+                    {'error': 'managebac_protocol_error', 'message': str(error)},
+                    status=HTTPStatus.BAD_GATEWAY,
+                )
+
+            timestamp = now_iso()
+            with get_db() as conn:
+                conn.execute(
+                    '''
+                    UPDATE managebac_sessions
+                    SET encrypted_cookie_jar = ?, updated_at = ?, last_verified_at = ?
+                    WHERE user_id = ?
+                    ''',
+                    (encrypted_cookie_jar, timestamp, timestamp, user_id),
+                )
+                conn.commit()
+            return self.write_json({
+                'ok': True,
+                'connected': True,
+                'requiresLogin': False,
+                'tasks': preview.tasks,
+                'meta': preview.meta,
+                'lastVerifiedAt': timestamp,
+            })
+
+    def handle_managebac_disconnect(self):
+        user = self.require_user()
+        if not user:
+            return
+        user_id = int(user['id'])
+        with managebac_user_lock(user_id):
+            with get_db() as conn:
+                cursor = conn.execute('DELETE FROM managebac_sessions WHERE user_id = ?', (user_id,))
+                if cursor.rowcount:
+                    self.log_operation(
+                        conn,
+                        user_id,
+                        user_id,
+                        'managebac.disconnect',
+                        'managebac_session',
+                        str(user_id),
+                    )
+                conn.commit()
+        return self.write_json({
+            'ok': True,
+            'connected': False,
+            'requiresLogin': True,
+            'status': 'disconnected',
+        })
+
+    def managebac_credentials_transport_is_secure(self) -> bool:
+        peer = str(self.client_address[0] if self.client_address else '')
+        try:
+            peer_is_loopback = ipaddress.ip_address(peer).is_loopback
+        except ValueError:
+            peer_is_loopback = False
+        host_header = str(self.headers.get('Host', '')).strip().lower()
+        if host_header.startswith('[') and ']' in host_header:
+            host = host_header[:host_header.index(']') + 1]
+        else:
+            host = host_header.split(':', 1)[0]
+        if peer_is_loopback and host in {'127.0.0.1', 'localhost', '[::1]'}:
+            return True
+        if peer in TRUSTED_PROXY_IPS:
+            forwarded_proto = str(self.headers.get('X-Forwarded-Proto', '')).split(',', 1)[0].strip().lower()
+            return forwarded_proto == 'https'
+        return False
 
     def handle_managebac_installer(self, send_body: bool = True):
         if not send_body:
@@ -6155,6 +6498,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
         self.send_response(status)
         self.send_header('Content-Type', 'application/json; charset=utf-8')
         self.send_header('Content-Length', str(len(body)))
+        self.send_header('Cache-Control', 'no-store')
         self.end_headers()
         self.wfile.write(body)
 

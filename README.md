@@ -49,7 +49,7 @@ There is no Node.js build step for the main web application.
 - Maintain recurring habits and detect schedule conflicts.
 - Keep accounts, tasks, schedules, and settings isolated by user.
 - Use the optional AI assistant to review or propose task changes before applying them.
-- Preview and import ManageBac deadlines through the local desktop Helper.
+- Preview and import ManageBac deadlines through backend-stored encrypted cookies.
 - Switch between English and Simplified Chinese, as well as light and dark themes.
 - Deploy with Python alone or install a systemd user service with the included script.
 
@@ -60,8 +60,7 @@ There is no Node.js build step for the main web application.
 | Front end | Vue 3, Element Plus, vanilla JavaScript |
 | Back end | Python standard library `http.server` |
 | Database | SQLite |
-| Optional integration | DeepSeek API, Alibaba Cloud OSS |
-| Desktop Helper | Electron |
+| Optional integration | DeepSeek API, ManageBac, Alibaba Cloud OSS |
 
 The front-end libraries are stored in `web/vendor`, so production deployment
 does not depend on an external CDN.
@@ -87,8 +86,8 @@ environment example first:
 cp .env.example .env
 ```
 
-Pillow is used to compress and migrate avatars; the Alibaba Cloud SDK supports
-the optional ManageBac Helper OSS download.
+Pillow compresses and migrates avatars, `cryptography` encrypts ManageBac cookies,
+and the Alibaba Cloud SDK supports the optional legacy Helper OSS download.
 
 See the [English documentation](./docs/en/README.md) or
 [中文文档](./docs/zh-CN/README.md) for complete configuration and deployment
@@ -100,14 +99,15 @@ instructions.
 .
 ├── web/                       # Static Vue front end
 ├── server.py                  # HTTP service, API, and database initialization
+├── managebac_backend.py       # ManageBac sign-in, cookie encryption, and task parsing
 ├── ai_prompts.json            # AI assistant prompts
-├── managebac-sync-helper/     # Optional Electron desktop Helper
+├── managebac-sync-helper/     # Legacy Electron Helper (no longer required by the site)
 ├── tests/                     # Backend and workflow regression tests
 ├── docs/
 │   ├── en/                    # English documentation
 │   └── zh-CN/                 # Simplified Chinese documentation
 ├── deploy-first-run.sh        # First-run Linux deployment helper
-├── requirements.txt           # Avatar compression and optional OSS dependencies
+├── requirements.txt           # Avatar, cookie encryption, and optional OSS dependencies
 └── LICENSE
 ```
 
@@ -120,7 +120,6 @@ instructions.
 | User guide | [Read](./docs/en/USER_GUIDE.md) | [阅读](./docs/zh-CN/USER_GUIDE.md) |
 | ManageBac integration | [Read](./docs/en/MANAGEBAC_SYNC.md) | [阅读](./docs/zh-CN/MANAGEBAC_SYNC.md) |
 | Security notes | [Read](./docs/en/SECURITY.md) | [阅读](./docs/zh-CN/SECURITY.md) |
-| ManageBac Helper | [Read](./managebac-sync-helper/docs/en/README.md) | [阅读](./managebac-sync-helper/docs/zh-CN/README.md) |
 
 ## Development
 

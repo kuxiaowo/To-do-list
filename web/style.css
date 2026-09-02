@@ -2404,6 +2404,27 @@ body.is-schedule-touch-dragging * {
   flex-shrink: 0;
 }
 
+.managebac-login-panel {
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--brand-line);
+  border-radius: 8px;
+  background: linear-gradient(90deg, var(--brand-soft), var(--panel) 120px);
+}
+
+.managebac-login-fields {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(180px, 1fr) auto;
+  gap: 10px;
+}
+
+.managebac-credential-note {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .managebac-meta {
   display: flex;
   flex-wrap: wrap;
@@ -3736,6 +3757,10 @@ body.is-schedule-touch-dragging * {
 
   .managebac-actions {
     justify-content: flex-start;
+  }
+
+  .managebac-login-fields {
+    grid-template-columns: 1fr;
   }
 
   .managebac-preview-row {
