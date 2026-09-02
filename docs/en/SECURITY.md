@@ -30,12 +30,15 @@ This document records the security boundaries, deployment recommendations, and r
 - Deleting a user will cascade clean up the user's tasks, arrangements, habits, conversations, feedback and related logs.
 - Download statistics, AI token quota and installation package download quota are only available in the administrator background.
 
-## ManageBac Helper
+## ManageBac backend synchronization
 
-- Helper only listens to `127.0.0.1:27654`.
-- Helper only allows `http://localhost:8092`, `http://127.0.0.1:8092`, `https://nethub.wiki` and `https://www.nethub.wiki` to access the local API by default.
-- Helper only reads the ManageBac cookie in its own Electron profile, does not read Chrome/Edge cookies, and does not return cookies to the website.
-- Protected Helper interface requires short-lived `X-ManageBac-Client-Token`.
+- ManageBac credentials are used for one sign-in only and are not written to the database or operation log; production rejects credential submission without HTTPS.
+- The backend persists only an AES-GCM-encrypted cookie jar. `MANAGEBAC_COOKIE_ENCRYPTION_KEY` must be stored separately from the database.
+- Cookies are never returned to the frontend or sent outside `sdgj.managebac.cn`; cross-origin redirects are rejected.
+- Expired cookies are deleted and users must enter their credentials again.
+- Failed sign-ins are rate-limited per site user and source IP to reduce credential-stuffing risk.
+- Do not log the `/api/managebac/session` request body in a reverse proxy, APM, or debug middleware; doing so would bypass the backend's no-persistence boundary for passwords.
+- An active cookie is still a sign-in credential. An attacker who compromises both the application server and encryption key may decrypt it.
 
 ## Still needs manual attention
 

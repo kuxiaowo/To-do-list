@@ -2,7 +2,7 @@
 
 [中文](../zh-CN/README.md) | [English](./README.md)
 
-A to-do list web application for learning task management. The project uses a static front end, Python standard library HTTP service and SQLite database storage, and does not require the Node.js build process; `requirements.txt` includes Pillow for avatar migration and the SDK for optional OSS downloads.
+A to-do list web application for learning task management. The project uses a static front end, Python standard library HTTP service and SQLite database storage, and does not require a Node.js build process; `requirements.txt` includes dependencies for avatar migration, ManageBac cookie encryption, and optional OSS downloads.
 
 ## Function
 
@@ -16,7 +16,7 @@ A to-do list web application for learning task management. The project uses a st
 - Supports one-week time grid template and single-day time grid overlay.
 - Time period capacity verification to avoid scheduling longer than available time.
 - Light/dark theme switching.
-- Supports importing ManageBac DDL tasks via local ManageBac Helper preview.
+- Supports importing ManageBac deadlines through backend-stored encrypted cookies.
 
 ## Technology stack
 
@@ -37,9 +37,10 @@ A to-do list web application for learning task management. The project uses a st
 │   ├── vendor/          # Vue and Element Plus Local dependencies
 │   └── assets/          # Static resources such as icons
 ├── server.py            # Static file service、API Services and SQLite initialization
-├── managebac-sync-helper/ # ManageBac local Helper
+├── managebac_backend.py   # ManageBac backend sign-in, cookie encryption, and task parsing
+├── managebac-sync-helper/ # Legacy ManageBac local Helper
 ├── deploy-first-run.sh  # Linux First deployment script
-├── requirements.txt     # Avatar compression and optional OSS download dependencies
+├── requirements.txt     # Avatar, cookie encryption, and optional OSS dependencies
 ├── .env.example         # Environment variable example
 ├── docs/                # Project documentation separated into zh-CN and en
 ├── LICENSE              # MIT License
@@ -63,7 +64,7 @@ pip install -r requirements.txt
 python server.py
 ```
 
-Pillow automatically compresses and migrates old avatars; the Alibaba Cloud SDK supports optional ManageBac Helper OSS pre-signed downloads.
+Pillow compresses and migrates old avatars, `cryptography` encrypts ManageBac cookies, and the Alibaba Cloud SDK supports optional legacy Helper OSS downloads.
 
 The installation package download interface requires user login. The "Download Statistics" page in the administrator's backend allows you to view the number of generations and configure global or single-user rolling window limits.
 
@@ -89,6 +90,7 @@ TODO_PORT=8092
 DEEPSEEK_API_KEY=your-deepseek-api-key
 DEEPSEEK_MODEL=deepseek-v4-flash
 DEEPSEEK_TIMEOUT_SECONDS=20
+MANAGEBAC_COOKIE_ENCRYPTION_KEY=replace-with-generated-key
 ```
 
 Native access typically uses:
@@ -240,7 +242,7 @@ For complete interface description, see [API.md](./API.md).
 
 For function descriptions for ordinary users and administrators, see [User Function Manual](./USER_GUIDE.md).
 
-For local Helper startup and API details, see the [ManageBac Sync Integration Guide](./MANAGEBAC_SYNC.md).
+For backend sign-in, cookie encryption, and reauthentication details, see the [ManageBac Sync Integration Guide](./MANAGEBAC_SYNC.md).
 
 See [Security Notes](./SECURITY.md) for security boundaries, deployment considerations, and known residual risks.
 

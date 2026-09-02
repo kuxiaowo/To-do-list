@@ -2,7 +2,7 @@
 
 [中文](./README.md) | [English](../en/README.md)
 
-一个面向学习任务管理的待办清单 Web 应用。项目使用静态前端、Python 标准库 HTTP 服务和 SQLite 数据库存储，不需要 Node.js 构建流程；`requirements.txt` 包含头像迁移所需的 Pillow 和可选 OSS 下载所需的 SDK。
+一个面向学习任务管理的待办清单 Web 应用。项目使用静态前端、Python 标准库 HTTP 服务和 SQLite 数据库存储，不需要 Node.js 构建流程；`requirements.txt` 包含头像迁移、ManageBac Cookie 加密和可选 OSS 下载所需的依赖。
 
 ## 功能
 
@@ -16,7 +16,7 @@
 - 支持一周时间格子模板和单日时间格子覆盖。
 - 时间段容量校验，避免安排时长超过可用时间。
 - 浅色/深色主题切换。
-- 支持通过本地 ManageBac Helper 预览导入 ManageBac DDL 任务。
+- 支持由后端使用加密 Cookie 预览导入 ManageBac DDL 任务。
 
 ## 技术栈
 
@@ -37,9 +37,10 @@
 │   ├── vendor/          # Vue 和 Element Plus 本地依赖
 │   └── assets/          # 图标等静态资源
 ├── server.py            # 静态文件服务、API 服务和 SQLite 初始化
-├── managebac-sync-helper/ # ManageBac 本地 Helper
+├── managebac_backend.py   # ManageBac 后端登录、Cookie 加密和任务解析
+├── managebac-sync-helper/ # 旧版 ManageBac 本地 Helper
 ├── deploy-first-run.sh  # Linux 首次部署脚本
-├── requirements.txt     # 头像压缩与可选 OSS 下载依赖
+├── requirements.txt     # 头像压缩、Cookie 加密与可选 OSS 下载依赖
 ├── .env.example         # 环境变量示例
 ├── docs/                # 按 zh-CN 和 en 分开的项目文档
 ├── LICENSE              # MIT 许可证
@@ -63,7 +64,7 @@ pip install -r requirements.txt
 python server.py
 ```
 
-Pillow 用于自动压缩和迁移旧头像；阿里云 SDK 用于可选的 ManageBac Helper OSS 预签名下载。
+Pillow 用于自动压缩和迁移旧头像，`cryptography` 用于加密 ManageBac Cookie；阿里云 SDK 用于旧版 Helper 的可选 OSS 预签名下载。
 
 安装包下载接口需要用户登录。管理员后台的“下载统计”页可以查看生成次数，并配置全局或单用户的滚动窗口限制。
 
@@ -89,6 +90,7 @@ TODO_PORT=8092
 DEEPSEEK_API_KEY=your-deepseek-api-key
 DEEPSEEK_MODEL=deepseek-v4-flash
 DEEPSEEK_TIMEOUT_SECONDS=20
+MANAGEBAC_COOKIE_ENCRYPTION_KEY=replace-with-generated-key
 ```
 
 本机访问通常使用：
@@ -240,7 +242,7 @@ your-domain.com {
 
 面向普通用户和管理员的功能说明见 [用户功能手册](./USER_GUIDE.md)。
 
-ManageBac 本地 Helper 的唤起和本地 API 说明见 [ManageBac 同步接入说明](./MANAGEBAC_SYNC.md)。
+后端登录、Cookie 加密配置和过期重登流程见 [ManageBac 同步接入说明](./MANAGEBAC_SYNC.md)。
 
 安全边界、部署注意事项和已知剩余风险见 [安全说明](./SECURITY.md)。
 
