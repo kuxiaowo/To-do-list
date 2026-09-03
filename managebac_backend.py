@@ -97,7 +97,13 @@ class ManageBacPreview:
 class _ManageBacRedirectHandler(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         parsed = urllib.parse.urlparse(newurl)
-        if parsed.scheme != 'https' or (parsed.hostname or '').lower() != MANAGEBAC_ALLOWED_HOST:
+        target_host = (parsed.hostname or '').lower()
+        if parsed.scheme != 'https' or target_host != MANAGEBAC_ALLOWED_HOST:
+            print(
+                f'[ManageBac] error_type=untrusted_redirect '
+                f'target_host={json.dumps(target_host or None)}',
+                flush=True,
+            )
             raise ManageBacProtocolError('ManageBac 返回了不受信任的跳转地址。')
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
