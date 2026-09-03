@@ -1,8 +1,10 @@
 import base64
 import http.cookiejar
+import io
 import os
 import secrets
 import unittest
+from contextlib import redirect_stdout
 
 import managebac_backend
 
@@ -100,6 +102,29 @@ class ManageBacBackendTests(unittest.TestCase):
         self.assertEqual(managebac_backend.extract_authenticity_token(login_html), 'csrf&value')
         self.assertTrue(managebac_backend.is_login_page(login_html, managebac_backend.MANAGEBAC_LOGIN_URL))
         self.assertTrue(managebac_backend.is_tasks_page(TASKS_HTML))
+
+    def test_rejected_redirect_logs_only_error_type_and_target_host(self):
+        output = io.StringIO()
+        redirect_url = 'https://login-name:password@sso.example.com/private/path?token=secret'
+
+        with redirect_stdout(output):
+            with self.assertRaises(managebac_backend.ManageBacProtocolError):
+                managebac_backend._ManageBacRedirectHandler().redirect_request(
+                    None,
+                    None,
+                    302,
+                    'Found',
+                    {},
+                    redirect_url,
+                )
+
+        log_line = output.getvalue()
+        self.assertEqual(
+            log_line,
+            '[ManageBac] error_type=untrusted_redirect target_host="sso.example.com"\n',
+        )
+        for sensitive_value in ('login-name', 'password', '/private/path', 'token', 'secret'):
+            self.assertNotIn(sensitive_value, log_line)
 
 
 if __name__ == '__main__':
