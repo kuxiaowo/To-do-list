@@ -6,7 +6,7 @@ A to-do list web application for learning task management. The project uses a st
 
 ## Function
 
-- Account registration, login, and logout.
+- Sign in through NetHub Accounts; TodoList logout ends only the local site session.
 - Isolate tasks, daily schedules and time grid configurations by user.
 - Add, edit, delete, complete or cancel DDL tasks.
 - Supports task title, account, deadline time, priority and notes.
@@ -57,7 +57,7 @@ data/
 
 ## Run locally
 
-Make sure Python 3 is installed, then run:
+Make sure Python 3 is installed, preferably in a Conda Python 3.12 environment, then run:
 
 ```bash
 pip install -r requirements.txt
@@ -87,6 +87,13 @@ Then modify `.env` as needed. Example content:
 ```env
 TODO_HOST=127.0.0.1
 TODO_PORT=8092
+TODO_PUBLIC_URL=https://todolist.nethub.wiki
+ACCOUNTS_ISSUER=https://auth.nethub.wiki
+TODO_OIDC_CLIENT_ID=todo
+TODO_OIDC_CLIENT_SECRET=replace-with-registered-client-secret
+TODO_OIDC_REDIRECT_URI=https://todolist.nethub.wiki/auth/callback
+TODO_SESSION_COOKIE_SECURE=true
+TODO_LEGACY_AUTH_ENABLED=false
 DEEPSEEK_API_KEY=your-deepseek-api-key
 DEEPSEEK_MODEL=deepseek-v4-flash
 DEEPSEEK_TIMEOUT_SECONDS=20
@@ -103,10 +110,10 @@ http://localhost:8092
 
 ## First time use
 
-1. Open `http://localhost:8092`.
-2. Click the account entry in the upper right corner.
-3. Register a new account.
-4. After logging in, you can add, edit, delete and schedule tasks.
+1. Register the TodoList client in Accounts with the exact `/auth/callback` redirect and `/auth/backchannel-logout` Back-Channel Logout URL.
+2. Put the client secret and Issuer in `.env`.
+3. Open TodoList and complete sign-in in Accounts.
+4. The first callback creates a local member; you can then add, edit, delete and schedule tasks.
 
 The page can be opened when not logged in, but the task list and daily schedule are in a read-only empty data state and modifications cannot be saved.
 
@@ -130,7 +137,7 @@ The script will:
 - Create `data/` with mode `700` and initialize or migrate the SQLite database.
 - Create, enable, and start the `todo-list.service` systemd user service by default, using the exact Python executable from the Conda environment.
 
-To set the port, AI, or administrator options before the first run, create `.env` manually; otherwise the script copies the template and you can edit it afterward. With a Caddy or Nginx reverse proxy, keep `TODO_HOST=127.0.0.1` instead of exposing the Python service publicly.
+To set the port, OIDC, or AI options before the first run, create `.env` manually; otherwise the script copies the template and you can edit it afterward. With a Caddy or Nginx reverse proxy, keep `TODO_HOST=127.0.0.1` instead of exposing the Python service publicly.
 
 Initialize `.env`, the Conda environment, dependencies, and the database without creating a systemd service:
 
@@ -144,26 +151,15 @@ Create the systemd service but do not start it immediately:
 ./deploy-first-run.sh --no-start
 ```
 
-Optional environment variables:
+TodoList no longer creates a local-password administrator. After configuring the Accounts client, sign in once with the central account and grant the local role using the immutable central `sub`:
 
 ```bash
-TODO_ADMIN_NICKNAME=admin \
-TODO_ADMIN_NAME=Administrator \
-TODO_ADMIN_PASSWORD='change-this-password' \
-./deploy-first-run.sh
+conda run -n todo-list python scripts/grant_admin.py \
+  --database data/todo-list.db \
+  --auth-sub 00000000-0000-0000-0000-000000000000
 ```
 
-You can also write the administrator initialization configuration into `.env`:
-
-```env
-TODO_ADMIN_NICKNAME=admin
-TODO_ADMIN_NAME=Administrator
-TODO_ADMIN_PASSWORD=change-this-password
-```
-
-`deploy-first-run.sh` will import `server.py` when initializing the database, and `server.py` will read `.env`, so these administrator variables can take effect from `.env`. When you run the script again, if the nickname already exists, the account will be updated to administrator and the password will be reset.
-
-If only `TODO_ADMIN_NICKNAME` or only `TODO_ADMIN_PASSWORD` is set, the script will report an error and exit; both need to be set at the same time. After the deployment is completed, it is recommended to remove the clear text administrator password from `.env`. Don’t hang the key at the door. Everyone will know it when the wind blows.
+This changes only the TodoList-local role; it does not grant administrator access in Accounts or any other site. The mapping tool preserves existing local administrator roles during migration.
 
 Other environment variables:
 
@@ -236,11 +232,22 @@ For backend sign-in, cookie encryption, and reauthentication details, see the [M
 
 See [Security Notes](./SECURITY.md) for security boundaries, deployment considerations, and known residual risks.
 
-The interface that needs to log in passes the token through the request header:
+Browser authentication uses an opaque server-side session cookie. Mutating requests also send the CSRF token returned by `/api/auth/me`:
 
 ```http
-Authorization: Bearer <token>
+Cookie: todo_session=<opaque-token>
+X-CSRF-Token: <csrf-token>
 ```
+
+Before the production hard cutover, import legacy accounts into Accounts, export the mapping, take an offline TodoList database backup, and run:
+
+```bash
+conda run -n todo-list python scripts/apply_accounts_mapping.py \
+  --database data/todo-list.db \
+  --mapping /secure/path/accounts-mapping.json
+```
+
+The mapping must cover every local user. The transaction preserves local IDs, roles, and business data, archives old passwords, clears old sessions, and is safe to repeat with the same mapping.
 
 ## Data description
 
@@ -252,7 +259,7 @@ data/todo-list.db
 
 This directory has been ignored by `.gitignore` to avoid submitting local running data. SQLite WAL mode is enabled when the service starts, so the database must be placed in the local file system and cannot be placed directly in network file systems such as NFS/SMB. Please use the SQLite backup API for online backup; you can also stop the service first and then fully back up the `data/` directory. Do not just copy the `.db` file when the service is running to avoid missing transactions that have not been checkpointed in the WAL.
 
-The password is stored using PBKDF2-SHA256 salted hash; the default validity period of the session token is 7 days. Active sessions are automatically extended, but the server refreshes the expiration time at most every hour to reduce database write lock competition caused by read-only requests.
+After cutover this site no longer verifies or stores a login-capable password. Legacy PBKDF2 hashes are moved to a non-login archive during migration; Accounts performs password verification. Local session tokens are stored only as hashes in SQLite and expire after 7 days by default. Active sessions are extended, with at most one expiry refresh per hour.
 
 ## Development instructions
 

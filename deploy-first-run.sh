@@ -21,9 +21,6 @@ Todo List 第一次部署脚本
   -h, --help     显示帮助
 
 可选环境变量：
-  TODO_ADMIN_NICKNAME   预创建管理员昵称
-  TODO_ADMIN_NAME       预创建管理员姓名，默认同昵称
-  TODO_ADMIN_PASSWORD   预创建管理员密码；为空则不创建管理员
   TODO_CONDA_ENV        Conda 环境名，默认 todo-list
   TODO_PYTHON_VERSION   Conda Python 版本，默认 3.12
   TODO_SERVICE_NAME     systemd 服务名，默认 todo-list.service
@@ -31,7 +28,7 @@ Todo List 第一次部署脚本
 
 示例：
   chmod +x deploy-first-run.sh
-  TODO_ADMIN_NICKNAME=kuxiaowo TODO_ADMIN_PASSWORD='换成强密码' ./deploy-first-run.sh
+  ./deploy-first-run.sh
 
 说明：
   - 需要预先安装 Conda，并确保 conda 命令可用
@@ -164,8 +161,6 @@ chmod 700 "$APP_DIR/data"
 
 "$PYTHON_BIN" - <<'PY'
 import importlib.util
-import os
-import sqlite3
 from pathlib import Path
 
 app_dir = Path.cwd()
@@ -173,34 +168,6 @@ spec = importlib.util.spec_from_file_location('todo_server', app_dir / 'server.p
 server = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(server)
 server.init_db()
-
-nickname = os.environ.get('TODO_ADMIN_NICKNAME', '').strip()
-password = os.environ.get('TODO_ADMIN_PASSWORD', '')
-name = os.environ.get('TODO_ADMIN_NAME', '').strip() or nickname
-
-if nickname and password:
-    with sqlite3.connect(server.DB_PATH) as conn:
-        row = conn.execute('SELECT id FROM users WHERE lower(nickname) = lower(?)', (nickname,)).fetchone()
-        password_hash = server.hash_password(password)
-        if row:
-            conn.execute(
-                'UPDATE users SET name = ?, password_hash = ?, role = ? WHERE id = ?',
-                (name, password_hash, 'admin', row[0]),
-            )
-            action = 'updated'
-        else:
-            conn.execute(
-                'INSERT INTO users (name, nickname, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?)',
-                (name, nickname, password_hash, 'admin', server.now_iso()),
-            )
-            action = 'created'
-        conn.commit()
-    print(f'admin {action}: {nickname}')
-elif nickname or password:
-    raise SystemExit('TODO_ADMIN_NICKNAME 和 TODO_ADMIN_PASSWORD 需要同时设置。')
-else:
-    print('admin skipped: 可在网页里注册第一个账号。')
-
 print(f'database ready: {server.DB_PATH}')
 PY
 

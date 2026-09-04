@@ -16,7 +16,8 @@ Request header:
 
 ```http
 Content-Type: application/json
-Authorization: Bearer <token>
+Cookie: todo_session=<opaque-token>
+X-CSRF-Token: <csrf-token>  # required only for mutating requests
 ```
 
 When accessing some read interfaces without logging in, read-only empty data will be returned; writing, updating, and deleting interfaces must be logged in.
@@ -123,65 +124,25 @@ Description:
 - `keyBase` is the time grid stable identifier within the same day.
 - `start` and `end` use `HH:mm`.
 
-## Authentication interface
+## Authentication
 
-### Register
-
-```http
-POST /api/auth/register
-```
-
-Request:
-
-```json
-{
-  "name": "Zhang San",
-  "nickname": "zhangsan",
-  "password": "123456"
-}
-```
-
-Response:
-
-```json
-{
-  "token": "session-token",
-  "user": {
-    "id": 1,
-    "name": "Zhang San",
-    "nickname": "zhangsan",
-    "role": "student"
-  }
-}
-```
-
-Status code:
-
-- `200 OK`: Registration successful and automatic login.
-- `400 Bad Request`: Field is missing, field is too long, or password is less than 6 characters.
-- `409 Conflict`: Nickname already exists.
-
-### Login
+### Start central sign-in
 
 ```http
-POST /api/auth/login
+GET /auth/login
 ```
 
-Request:
+Creates one-time OIDC state, nonce, and PKCE verifier, stores the flow hash in SQLite, and redirects to Accounts. The browser also receives a short-lived `HttpOnly` flow cookie.
 
-```json
-{
-  "nickname": "zhangsan",
-  "password": "123456"
-}
+### OIDC callback
+
+```http
+GET /auth/callback?code=<code>&state=<state>
 ```
 
-The response is the same as the registration interface.
+The backend exchanges the code and validates the ID Token and UserInfo. If the `auth_sub` has no local member, the central username and display name are copied once into a default `student` member. Profiles remain site-local afterward. Success sets the local session cookie and redirects to `/`.
 
-Status code:
-
-- `200 OK`: Login successful.
-- `401 Unauthorized`: Incorrect nickname or password.
+Legacy `POST /api/auth/register`, `POST /api/auth/login`, and `PUT /api/auth/password` return `410 Gone` by default in production.
 
 ### Get the current user
 
@@ -193,6 +154,7 @@ Response:
 
 ```json
 {
+  "csrfToken": "request-csrf-token",
   "user": {
     "id": 1,
     "name": "Zhang San",
@@ -204,8 +166,8 @@ Response:
 
 Status code:
 
-- `200 OK`: token is valid.
-- `401 Unauthorized`: Not logged in or token expired.
+- `200 OK`: Cookie session is valid.
+- `401 Unauthorized`: Not signed in or the session expired.
 
 ### Log out
 
@@ -221,9 +183,22 @@ Response:
 }
 ```
 
+This deletes only the TodoList-local session; it does not sign out of Accounts or other sites.
+
+### Back-Channel Logout
+
+```http
+POST /auth/backchannel-logout
+Content-Type: application/x-www-form-urlencoded
+
+logout_token=<signed-jwt>
+```
+
+Accounts calls this endpoint. After validating the signature and claims, TodoList deletes sessions by central `sid` or `sub`; a repeated `jti` has no repeated side effect.
+
 ## ManageBac backend synchronization
 
-All endpoints require this site's `Authorization: Bearer <token>` and responses are not cacheable. Credentials may be submitted only over HTTPS, except for local `localhost` development.
+All endpoints require the local cookie session; mutating requests also require the CSRF token. Responses are not cacheable. ManageBac credentials may be submitted only over HTTPS, except for local `localhost` development.
 
 ### Read sign-in state
 
@@ -286,7 +261,7 @@ Deletes the ManageBac cookie stored for the current site user.
 
 ```http
 GET /api/managebac-helper/installer
-Authorization: Bearer <token>
+Cookie: todo_session=<opaque-token>
 ```
 
 Behavior:
@@ -917,7 +892,8 @@ The AI ​​context only contains the unfinished `pool=todo` tasks of the curre
 
 ```http
 POST /api/ai/chat
-Authorization: Bearer <token>
+Cookie: todo_session=<opaque-token>
+X-CSRF-Token: <csrf-token>
 Content-Type: application/json
 ```
 
@@ -975,7 +951,8 @@ Status code:
 
 ```http
 POST /api/ai/chat-stream
-Authorization: Bearer <token>
+Cookie: todo_session=<opaque-token>
+X-CSRF-Token: <csrf-token>
 Content-Type: application/json
 ```
 
@@ -1013,7 +990,7 @@ The following interfaces require administrator login.
 
 ```http
 GET /api/admin/ai-usage/summary?view=7d&page=1&pageSize=10
-Authorization: Bearer <token>
+Cookie: todo_session=<opaque-token>
 ```
 
 `view` Optional: `6h`, `1d`, `7d`, `30d`. The response contains global limits, trend data, effective limits for the current page user, and rolling window usage.
@@ -1022,7 +999,8 @@ Authorization: Bearer <token>
 
 ```http
 PUT /api/admin/ai-usage/global-limit
-Authorization: Bearer <token>
+Cookie: todo_session=<opaque-token>
+X-CSRF-Token: <csrf-token>
 Content-Type: application/json
 ```
 

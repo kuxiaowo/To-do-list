@@ -25,10 +25,12 @@ class ProjectWorkflowTests(unittest.TestCase):
         self.original_data_dir = server.DATA_DIR
         self.original_db_path = server.DB_PATH
         self.original_iterations = server.PASSWORD_ITERATIONS
+        self.original_legacy_auth = server.LEGACY_AUTH_ENABLED
         self.temp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         server.DATA_DIR = Path(self.temp_dir.name)
         server.DB_PATH = server.DATA_DIR / 'todo-list.db'
         server.PASSWORD_ITERATIONS = 1_000
+        server.LEGACY_AUTH_ENABLED = True
         server.init_db()
 
         self.httpd = ThreadingHTTPServer(('127.0.0.1', 0), server.TodoHandler)
@@ -43,6 +45,7 @@ class ProjectWorkflowTests(unittest.TestCase):
         server.DATA_DIR = self.original_data_dir
         server.DB_PATH = self.original_db_path
         server.PASSWORD_ITERATIONS = self.original_iterations
+        server.LEGACY_AUTH_ENABLED = self.original_legacy_auth
         self.temp_dir.cleanup()
 
     def request(self, method, path, payload=None, token=None, extra_headers=None):
@@ -847,6 +850,9 @@ class ProjectWorkflowTests(unittest.TestCase):
         for endpoint in [
             '/api/auth/register',
             '/api/auth/login',
+            '/auth/login',
+            '/auth/callback',
+            '/auth/backchannel-logout',
             '/api/tasks',
             '/api/schedule-items',
             '/api/habits',
@@ -861,7 +867,8 @@ class ProjectWorkflowTests(unittest.TestCase):
         self.assertIn('[English](../en/API.md)', api_doc)
 
         self.assertIn('TODO_PORT', deploy_script)
-        self.assertIn('TODO_ADMIN_NICKNAME', deploy_script)
+        self.assertNotIn('TODO_ADMIN_NICKNAME', deploy_script)
+        self.assertNotIn('TODO_ADMIN_PASSWORD', deploy_script)
         self.assertIn('TODO_CONDA_ENV', deploy_script)
         self.assertIn('TODO_PYTHON_VERSION', deploy_script)
         self.assertIn('conda create --yes --name', deploy_script)
