@@ -236,9 +236,11 @@
                 </div>
 
                 <div v-if="!currentUser">
-                  <div class="auth-form">
-                    <p>使用 NetHub Accounts 登录；新用户也会在统一账号页面完成注册。</p>
-                    <el-button type="primary" @click="login">使用统一账号登录</el-button>
+                  <div class="auth-form nethub-auth-panel">
+                    <div class="nethub-auth-mark" aria-hidden="true">N</div>
+                    <h3>注册或登录</h3>
+                    <p class="nethub-auth-note">本网站使用 NetHub 账号登录，请前往账号管理界面</p>
+                    <el-button type="primary" @click="login">登录或注册 NetHub 账号后继续</el-button>
                   </div>
                 </div>
                 <div v-if="!currentUser" class="locked-hint">登录后会加载并编辑你自己的待办数据。</div>

@@ -479,6 +479,40 @@ body {
   margin-top: 10px;
 }
 
+.nethub-auth-panel {
+  align-items: stretch;
+  padding: 18px;
+  border: 1px solid color-mix(in srgb, var(--brand) 22%, transparent);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--brand) 6%, var(--panel));
+  text-align: center;
+}
+
+.nethub-auth-mark {
+  display: grid;
+  place-items: center;
+  width: 46px;
+  height: 46px;
+  margin: 0 auto 2px;
+  border-radius: 14px;
+  background: linear-gradient(135deg, var(--brand-strong), #7c5cff);
+  color: #fff;
+  font-size: 1.25rem;
+  font-weight: 800;
+  box-shadow: 0 10px 24px color-mix(in srgb, var(--brand) 25%, transparent);
+}
+
+.nethub-auth-panel h3,
+.nethub-auth-panel p {
+  margin: 0;
+}
+
+.nethub-auth-note {
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.6;
+}
+
 .account-setting-actions {
   display: flex;
   align-items: center;

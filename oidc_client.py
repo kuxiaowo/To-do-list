@@ -27,7 +27,15 @@ def _endpoint(issuer: str, path: str) -> str:
 
 
 def authorization_url(
-    *, issuer: str, client_id: str, redirect_uri: str, state: str, nonce: str, verifier: str
+    *,
+    issuer: str,
+    client_id: str,
+    redirect_uri: str,
+    state: str,
+    nonce: str,
+    verifier: str,
+    prompt: str | None = None,
+    screen_hint: str | None = None,
 ) -> str:
     client = OAuth2Session(
         client_id=client_id,
@@ -35,11 +43,17 @@ def authorization_url(
         redirect_uri=redirect_uri,
         code_challenge_method='S256',
     )
+    extra = {}
+    if prompt:
+        extra['prompt'] = prompt
+    if screen_hint:
+        extra['screen_hint'] = screen_hint
     url, _ = client.create_authorization_url(
         _endpoint(issuer, '/oauth/authorize'),
         state=state,
         nonce=nonce,
         code_verifier=verifier,
+        **extra,
     )
     return url
 

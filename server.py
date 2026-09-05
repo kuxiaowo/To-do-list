@@ -3247,6 +3247,9 @@ class TodoHandler(SimpleHTTPRequestHandler):
         state = secrets.token_urlsafe(32)
         nonce = secrets.token_urlsafe(32)
         verifier = secrets.token_urlsafe(64)
+        query = parse_qs(urlparse(self.path).query)
+        prompt = 'none' if query.get('prompt', [''])[0] == 'none' else None
+        screen_hint = 'signup' if query.get('screen_hint', [''])[0] == 'signup' else None
         now = int(time.time())
         with get_db() as conn:
             conn.execute('DELETE FROM oidc_login_flows WHERE created_at < ?', (now - 600,))
@@ -3266,6 +3269,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
             state=state,
             nonce=nonce,
             verifier=verifier,
+            prompt=prompt,
+            screen_hint=screen_hint,
         )
         return self.redirect_to(
             location,
@@ -3275,6 +3280,11 @@ class TodoHandler(SimpleHTTPRequestHandler):
     def handle_oidc_callback(self):
         query = parse_qs(urlparse(self.path).query)
         if query.get('error'):
+            if query['error'][0] == 'login_required':
+                return self.redirect_to(
+                    '/?sso=none',
+                    cookies=[self.cookie_header(OIDC_FLOW_COOKIE_NAME, '', 0)],
+                )
             return self.write_json(
                 {'error': 'central login was rejected', 'detail': query['error'][0]},
                 status=HTTPStatus.BAD_REQUEST,

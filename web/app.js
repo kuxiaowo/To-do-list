@@ -1063,6 +1063,25 @@ createApp({
     this.setDdlCalendarMonth(this.currentViewDateKey);
     document.addEventListener('click', this.closeAccountMenu);
     await this.loadCurrentUser();
+    if (this.currentUser) {
+      window.sessionStorage.removeItem('todo-sso-probe');
+      window.localStorage.removeItem('todo-sso-suppressed-until');
+    } else {
+      const params = new URLSearchParams(window.location.search);
+      const silentFailed = params.get('sso') === 'none';
+      const suppressedUntil = Number(window.localStorage.getItem('todo-sso-suppressed-until') || 0);
+      const alreadyProbed = window.sessionStorage.getItem('todo-sso-probe') === '1';
+      if (silentFailed) {
+        params.delete('sso');
+        const query = params.toString();
+        window.history.replaceState({}, '', `${window.location.pathname}${query ? `?${query}` : ''}${window.location.hash}`);
+      } else if (!alreadyProbed && Date.now() >= suppressedUntil) {
+        window.sessionStorage.setItem('todo-sso-probe', '1');
+        window.location.replace('/auth/login?prompt=none');
+        return;
+      }
+      this.accountMenuOpen = true;
+    }
     await this.recordVisit('home');
     await this.loadSubjectTemplate();
     await this.loadScheduleConfig();
@@ -3181,10 +3200,14 @@ createApp({
       }
     },
     async login() {
+      window.sessionStorage.removeItem('todo-sso-probe');
+      window.localStorage.removeItem('todo-sso-suppressed-until');
       window.location.assign('/auth/login');
     },
     async register() {
-      window.location.assign('/auth/login');
+      window.sessionStorage.removeItem('todo-sso-probe');
+      window.localStorage.removeItem('todo-sso-suppressed-until');
+      window.location.assign('/auth/login?screen_hint=signup');
     },
     openNicknameDialog() {
       if (!this.currentUser) return;
@@ -3580,6 +3603,7 @@ createApp({
       }
       this.csrfToken = '';
       this.currentUser = null;
+      window.localStorage.setItem('todo-sso-suppressed-until', String(Date.now() + 10 * 60 * 1000));
       this.adminMode = false;
       this.adminSection = 'users';
       this.adminUsers = [];
