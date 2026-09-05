@@ -198,7 +198,7 @@
                 :style="currentUser && !avatarImageUrl ? avatarFallbackStyle : null"
                 @click="accountMenuOpen = !accountMenuOpen"
               >
-                <img v-if="avatarImageUrl" :src="avatarImageUrl" alt="" class="avatar-button-image">
+                <img v-if="avatarImageUrl" :src="avatarImageUrl" alt="" class="avatar-button-image" @error="markAvatarFailed(avatarImageUrl)">
                 <span v-else>{{ avatarText }}</span>
               </button>
 
@@ -209,14 +209,14 @@
                       <button
                         class="account-profile-avatar"
                         type="button"
-                        title="修改头像"
+                        title="前往账户中心修改头像"
                         :style="avatarFallbackStyle"
                         @click="openAvatarDialog"
                       >
-                        <img v-if="avatarImageUrl" :src="avatarImageUrl" alt="" class="avatar-button-image">
+                        <img v-if="avatarImageUrl" :src="avatarImageUrl" alt="" class="avatar-button-image" @error="markAvatarFailed(avatarImageUrl)">
                         <span v-else>{{ avatarText }}</span>
                       </button>
-                      <div class="account-avatar-hint">点击修改头像</div>
+                      <div class="account-avatar-hint">在账户中心统一修改</div>
                     </div>
                     <div>
                       <div class="auth-title">账号</div>
@@ -245,7 +245,7 @@
                 </div>
                 <a
                   class="account-center-link"
-                  href="https://auth.nethub.wiki/account"
+                  :href="currentUser.accountUrl"
                   target="_blank"
                   rel="noopener noreferrer"
                 >前往账户中心</a>
@@ -531,8 +531,8 @@
             <el-table-column prop="id" label="ID" width="80"></el-table-column>
             <el-table-column label="头像" width="78">
               <template #default="{ row }">
-                <div class="admin-user-avatar" :style="!row.avatarUrl ? adminUserAvatarStyle(row) : null">
-                  <img v-if="row.avatarUrl" :src="row.avatarUrl" alt="">
+                <div class="admin-user-avatar" :style="!row.avatarUrl || avatarLoadFailures[row.avatarUrl] ? adminUserAvatarStyle(row) : null">
+                  <img v-if="row.avatarUrl && !avatarLoadFailures[row.avatarUrl]" :src="row.avatarUrl" alt="" @error="markAvatarFailed(row.avatarUrl)">
                   <span v-else>{{ adminUserAvatarText(row) }}</span>
                 </div>
               </template>
@@ -2683,7 +2683,7 @@
   <script src="./vendor/vue.global.prod.js"></script>
   <script src="./vendor/element-plus.full.min.js"></script>
   <script src="./i18n.js?v=managebac-methods-20260902-2"></script>
-  <script src="./app.js?v=managebac-methods-20260902-2"></script>
+  <script src="./app.js?v=central-avatar-20260905-1"></script>
 </body>
 </html>
 
