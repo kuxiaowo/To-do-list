@@ -2328,8 +2328,19 @@ class ServerRegressionTests(unittest.TestCase):
 
     def test_account_menu_links_to_nethub_account_center(self):
         index_html = INDEX_HTML_PATH.read_text(encoding='utf-8')
+        app_js = APP_JS_PATH.read_text(encoding='utf-8')
         self.assertIn('href="https://auth.nethub.wiki/account"', index_html)
+        self.assertIn('target="_blank"', index_html)
         self.assertIn('>前往账户中心</a>', index_html)
+        self.assertIn(
+            "window.open('/auth/login', '_blank', 'noopener,noreferrer')",
+            app_js,
+        )
+        self.assertIn(
+            "window.open('/auth/login?screen_hint=signup', '_blank', 'noopener,noreferrer')",
+            app_js,
+        )
+        self.assertIn("window.location.replace('/auth/login?prompt=none')", app_js)
 
     def test_ai_frontend_explains_pending_task_placement(self):
         index_html = INDEX_HTML_PATH.read_text(encoding='utf-8')

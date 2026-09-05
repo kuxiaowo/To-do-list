@@ -3202,12 +3202,12 @@ createApp({
     async login() {
       window.sessionStorage.removeItem('todo-sso-probe');
       window.localStorage.removeItem('todo-sso-suppressed-until');
-      window.location.assign('/auth/login');
+      window.open('/auth/login', '_blank', 'noopener,noreferrer');
     },
     async register() {
       window.sessionStorage.removeItem('todo-sso-probe');
       window.localStorage.removeItem('todo-sso-suppressed-until');
-      window.location.assign('/auth/login?screen_hint=signup');
+      window.open('/auth/login?screen_hint=signup', '_blank', 'noopener,noreferrer');
     },
     openNicknameDialog() {
       if (!this.currentUser) return;
