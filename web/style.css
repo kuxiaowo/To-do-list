@@ -532,6 +532,24 @@ body {
   font-weight: 700;
 }
 
+.account-center-link {
+  min-height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--brand);
+  background: var(--panel);
+  font-weight: 800;
+  text-decoration: none;
+}
+
+.account-center-link:hover {
+  border-color: var(--brand);
+  background: color-mix(in srgb, var(--brand) 8%, var(--panel));
+}
+
 .auth-mode-switch {
   display: grid;
   grid-template-columns: 1fr 1fr;

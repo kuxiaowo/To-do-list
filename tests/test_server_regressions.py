@@ -2326,6 +2326,11 @@ class ServerRegressionTests(unittest.TestCase):
             app_js,
         )
 
+    def test_account_menu_links_to_nethub_account_center(self):
+        index_html = INDEX_HTML_PATH.read_text(encoding='utf-8')
+        self.assertIn('href="https://auth.nethub.wiki/account"', index_html)
+        self.assertIn('>前往账户中心</a>', index_html)
+
     def test_ai_frontend_explains_pending_task_placement(self):
         index_html = INDEX_HTML_PATH.read_text(encoding='utf-8')
         app_js = APP_JS_PATH.read_text(encoding='utf-8')
