@@ -161,11 +161,13 @@ chmod 700 "$APP_DIR/data"
 
 "$PYTHON_BIN" - <<'PY'
 import importlib.util
+import sys
 from pathlib import Path
 
 app_dir = Path.cwd()
 spec = importlib.util.spec_from_file_location('todo_server', app_dir / 'server.py')
 server = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = server
 spec.loader.exec_module(server)
 server.init_db()
 print(f'database ready: {server.DB_PATH}')
