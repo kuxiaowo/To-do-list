@@ -2184,35 +2184,16 @@ class ServerRegressionTests(unittest.TestCase):
         self.assertIsNotNone(row)
         self.assertEqual(row['ip'], '203.0.113.9')
 
-    def test_avatar_upload_static_access_replacement_and_delete(self):
+    def test_local_avatar_write_endpoints_are_gone(self):
         token, user = self.register_user('avatar-user')
         self.assertEqual(user.get('avatarUrl'), '')
 
         status, body = self.request('POST', '/api/auth/avatar', self.avatar_payload(), token=token)
-        self.assertEqual(status, 200, body)
-        avatar_url = body['user']['avatarUrl']
-        self.assertTrue(avatar_url.startswith('/uploads/avatars/user-'))
-        first_filename = avatar_url.split('/uploads/avatars/', 1)[1].split('?', 1)[0]
-        first_path = server.avatar_dir() / first_filename
-        self.assertTrue(first_path.is_file())
-
-        status, headers, raw = self.raw_request('GET', avatar_url)
-        self.assertEqual(status, 200)
-        self.assertEqual(headers.get_content_type(), 'image/png')
-        self.assertTrue(raw.startswith(b'\x89PNG\r\n\x1a\n'))
-
-        status, body = self.request('POST', '/api/auth/avatar', self.avatar_payload(), token=token)
-        self.assertEqual(status, 200, body)
-        second_url = body['user']['avatarUrl']
-        second_filename = second_url.split('/uploads/avatars/', 1)[1].split('?', 1)[0]
-        self.assertNotEqual(first_filename, second_filename)
-        self.assertFalse(first_path.exists())
-        self.assertTrue((server.avatar_dir() / second_filename).is_file())
+        self.assertEqual(status, 410, body)
+        self.assertEqual(body['accountUrl'], server.ACCOUNTS_ISSUER + '/account')
 
         status, body = self.request('DELETE', '/api/auth/avatar', token=token)
-        self.assertEqual(status, 200, body)
-        self.assertEqual(body['user']['avatarUrl'], '')
-        self.assertFalse((server.avatar_dir() / second_filename).exists())
+        self.assertEqual(status, 410, body)
 
     def test_existing_avatar_migration_compresses_to_webp_once(self):
         _, user = self.register_user('legacy-avatar-user')
@@ -2265,23 +2246,21 @@ class ServerRegressionTests(unittest.TestCase):
         for payload in cases:
             with self.subTest(payload={key: payload[key] for key in ('filename', 'contentType')}):
                 status, body = self.request('POST', '/api/auth/avatar', payload, token=token)
-                self.assertEqual(status, 400, body)
+                self.assertEqual(status, 410, body)
 
     def test_avatar_color_updates_for_text_avatar(self):
         token, user = self.register_user('avatar-color')
         self.assertEqual(user.get('avatarColor'), server.DEFAULT_AVATAR_COLOR)
 
         status, body = self.request('PUT', '/api/auth/avatar-color', {'color': '#123abc'}, token=token)
-        self.assertEqual(status, 200, body)
-        self.assertEqual(body['user']['avatarColor'], '#123abc')
-        self.assertEqual(body['user']['avatarUrl'], '')
+        self.assertEqual(status, 410, body)
 
         status, body = self.request('GET', '/api/auth/me', token=token)
         self.assertEqual(status, 200, body)
-        self.assertEqual(body['user']['avatarColor'], '#123abc')
+        self.assertEqual(body['user']['avatarColor'], server.DEFAULT_AVATAR_COLOR)
 
         status, body = self.request('PUT', '/api/auth/avatar-color', {'color': 'javascript:bad'}, token=token)
-        self.assertEqual(status, 400, body)
+        self.assertEqual(status, 410, body)
 
     def test_avatar_static_path_rejects_traversal(self):
         status, _, _ = self.raw_request('GET', '/uploads/avatars/../todo-list.db')
@@ -2295,25 +2274,26 @@ class ServerRegressionTests(unittest.TestCase):
 
     def test_admin_users_include_avatar_fields(self):
         admin_token, admin_user = self.register_user('admin-avatar-list')
-        student_token, student = self.register_user('student-avatar-list')
+        _, student = self.register_user('student-avatar-list')
         conn = server.get_db()
         try:
             conn.execute("UPDATE users SET role = 'admin' WHERE id = ?", (admin_user['id'],))
+            conn.execute(
+                "UPDATE users SET auth_sub = ?, avatar_color = ? WHERE id = ?",
+                ('central-student-sub', '#123abc', student['id']),
+            )
             conn.commit()
         finally:
             conn.close()
-
-        status, body = self.request('PUT', '/api/auth/avatar-color', {'color': '#123abc'}, token=student_token)
-        self.assertEqual(status, 200, body)
-        status, body = self.request('POST', '/api/auth/avatar', self.avatar_payload(), token=student_token)
-        self.assertEqual(status, 200, body)
-        avatar_url = body['user']['avatarUrl']
 
         status, body = self.request('GET', '/api/admin/users', token=admin_token)
         self.assertEqual(status, 200, body)
         users_by_id = {user['id']: user for user in body['users']}
         self.assertIn(student['id'], users_by_id)
-        self.assertEqual(users_by_id[student['id']]['avatarUrl'], avatar_url)
+        self.assertEqual(
+            users_by_id[student['id']]['avatarUrl'],
+            server.ACCOUNTS_ISSUER + '/avatars/central-student-sub',
+        )
         self.assertEqual(users_by_id[student['id']]['avatarColor'], '#123abc')
 
     def test_frontend_uses_due_date_task_grouping(self):
@@ -2329,7 +2309,7 @@ class ServerRegressionTests(unittest.TestCase):
     def test_account_menu_links_to_nethub_account_center(self):
         index_html = INDEX_HTML_PATH.read_text(encoding='utf-8')
         app_js = APP_JS_PATH.read_text(encoding='utf-8')
-        self.assertIn('href="https://auth.nethub.wiki/account"', index_html)
+        self.assertIn(':href="currentUser.accountUrl"', index_html)
         self.assertIn('target="_blank"', index_html)
         self.assertIn('>前往账户中心</a>', index_html)
         self.assertIn(

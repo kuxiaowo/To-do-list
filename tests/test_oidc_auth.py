@@ -142,7 +142,7 @@ class OIDCAuthTests(unittest.TestCase):
                 'X-CSRF-Token': payload['csrfToken'],
             },
         )
-        self.assertEqual(status, HTTPStatus.OK)
+        self.assertEqual(status, HTTPStatus.GONE)
 
     def test_callback_state_is_one_time_even_when_exchange_fails(self):
         status, headers, _ = self.request('GET', '/auth/login')

@@ -1143,17 +1143,22 @@ def parse_ai_stream_content(content: str) -> tuple[str, object, str | None]:
 
 
 def public_user(row: sqlite3.Row | dict) -> dict:
-    avatar_file = row_value(row, 'avatar_file', '')
-    avatar_updated_at = row_value(row, 'avatar_updated_at', '')
+    auth_sub = str(row_value(row, 'auth_sub', '') or '').strip()
     avatar_color = normalize_avatar_color(row_value(row, 'avatar_color', DEFAULT_AVATAR_COLOR))
     return {
         'id': row['id'],
         'name': row['name'],
         'nickname': row['nickname'],
         'role': row['role'],
-        'avatarUrl': avatar_url(avatar_file, avatar_updated_at),
+        'avatarUrl': central_avatar_url(auth_sub),
         'avatarColor': avatar_color,
+        'accountUrl': ACCOUNTS_ISSUER + '/account',
     }
+
+
+def central_avatar_url(auth_sub: str) -> str:
+    subject = str(auth_sub or '').strip()
+    return f'{ACCOUNTS_ISSUER}/avatars/{subject}' if subject else ''
 
 
 def row_value(row: sqlite3.Row | dict, key: str, default=''):
@@ -4670,6 +4675,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
                 '''
                 SELECT users.id, users.name, users.nickname, users.role, users.created_at,
                        users.avatar_file, users.avatar_updated_at, users.avatar_color,
+                       users.auth_sub,
                        COUNT(DISTINCT tasks.id) AS task_count,
                        COUNT(DISTINCT schedule_items.id) AS schedule_item_count,
                        COUNT(DISTINCT habits.id) AS habit_count,
@@ -4691,7 +4697,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
                     'name': row['name'],
                     'nickname': row['nickname'],
                     'role': row['role'],
-                    'avatarUrl': avatar_url(row['avatar_file'], row['avatar_updated_at']),
+                    'avatarUrl': central_avatar_url(row['auth_sub']),
                     'avatarColor': normalize_avatar_color(row['avatar_color']),
                     'createdAt': row['created_at'],
                     'taskCount': row['task_count'],
@@ -6585,6 +6591,14 @@ class TodoHandler(SimpleHTTPRequestHandler):
         user = self.require_user()
         if not user:
             return
+        return self.write_json(
+            {
+                'error': 'avatar editing moved to NetHub Accounts',
+                'accountUrl': ACCOUNTS_ISSUER + '/account',
+            },
+            status=HTTPStatus.GONE,
+        )
+        # Retained temporarily for rollback of the central-avatar rollout.
         payload = self.read_json_body()
         if payload is None:
             return
@@ -6663,6 +6677,14 @@ class TodoHandler(SimpleHTTPRequestHandler):
         user = self.require_user()
         if not user:
             return
+        return self.write_json(
+            {
+                'error': 'avatar editing moved to NetHub Accounts',
+                'accountUrl': ACCOUNTS_ISSUER + '/account',
+            },
+            status=HTTPStatus.GONE,
+        )
+        # Retained temporarily for rollback of the central-avatar rollout.
         old_avatar = ''
         with get_db() as conn:
             current = conn.execute(
@@ -6697,6 +6719,14 @@ class TodoHandler(SimpleHTTPRequestHandler):
         user = self.require_user()
         if not user:
             return
+        return self.write_json(
+            {
+                'error': 'avatar editing moved to NetHub Accounts',
+                'accountUrl': ACCOUNTS_ISSUER + '/account',
+            },
+            status=HTTPStatus.GONE,
+        )
+        # Retained temporarily for rollback of the central-avatar rollout.
         payload = self.read_json_body()
         if payload is None:
             return

@@ -125,6 +125,10 @@ def exchange_authorization_code(
         raise OIDCError('central account service is unavailable or returned invalid data') from exc
     if userinfo.get('sub') != claims.get('sub'):
         raise OIDCError('UserInfo subject does not match ID Token')
+    expected_picture = _endpoint(issuer, f"/avatars/{claims['sub']}")
+    picture = str(userinfo.get('picture') or claims.get('picture') or '').strip()
+    if picture and picture != expected_picture:
+        raise OIDCError('central account returned an untrusted picture URL')
     username = str(userinfo.get('preferred_username') or '').strip()
     display_name = str(userinfo.get('name') or username).strip()
     if not username or not display_name:

@@ -199,6 +199,7 @@ createApp({
       habitSyncConflicts: [],
       csrfToken: '',
       currentUser: null,
+      avatarLoadFailures: {},
       accountMenuOpen: false,
       draggedTaskId: null,
       draggedScheduleItemId: null,
@@ -965,7 +966,8 @@ createApp({
       return source.trim().slice(0, 1).toUpperCase();
     },
     avatarImageUrl() {
-      return this.currentUser && this.currentUser.avatarUrl ? this.currentUser.avatarUrl : '';
+      const url = this.currentUser && this.currentUser.avatarUrl ? this.currentUser.avatarUrl : '';
+      return url && !this.avatarLoadFailures[url] ? url : '';
     },
     avatarQuickColors() {
       return AVATAR_QUICK_COLORS;
@@ -3244,8 +3246,11 @@ createApp({
     openAvatarDialog() {
       if (!this.currentUser) return;
       this.accountMenuOpen = false;
-      this.resetAvatarDraft();
-      this.avatarDialogVisible = true;
+      window.open(this.currentUser.accountUrl, '_blank', 'noopener,noreferrer');
+    },
+    markAvatarFailed(url) {
+      if (!url) return;
+      this.avatarLoadFailures[url] = true;
     },
     resetAvatarDraft() {
       if (this.avatarSourceUrl) URL.revokeObjectURL(this.avatarSourceUrl);
