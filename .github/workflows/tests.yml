@@ -45,6 +45,9 @@ jobs:
       - name: Run backend tests
         run: python -m unittest discover -s tests -v
 
+      - name: Check deployment script syntax
+        run: bash -n deploy-first-run.sh
+
   managebac-helper:
     name: ManageBac Helper (Node.js 22)
     runs-on: ubuntu-latest
