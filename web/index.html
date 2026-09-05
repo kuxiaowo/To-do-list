@@ -14,7 +14,7 @@
       document.documentElement.lang = savedLocale === 'en' ? 'en' : 'zh-CN';
     })();
   </script>
-  <link rel="stylesheet" href="./style.css?v=calendar-layout-20260902-4" />
+  <link rel="stylesheet" href="./style.css?v=account-buttons-20260905-1" />
 </head>
 <body>
   <div id="app" v-cloak>
@@ -244,11 +244,15 @@
                   </div>
                 </div>
                 <a
-                  class="account-center-link"
+                  class="account-center-button"
                   :href="currentUser.accountUrl"
                   target="_blank"
                   rel="noopener noreferrer"
-                >前往账户中心</a>
+                  role="button"
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M3 12h18M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18"></path></svg>
+                  <span>前往账户中心</span><span aria-hidden="true">↗</span>
+                </a>
                 <div v-if="!currentUser" class="locked-hint">登录后会加载并编辑你自己的待办数据。</div>
               </div>
           </div>

@@ -2310,8 +2310,10 @@ class ServerRegressionTests(unittest.TestCase):
         index_html = INDEX_HTML_PATH.read_text(encoding='utf-8')
         app_js = APP_JS_PATH.read_text(encoding='utf-8')
         self.assertIn(':href="currentUser.accountUrl"', index_html)
+        self.assertIn('class="account-center-button"', index_html)
+        self.assertIn('role="button"', index_html)
         self.assertIn('target="_blank"', index_html)
-        self.assertIn('>前往账户中心</a>', index_html)
+        self.assertIn('<span>前往账户中心</span>', index_html)
         self.assertIn(
             "window.open('/auth/login', '_blank', 'noopener,noreferrer')",
             app_js,

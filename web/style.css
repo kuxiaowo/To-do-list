@@ -532,22 +532,29 @@ body {
   font-weight: 700;
 }
 
-.account-center-link {
+.account-center-button {
   min-height: 38px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: 8px;
+  padding: 0 14px;
   border: 1px solid var(--line);
   border-radius: 10px;
-  color: var(--brand);
-  background: var(--panel);
+  color: #fff;
+  background: var(--brand);
+  box-shadow: 0 8px 20px color-mix(in srgb, var(--brand) 22%, transparent);
   font-weight: 800;
   text-decoration: none;
+  transition: transform .16s ease, box-shadow .16s ease, filter .16s ease;
 }
 
-.account-center-link:hover {
-  border-color: var(--brand);
-  background: color-mix(in srgb, var(--brand) 8%, var(--panel));
+.account-center-button svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.8; }
+.account-center-button:hover {
+  color: #fff;
+  filter: brightness(.96);
+  transform: translateY(-1px);
+  box-shadow: 0 10px 24px color-mix(in srgb, var(--brand) 30%, transparent);
 }
 
 .auth-mode-switch {
