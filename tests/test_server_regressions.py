@@ -31,10 +31,12 @@ class ServerRegressionTests(unittest.TestCase):
         self.original_data_dir = server.DATA_DIR
         self.original_db_path = server.DB_PATH
         self.original_iterations = server.PASSWORD_ITERATIONS
+        self.original_legacy_auth = server.LEGACY_AUTH_ENABLED
         self.temp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         server.DATA_DIR = Path(self.temp_dir.name)
         server.DB_PATH = server.DATA_DIR / 'todo-list.db'
         server.PASSWORD_ITERATIONS = 1_000
+        server.LEGACY_AUTH_ENABLED = True
         server.init_db()
 
         self.httpd = ThreadingHTTPServer(('127.0.0.1', 0), server.TodoHandler)
@@ -49,6 +51,7 @@ class ServerRegressionTests(unittest.TestCase):
         server.DATA_DIR = self.original_data_dir
         server.DB_PATH = self.original_db_path
         server.PASSWORD_ITERATIONS = self.original_iterations
+        server.LEGACY_AUTH_ENABLED = self.original_legacy_auth
         self.temp_dir.cleanup()
 
     def request(self, method, path, payload=None, token=None, extra_headers=None):

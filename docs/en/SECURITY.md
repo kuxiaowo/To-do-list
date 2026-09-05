@@ -8,14 +8,16 @@ This document records the security boundaries, deployment recommendations, and r
 
 - Default listener is `127.0.0.1:8092`. In the production environment, it is recommended to continue to bind the local address and provide HTTPS to the outside world through Caddy or Nginx reverse proxy.
 - It is not recommended to expose Python's built-in HTTP service directly to the public network.
-- `.env` has been ignored in `.gitignore`, do not submit the real `DEEPSEEK_API_KEY`, OSS AccessKey or administrator initialization password.
+- `.env` is ignored by `.gitignore`; do not commit the OIDC client secret, `DEEPSEEK_API_KEY`, or OSS AccessKey.
 
 ## Authentication and session
 
-- Login state uses `Authorization: Bearer <token>` request header.
-- The default validity period of the server session is 7 days; when accessing the protected interface, the expiration time will be slidingly refreshed.
-- Passwords are stored using PBKDF2-SHA256 salted hashes.
-- The front end currently stores the token in `localStorage`. This is convenient for static front-end use, but if XSS occurs on the page, the token will be exposed together; therefore, the introduction of untrusted scripts is prohibited, and the source must be confirmed when upgrading `web/vendor/` dependencies.
+- Sign-in uses Accounts OIDC Authorization Code with PKCE S256; the client secret stays on the backend.
+- The site uses a random opaque `HttpOnly + SameSite=Lax` cookie, with `Secure` enabled in production. Only the session-token hash is stored in SQLite and no credential is stored in `localStorage`.
+- Mutating cookie-authenticated requests require `X-CSRF-Token`. Server sessions expire after 7 days by default and slide on protected access.
+- Local password registration, login, and password changes are closed after hard cutover; legacy PBKDF2 hashes may only be moved into the non-login archive.
+- The callback validates the RS256 signature, issuer, audience, nonce, expiry, and the UserInfo `sub`; state and the authorization flow record are one-time use.
+- Back-Channel Logout validates signature, event, audience, time, and `jti`, then revokes local sessions by central `sid` or `sub`.
 
 ## Input and files
 

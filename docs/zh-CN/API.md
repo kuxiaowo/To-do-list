@@ -16,7 +16,8 @@ http://localhost:8092
 
 ```http
 Content-Type: application/json
-Authorization: Bearer <token>
+Cookie: todo_session=<opaque-token>
+X-CSRF-Token: <csrf-token>  # 仅修改数据的请求需要
 ```
 
 未登录访问部分读取接口时会返回只读空数据；写入、更新和删除接口必须登录。
@@ -125,63 +126,23 @@ Authorization: Bearer <token>
 
 ## 认证接口
 
-### 注册
+### 发起中央登录
 
 ```http
-POST /api/auth/register
+GET /auth/login
 ```
 
-请求：
+创建一次性 OIDC state、nonce 和 PKCE verifier，把流程哈希保存在 SQLite，并重定向到 Accounts。浏览器同时收到短期 `HttpOnly` 流程 Cookie。
 
-```json
-{
-  "name": "张三",
-  "nickname": "zhangsan",
-  "password": "123456"
-}
-```
-
-响应：
-
-```json
-{
-  "token": "session-token",
-  "user": {
-    "id": 1,
-    "name": "张三",
-    "nickname": "zhangsan",
-    "role": "student"
-  }
-}
-```
-
-状态码：
-
-- `200 OK`：注册成功并自动登录。
-- `400 Bad Request`：缺少字段、字段过长或密码不足 6 位。
-- `409 Conflict`：昵称已存在。
-
-### 登录
+### OIDC 回调
 
 ```http
-POST /api/auth/login
+GET /auth/callback?code=<code>&state=<state>
 ```
 
-请求：
+后端兑换授权码并校验 ID Token 和 UserInfo。若 `auth_sub` 尚无本站成员，则复制中央用户名和显示名称创建默认 `student`；以后资料独立，不持续同步。成功后设置本站会话 Cookie 并重定向到 `/`。
 
-```json
-{
-  "nickname": "zhangsan",
-  "password": "123456"
-}
-```
-
-响应同注册接口。
-
-状态码：
-
-- `200 OK`：登录成功。
-- `401 Unauthorized`：昵称或密码错误。
+旧接口 `POST /api/auth/register`、`POST /api/auth/login` 和 `PUT /api/auth/password` 在生产默认返回 `410 Gone`。
 
 ### 获取当前用户
 
@@ -193,6 +154,7 @@ GET /api/auth/me
 
 ```json
 {
+  "csrfToken": "request-csrf-token",
   "user": {
     "id": 1,
     "name": "张三",
@@ -204,8 +166,8 @@ GET /api/auth/me
 
 状态码：
 
-- `200 OK`：token 有效。
-- `401 Unauthorized`：未登录或 token 过期。
+- `200 OK`：Cookie 会话有效。
+- `401 Unauthorized`：未登录或会话过期。
 
 ### 退出登录
 
@@ -221,9 +183,22 @@ POST /api/auth/logout
 }
 ```
 
+只删除 TodoList 本地会话，不退出 Accounts 或其他网站。
+
+### Back-Channel Logout
+
+```http
+POST /auth/backchannel-logout
+Content-Type: application/x-www-form-urlencoded
+
+logout_token=<signed-jwt>
+```
+
+供 Accounts 调用。签名和声明通过后，按中央 `sid` 或 `sub` 删除本站会话；重复 `jti` 不会重复产生副作用。
+
 ## ManageBac 后端同步
 
-以下接口都需要本站 `Authorization: Bearer <token>`，响应均禁止缓存。账号密码只允许通过 HTTPS 提交；本机 `localhost` 开发除外。
+以下接口都需要本站 Cookie 会话，修改请求还需要 CSRF token，响应均禁止缓存。ManageBac 账号密码只允许通过 HTTPS 提交；本机 `localhost` 开发除外。
 
 ### 查询登录状态
 
@@ -286,7 +261,7 @@ DELETE /api/managebac/session
 
 ```http
 GET /api/managebac-helper/installer
-Authorization: Bearer <token>
+Cookie: todo_session=<opaque-token>
 ```
 
 行为：
@@ -917,7 +892,8 @@ AI 上下文只包含当前用户未完成的 `pool=todo` 任务，最多返回�
 
 ```http
 POST /api/ai/chat
-Authorization: Bearer <token>
+Cookie: todo_session=<opaque-token>
+X-CSRF-Token: <csrf-token>
 Content-Type: application/json
 ```
 
@@ -975,7 +951,8 @@ Content-Type: application/json
 
 ```http
 POST /api/ai/chat-stream
-Authorization: Bearer <token>
+Cookie: todo_session=<opaque-token>
+X-CSRF-Token: <csrf-token>
 Content-Type: application/json
 ```
 
@@ -1013,7 +990,7 @@ data: {"error":"DeepSeek request failed","message":"..."}
 
 ```http
 GET /api/admin/ai-usage/summary?view=7d&page=1&pageSize=10
-Authorization: Bearer <token>
+Cookie: todo_session=<opaque-token>
 ```
 
 `view` 可选：`6h`、`1d`、`7d`、`30d`。响应包含全局限制、趋势数据、当前页用户的有效限制和滚动窗口用量。
@@ -1022,7 +999,8 @@ Authorization: Bearer <token>
 
 ```http
 PUT /api/admin/ai-usage/global-limit
-Authorization: Bearer <token>
+Cookie: todo_session=<opaque-token>
+X-CSRF-Token: <csrf-token>
 Content-Type: application/json
 ```
 

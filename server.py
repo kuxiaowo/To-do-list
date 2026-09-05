@@ -21,9 +21,12 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
+from http.cookies import SimpleCookie
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlparse
+
+import requests
 
 from managebac_backend import (
     ManageBacAuthenticationError,
@@ -36,6 +39,12 @@ from managebac_backend import (
     encrypt_cookie_jar,
     fetch_managebac_preview,
     validate_cookie_encryption_configuration,
+)
+from oidc_client import (
+    OIDCError,
+    authorization_url,
+    exchange_authorization_code,
+    validate_logout_token,
 )
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -100,6 +109,22 @@ DATA_DIR = BASE_DIR / 'data'
 DB_PATH = DATA_DIR / 'todo-list.db'
 HOST = os.environ.get('TODO_HOST', '127.0.0.1')
 PORT = int(os.environ.get('TODO_PORT', '8092'))
+PUBLIC_URL = os.environ.get('TODO_PUBLIC_URL', 'https://todolist.nethub.wiki').rstrip('/')
+ACCOUNTS_ISSUER = os.environ.get('ACCOUNTS_ISSUER', 'https://auth.nethub.wiki').rstrip('/')
+OIDC_CLIENT_ID = os.environ.get('TODO_OIDC_CLIENT_ID', 'todo').strip()
+OIDC_CLIENT_SECRET = os.environ.get('TODO_OIDC_CLIENT_SECRET', '').strip()
+OIDC_REDIRECT_URI = os.environ.get(
+    'TODO_OIDC_REDIRECT_URI', f'{PUBLIC_URL}/auth/callback'
+).strip()
+SESSION_COOKIE_SECURE = os.environ.get('TODO_SESSION_COOKIE_SECURE', 'true').lower() in {
+    '1', 'true', 'yes', 'on'
+}
+LEGACY_AUTH_ENABLED = os.environ.get('TODO_LEGACY_AUTH_ENABLED', 'false').lower() in {
+    '1', 'true', 'yes', 'on'
+}
+SESSION_COOKIE_NAME = 'todo_session'
+OIDC_FLOW_COOKIE_NAME = 'todo_oidc_flow'
+OIDC_FLOW_TTL_SECONDS = 300
 PASSWORD_ITERATIONS = 260_000
 SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
 SESSION_REFRESH_INTERVAL_SECONDS = 60 * 60
@@ -293,6 +318,7 @@ def init_db() -> None:
                 avatar_file TEXT NOT NULL DEFAULT '',
                 avatar_updated_at TEXT NOT NULL DEFAULT '',
                 avatar_color TEXT NOT NULL DEFAULT '#6366f1',
+                auth_sub TEXT,
                 created_at TEXT NOT NULL
             )
             '''
@@ -302,8 +328,40 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS sessions (
                 token TEXT PRIMARY KEY,
                 user_id INTEGER NOT NULL,
+                auth_sub TEXT NOT NULL DEFAULT '',
+                sid TEXT NOT NULL DEFAULT '',
+                csrf_token TEXT NOT NULL DEFAULT '',
                 expires_at INTEGER NOT NULL,
                 created_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            '''
+        )
+        conn.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS oidc_login_flows (
+                token_hash TEXT PRIMARY KEY,
+                state_hash TEXT NOT NULL,
+                nonce TEXT NOT NULL,
+                code_verifier TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            )
+            '''
+        )
+        conn.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS backchannel_logout_jtis (
+                jti TEXT PRIMARY KEY,
+                received_at INTEGER NOT NULL
+            )
+            '''
+        )
+        conn.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS archived_password_credentials (
+                user_id INTEGER PRIMARY KEY,
+                password_hash TEXT NOT NULL,
+                archived_at TEXT NOT NULL,
                 FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
             )
             '''
@@ -690,6 +748,23 @@ def init_db() -> None:
             conn.execute("ALTER TABLE users ADD COLUMN avatar_updated_at TEXT NOT NULL DEFAULT ''")
         if 'avatar_color' not in user_columns:
             conn.execute(f"ALTER TABLE users ADD COLUMN avatar_color TEXT NOT NULL DEFAULT '{DEFAULT_AVATAR_COLOR}'")
+        if 'auth_sub' not in user_columns:
+            conn.execute('ALTER TABLE users ADD COLUMN auth_sub TEXT')
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_auth_sub ON users(auth_sub) "
+            "WHERE auth_sub IS NOT NULL AND auth_sub != ''"
+        )
+        session_columns = {row[1] for row in conn.execute('PRAGMA table_info(sessions)').fetchall()}
+        added_session_identity = False
+        for column_name in ('auth_sub', 'sid', 'csrf_token'):
+            if column_name not in session_columns:
+                conn.execute(
+                    f"ALTER TABLE sessions ADD COLUMN {column_name} TEXT NOT NULL DEFAULT ''"
+                )
+                added_session_identity = True
+        if added_session_identity:
+            # A hard cutover must never silently preserve legacy browser sessions.
+            conn.execute('DELETE FROM sessions')
         task_columns = {row[1] for row in conn.execute('PRAGMA table_info(tasks)').fetchall()}
         if 'subject' not in task_columns:
             conn.execute("ALTER TABLE tasks ADD COLUMN subject TEXT NOT NULL DEFAULT ''")
@@ -2498,6 +2573,10 @@ class TodoHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self):
         path = urlparse(self.path).path
+        if path == '/auth/login':
+            return self.handle_oidc_login()
+        if path == '/auth/callback':
+            return self.handle_oidc_callback()
         if path == '/api/managebac-helper/installer':
             return self.handle_managebac_installer(send_body=True)
         if path.startswith('/uploads/avatars/'):
@@ -2542,6 +2621,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
+        if path == '/auth/backchannel-logout':
+            return self.handle_backchannel_logout()
         if path == '/api/visits':
             return self.handle_create_visit()
         if path == '/api/admin/ai-usage/clear-user-limits':
@@ -3073,19 +3154,23 @@ class TodoHandler(SimpleHTTPRequestHandler):
             self.copyfile(source, self.wfile)
 
     def current_user(self):
-        """Resolve the bearer token and periodically slide its expiration."""
+        """Resolve the opaque session cookie and periodically slide its expiration."""
+        self._auth_via_legacy_bearer = False
+        raw_token = self.request_cookie(SESSION_COOKIE_NAME)
         auth = self.headers.get('Authorization', '')
-        if not auth.lower().startswith('bearer '):
+        if not raw_token and LEGACY_AUTH_ENABLED and auth.lower().startswith('bearer '):
+            raw_token = auth.split(' ', 1)[1].strip()
+            self._auth_via_legacy_bearer = bool(raw_token)
+        if not raw_token:
             return None
-        token = auth.split(' ', 1)[1].strip()
-        if not token:
-            return None
+        token = raw_token if self._auth_via_legacy_bearer else self.token_digest(raw_token)
         now = int(time.time())
         with get_db() as conn:
             row = conn.execute(
                 '''
                 SELECT users.id, users.name, users.nickname, users.role,
-                       users.avatar_file, users.avatar_updated_at, users.avatar_color, sessions.expires_at
+                       users.avatar_file, users.avatar_updated_at, users.avatar_color,
+                       users.auth_sub, sessions.expires_at, sessions.sid, sessions.csrf_token
                 FROM sessions
                 JOIN users ON users.id = sessions.user_id
                 WHERE sessions.token = ?
@@ -3116,7 +3201,247 @@ class TodoHandler(SimpleHTTPRequestHandler):
         if not user:
             self.write_json({'error': 'login required'}, status=HTTPStatus.UNAUTHORIZED)
             return None
+        if self.command not in {'GET', 'HEAD'} and not self._auth_via_legacy_bearer:
+            csrf = self.headers.get('X-CSRF-Token', '')
+            if not csrf or not hmac.compare_digest(csrf, str(user['csrf_token'])):
+                self.write_json({'error': 'csrf validation failed'}, status=HTTPStatus.FORBIDDEN)
+                return None
         return user
+
+    @staticmethod
+    def token_digest(value: str) -> str:
+        return hashlib.sha256(value.encode('utf-8')).hexdigest()
+
+    def request_cookie(self, name: str) -> str:
+        try:
+            cookie = SimpleCookie(self.headers.get('Cookie', ''))
+        except Exception:
+            return ''
+        morsel = cookie.get(name)
+        return morsel.value if morsel else ''
+
+    @staticmethod
+    def cookie_header(name: str, value: str, max_age: int) -> str:
+        parts = [f'{name}={value}', 'Path=/', 'HttpOnly', 'SameSite=Lax', f'Max-Age={max_age}']
+        if SESSION_COOKIE_SECURE:
+            parts.append('Secure')
+        return '; '.join(parts)
+
+    def redirect_to(self, location: str, *, cookies: list[str] | None = None):
+        self.send_response(HTTPStatus.FOUND)
+        self.send_header('Location', location)
+        self.send_header('Cache-Control', 'no-store')
+        for cookie in cookies or []:
+            self.send_header('Set-Cookie', cookie)
+        self.end_headers()
+
+    def oidc_configured(self) -> bool:
+        return bool(OIDC_CLIENT_ID and OIDC_CLIENT_SECRET and OIDC_REDIRECT_URI)
+
+    def handle_oidc_login(self):
+        if not self.oidc_configured():
+            return self.write_json(
+                {'error': 'central login is not configured'}, status=HTTPStatus.SERVICE_UNAVAILABLE
+            )
+        raw_flow = secrets.token_urlsafe(48)
+        state = secrets.token_urlsafe(32)
+        nonce = secrets.token_urlsafe(32)
+        verifier = secrets.token_urlsafe(64)
+        now = int(time.time())
+        with get_db() as conn:
+            conn.execute('DELETE FROM oidc_login_flows WHERE created_at < ?', (now - 600,))
+            conn.execute(
+                '''
+                INSERT INTO oidc_login_flows
+                (token_hash, state_hash, nonce, code_verifier, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                ''',
+                (self.token_digest(raw_flow), self.token_digest(state), nonce, verifier, now),
+            )
+            conn.commit()
+        location = authorization_url(
+            issuer=ACCOUNTS_ISSUER,
+            client_id=OIDC_CLIENT_ID,
+            redirect_uri=OIDC_REDIRECT_URI,
+            state=state,
+            nonce=nonce,
+            verifier=verifier,
+        )
+        return self.redirect_to(
+            location,
+            cookies=[self.cookie_header(OIDC_FLOW_COOKIE_NAME, raw_flow, OIDC_FLOW_TTL_SECONDS)],
+        )
+
+    def handle_oidc_callback(self):
+        query = parse_qs(urlparse(self.path).query)
+        if query.get('error'):
+            return self.write_json(
+                {'error': 'central login was rejected', 'detail': query['error'][0]},
+                status=HTTPStatus.BAD_REQUEST,
+            )
+        code = str(query.get('code', [''])[0])
+        state = str(query.get('state', [''])[0])
+        raw_flow = self.request_cookie(OIDC_FLOW_COOKIE_NAME)
+        if not code or not state or not raw_flow:
+            return self.write_json({'error': 'invalid OIDC callback'}, status=HTTPStatus.BAD_REQUEST)
+        now = int(time.time())
+        with get_db() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            flow = conn.execute(
+                'SELECT * FROM oidc_login_flows WHERE token_hash = ?',
+                (self.token_digest(raw_flow),),
+            ).fetchone()
+            conn.execute(
+                'DELETE FROM oidc_login_flows WHERE token_hash = ?',
+                (self.token_digest(raw_flow),),
+            )
+            conn.commit()
+        if (
+            not flow
+            or int(flow['created_at']) + OIDC_FLOW_TTL_SECONDS < now
+            or not hmac.compare_digest(str(flow['state_hash']), self.token_digest(state))
+        ):
+            return self.write_json({'error': 'OIDC state is invalid or expired'}, status=HTTPStatus.BAD_REQUEST)
+        try:
+            identity = exchange_authorization_code(
+                issuer=ACCOUNTS_ISSUER,
+                client_id=OIDC_CLIENT_ID,
+                client_secret=OIDC_CLIENT_SECRET,
+                redirect_uri=OIDC_REDIRECT_URI,
+                code=code,
+                verifier=str(flow['code_verifier']),
+                nonce=str(flow['nonce']),
+            )
+        except OIDCError as exc:
+            return self.write_json(
+                {'error': 'central login failed', 'message': str(exc)},
+                status=HTTPStatus.BAD_GATEWAY,
+            )
+        raw_session = secrets.token_urlsafe(48)
+        csrf_token = secrets.token_urlsafe(32)
+        with get_db() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            user = conn.execute('SELECT * FROM users WHERE auth_sub = ?', (identity.sub,)).fetchone()
+            if user is None:
+                nickname = self.available_nickname(conn, identity.username, identity.sub)
+                cursor = conn.execute(
+                    '''
+                    INSERT INTO users
+                    (name, nickname, password_hash, role, avatar_file, avatar_updated_at,
+                     avatar_color, auth_sub, created_at)
+                    VALUES (?, ?, '', 'student', '', '', ?, ?, ?)
+                    ''',
+                    (
+                        identity.display_name[:64],
+                        nickname,
+                        DEFAULT_AVATAR_COLOR,
+                        identity.sub,
+                        now_iso(),
+                    ),
+                )
+                user_id = int(cursor.lastrowid)
+                user = conn.execute('SELECT * FROM users WHERE id = ?', (user_id,)).fetchone()
+                self.log_operation(
+                    conn,
+                    user_id,
+                    user_id,
+                    'auth.oidc_first_login',
+                    'user',
+                    str(user_id),
+                    {'authSub': identity.sub},
+                )
+            conn.execute(
+                '''
+                INSERT INTO sessions
+                (token, user_id, auth_sub, sid, csrf_token, expires_at, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ''',
+                (
+                    self.token_digest(raw_session),
+                    int(user['id']),
+                    identity.sub,
+                    identity.sid,
+                    csrf_token,
+                    now + SESSION_TTL_SECONDS,
+                    now_iso(),
+                ),
+            )
+            self.log_operation(
+                conn,
+                int(user['id']),
+                int(user['id']),
+                'auth.oidc_login',
+                'user',
+                str(user['id']),
+            )
+            conn.commit()
+        return self.redirect_to(
+            '/',
+            cookies=[
+                self.cookie_header(SESSION_COOKIE_NAME, raw_session, SESSION_TTL_SECONDS),
+                self.cookie_header(OIDC_FLOW_COOKIE_NAME, '', 0),
+            ],
+        )
+
+    @staticmethod
+    def available_nickname(conn: sqlite3.Connection, username: str, sub: str) -> str:
+        base = username.strip()[:32] or f'user-{sub[:8]}'
+        candidate = base
+        suffix_number = 0
+        while conn.execute(
+            'SELECT 1 FROM users WHERE nickname = ? COLLATE NOCASE', (candidate,)
+        ).fetchone():
+            suffix_number += 1
+            suffix = f'-{sub[:8]}' if suffix_number == 1 else f'-{sub[:6]}-{suffix_number}'
+            candidate = base[: 32 - len(suffix)] + suffix
+        return candidate
+
+    def handle_backchannel_logout(self):
+        try:
+            length = int(self.headers.get('Content-Length', '0'))
+        except ValueError:
+            length = -1
+        if length <= 0 or length > 32768:
+            return self.write_json({'error': 'invalid request body'}, status=HTTPStatus.BAD_REQUEST)
+        form = parse_qs(self.rfile.read(length).decode('utf-8'))
+        raw_token = str(form.get('logout_token', [''])[0])
+        if not raw_token:
+            return self.write_json({'error': 'logout_token is required'}, status=HTTPStatus.BAD_REQUEST)
+        try:
+            response = requests.get(
+                ACCOUNTS_ISSUER + '/.well-known/jwks.json', timeout=5
+            )
+            response.raise_for_status()
+            claims = validate_logout_token(
+                raw_token,
+                response.json(),
+                issuer=ACCOUNTS_ISSUER,
+                client_id=OIDC_CLIENT_ID,
+            )
+        except (requests.RequestException, ValueError, OIDCError):
+            return self.write_json({'error': 'invalid logout token'}, status=HTTPStatus.BAD_REQUEST)
+        now = int(time.time())
+        with get_db() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            replay = conn.execute(
+                'SELECT 1 FROM backchannel_logout_jtis WHERE jti = ?', (str(claims['jti']),)
+            ).fetchone()
+            if not replay:
+                conn.execute(
+                    'INSERT INTO backchannel_logout_jtis (jti, received_at) VALUES (?, ?)',
+                    (str(claims['jti']), now),
+                )
+                if claims.get('sid'):
+                    conn.execute('DELETE FROM sessions WHERE sid = ?', (str(claims['sid']),))
+                else:
+                    conn.execute(
+                        'DELETE FROM sessions WHERE auth_sub = ?', (str(claims['sub']),)
+                    )
+                conn.execute(
+                    'DELETE FROM backchannel_logout_jtis WHERE received_at < ?', (now - 86400,)
+                )
+            conn.commit()
+        return self.write_json({'ok': True})
 
     def require_admin(self):
         user = self.require_user()
@@ -6124,6 +6449,11 @@ class TodoHandler(SimpleHTTPRequestHandler):
         return self.write_json({'ok': True})
 
     def handle_auth_register(self):
+        if not LEGACY_AUTH_ENABLED:
+            return self.write_json(
+                {'error': 'local registration is disabled', 'loginUrl': '/auth/login'},
+                status=HTTPStatus.GONE,
+            )
         payload = self.read_json_body()
         if payload is None:
             return
@@ -6186,6 +6516,11 @@ class TodoHandler(SimpleHTTPRequestHandler):
         return self.issue_session_response(user)
 
     def handle_auth_login(self):
+        if not LEGACY_AUTH_ENABLED:
+            return self.write_json(
+                {'error': 'local password login is disabled', 'loginUrl': '/auth/login'},
+                status=HTTPStatus.GONE,
+            )
         payload = self.read_json_body()
         if payload is None:
             return
@@ -6211,16 +6546,30 @@ class TodoHandler(SimpleHTTPRequestHandler):
         user = self.current_user()
         if not user:
             return self.write_json({'error': 'login required'}, status=HTTPStatus.UNAUTHORIZED)
-        return self.write_json({'user': public_user(user)})
+        return self.write_json({'user': public_user(user), 'csrfToken': user['csrf_token']})
 
     def handle_auth_logout(self):
+        user = self.current_user()
+        if user and not self._auth_via_legacy_bearer:
+            csrf = self.headers.get('X-CSRF-Token', '')
+            if not csrf or not hmac.compare_digest(csrf, str(user['csrf_token'])):
+                return self.write_json(
+                    {'error': 'csrf validation failed'}, status=HTTPStatus.FORBIDDEN
+                )
+        raw_token = self.request_cookie(SESSION_COOKIE_NAME)
         auth = self.headers.get('Authorization', '')
-        if auth.lower().startswith('bearer '):
-            token = auth.split(' ', 1)[1].strip()
+        legacy_bearer = LEGACY_AUTH_ENABLED and auth.lower().startswith('bearer ')
+        if not raw_token and legacy_bearer:
+            raw_token = auth.split(' ', 1)[1].strip()
+        if raw_token:
+            stored_token = raw_token if legacy_bearer else self.token_digest(raw_token)
             with get_db() as conn:
-                conn.execute('DELETE FROM sessions WHERE token = ?', (token,))
+                conn.execute('DELETE FROM sessions WHERE token = ?', (stored_token,))
                 conn.commit()
-        return self.write_json({'ok': True})
+        return self.write_json(
+            {'ok': True},
+            headers=[('Set-Cookie', self.cookie_header(SESSION_COOKIE_NAME, '', 0))],
+        )
 
     def handle_auth_update_avatar(self):
         user = self.require_user()
@@ -6419,6 +6768,10 @@ class TodoHandler(SimpleHTTPRequestHandler):
         return self.write_json({'ok': True, 'user': public_user(updated)})
 
     def handle_auth_update_password(self):
+        if not LEGACY_AUTH_ENABLED:
+            return self.write_json(
+                {'error': 'passwords are managed by NetHub Accounts'}, status=HTTPStatus.GONE
+            )
         user = self.require_user()
         if not user:
             return
@@ -6454,13 +6807,33 @@ class TodoHandler(SimpleHTTPRequestHandler):
     def issue_session_response(self, user):
         token = secrets.token_urlsafe(32)
         expires_at = int(time.time()) + SESSION_TTL_SECONDS
+        csrf_token = secrets.token_urlsafe(32)
         with get_db() as conn:
             conn.execute(
-                'INSERT INTO sessions (token, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)',
-                (token, user['id'], expires_at, now_iso()),
+                '''
+                INSERT INTO sessions
+                (token, user_id, auth_sub, sid, csrf_token, expires_at, created_at)
+                VALUES (?, ?, ?, '', ?, ?, ?)
+                ''',
+                (
+                    token if LEGACY_AUTH_ENABLED else self.token_digest(token),
+                    user['id'],
+                    row_value(user, 'auth_sub', '') or '',
+                    csrf_token,
+                    expires_at,
+                    now_iso(),
+                ),
             )
             conn.commit()
-        return self.write_json({'token': token, 'user': public_user(user)})
+        payload = {'user': public_user(user), 'csrfToken': csrf_token}
+        if LEGACY_AUTH_ENABLED:
+            payload['token'] = token
+        return self.write_json(
+            payload,
+            headers=[
+                ('Set-Cookie', self.cookie_header(SESSION_COOKIE_NAME, token, SESSION_TTL_SECONDS))
+            ],
+        )
 
     def read_json_body(self):
         """Decode a JSON request body and write a 400 response on parse errors."""
@@ -6493,12 +6866,19 @@ class TodoHandler(SimpleHTTPRequestHandler):
         self.send_header('X-Frame-Options', 'DENY')
         super().end_headers()
 
-    def write_json(self, payload: dict, status: HTTPStatus = HTTPStatus.OK):
+    def write_json(
+        self,
+        payload: dict,
+        status: HTTPStatus = HTTPStatus.OK,
+        headers: list[tuple[str, str]] | None = None,
+    ):
         body = json.dumps(payload, ensure_ascii=False).encode('utf-8')
         self.send_response(status)
         self.send_header('Content-Type', 'application/json; charset=utf-8')
         self.send_header('Content-Length', str(len(body)))
         self.send_header('Cache-Control', 'no-store')
+        for name, value in headers or []:
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(body)
 
