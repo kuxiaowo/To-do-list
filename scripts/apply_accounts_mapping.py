@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -47,7 +47,7 @@ def apply_mapping(database: Path, mapping_file: Path) -> dict[str, int]:
             missing = sorted(local_ids - set(mapping_by_id))
             unknown = sorted(set(mapping_by_id) - local_ids)
             raise ValueError(f'mapping must cover every local user; missing={missing}, unknown={unknown}')
-        timestamp = datetime.now(UTC).strftime('%Y-%m-%dT%H:%M:%SZ')
+        timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
         archived = 0
         for user_id, sub in mapping_by_id.items():
             row = connection.execute(
