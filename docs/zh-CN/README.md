@@ -6,7 +6,7 @@
 
 ## 功能
 
-- 账号注册、登录、退出登录。
+- 通过 NetHub Accounts 统一登录；TodoList 退出只结束本站会话。
 - 按用户隔离任务、每日安排和时间格子配置。
 - 新增、编辑、删除、完成或取消完成 DDL 任务。
 - 支持任务标题、科目、截止日期时间、优先级和备注。
@@ -57,7 +57,7 @@ data/
 
 ## 本地运行
 
-确保已安装 Python 3，然后在项目根目录运行：
+确保已安装 Python 3，然后在项目根目录运行（推荐使用 Conda Python 3.12 环境）：
 
 ```bash
 pip install -r requirements.txt
@@ -87,6 +87,13 @@ cp .env.example .env
 ```env
 TODO_HOST=127.0.0.1
 TODO_PORT=8092
+TODO_PUBLIC_URL=https://todolist.nethub.wiki
+ACCOUNTS_ISSUER=https://auth.nethub.wiki
+TODO_OIDC_CLIENT_ID=todo
+TODO_OIDC_CLIENT_SECRET=replace-with-registered-client-secret
+TODO_OIDC_REDIRECT_URI=https://todolist.nethub.wiki/auth/callback
+TODO_SESSION_COOKIE_SECURE=true
+TODO_LEGACY_AUTH_ENABLED=false
 DEEPSEEK_API_KEY=your-deepseek-api-key
 DEEPSEEK_MODEL=deepseek-v4-flash
 DEEPSEEK_TIMEOUT_SECONDS=20
@@ -103,10 +110,10 @@ http://localhost:8092
 
 ## 首次使用
 
-1. 打开 `http://localhost:8092`。
-2. 点击右上角账号入口。
-3. 注册新账号。
-4. 登录后即可新增、编辑、删除和安排任务。
+1. 在 Accounts 注册 TodoList 客户端，回调地址必须精确设置为 TodoList 的 `/auth/callback`，Back-Channel Logout 地址设置为 `/auth/backchannel-logout`。
+2. 把客户端密钥及 Issuer 写入 `.env`。
+3. 打开 TodoList，点击右上角登录入口并在 Accounts 完成登录。
+4. 首次回调会创建本站成员，之后即可新增、编辑、删除和安排任务。
 
 未登录时页面可以打开，但任务列表和每日安排是只读空数据状态，不能保存修改。
 
@@ -130,7 +137,7 @@ chmod +x deploy-first-run.sh
 - 创建权限为 `700` 的 `data/`，初始化或迁移 SQLite 数据库。
 - 默认创建、启用并启动 systemd 用户服务 `todo-list.service`，服务固定使用该 Conda 环境中的 Python。
 
-如需提前设置端口、AI 或管理员配置，可以在首次运行前手动创建 `.env`；否则脚本会自动复制模板，之后再编辑即可。如果使用 Caddy 或 Nginx 反代，`TODO_HOST` 建议保持 `127.0.0.1`，不要开放 Python 服务到公网。
+如需提前设置端口、OIDC 或 AI 配置，可以在首次运行前手动创建 `.env`；否则脚本会自动复制模板，之后再编辑即可。如果使用 Caddy 或 Nginx 反代，`TODO_HOST` 建议保持 `127.0.0.1`，不要开放 Python 服务到公网。
 
 初始化 `.env`、Conda 环境、依赖和数据库，但不创建 systemd 服务：
 
@@ -144,26 +151,15 @@ chmod +x deploy-first-run.sh
 ./deploy-first-run.sh --no-start
 ```
 
-可选环境变量：
+TodoList 不再创建本地密码管理员。完成 Accounts 客户端配置后，先用中央账号登录一次，再使用不可变的中央 `sub` 授予本地管理员角色：
 
 ```bash
-TODO_ADMIN_NICKNAME=admin \
-TODO_ADMIN_NAME=管理员 \
-TODO_ADMIN_PASSWORD='change-this-password' \
-./deploy-first-run.sh
+conda run -n todo-list python scripts/grant_admin.py \
+  --database data/todo-list.db \
+  --auth-sub 00000000-0000-0000-0000-000000000000
 ```
 
-也可以把管理员初始化配置写进 `.env`：
-
-```env
-TODO_ADMIN_NICKNAME=admin
-TODO_ADMIN_NAME=管理员
-TODO_ADMIN_PASSWORD=change-this-password
-```
-
-`deploy-first-run.sh` 初始化数据库时会导入 `server.py`，而 `server.py` 会读取 `.env`，所以这些管理员变量可以从 `.env` 生效。再次运行脚本时，如果昵称已存在，会把该账号更新为管理员并重设密码。
-
-如果只设置了 `TODO_ADMIN_NICKNAME` 或只设置了 `TODO_ADMIN_PASSWORD`，脚本会报错退出；两者需要同时设置。部署完成后建议从 `.env` 中移除明文管理员密码，别把钥匙挂门口，风一吹大家都知道。
+这个命令只修改 TodoList 的本地角色，不会授予 Accounts 或其他网站的管理员权限。迁移的旧管理员会由映射工具保留原有本地角色。
 
 其他环境变量：
 
@@ -236,11 +232,22 @@ your-domain.com {
 
 安全边界、部署注意事项和已知剩余风险见 [安全说明](./SECURITY.md)。
 
-需要登录的接口通过请求头传入 token：
+浏览器登录使用服务端保存的不透明会话 Cookie；修改数据的请求还必须携带 `/api/auth/me` 返回的 CSRF token：
 
 ```http
-Authorization: Bearer <token>
+Cookie: todo_session=<opaque-token>
+X-CSRF-Token: <csrf-token>
 ```
+
+生产硬切换前，先在 Accounts 中导入旧账号并导出映射，然后离线备份 TodoList 数据库并执行：
+
+```bash
+conda run -n todo-list python scripts/apply_accounts_mapping.py \
+  --database data/todo-list.db \
+  --mapping /secure/path/accounts-mapping.json
+```
+
+映射必须覆盖全部本站用户。脚本事务化保留本地用户 ID、角色和业务数据，把旧密码移入归档表，清空旧会话，并可用同一映射重复执行。
 
 ## 数据说明
 
@@ -252,7 +259,7 @@ data/todo-list.db
 
 该目录已被 `.gitignore` 忽略，避免提交本地运行数据。服务启动时会启用 SQLite WAL 模式，因此数据库必须放在本机文件系统，不能直接放在 NFS/SMB 等网络文件系统。在线备份请使用 SQLite backup API；也可以先停止服务，再完整备份 `data/` 目录。服务运行时不要只复制 `.db` 文件，以免遗漏 WAL 中尚未 checkpoint 的事务。
 
-密码使用 PBKDF2-SHA256 加盐哈希存储；会话 token 默认有效期为 7 天。活跃会话会自动延期，但服务端最多每小时刷新一次过期时间，以减少只读请求产生的数据库写锁竞争。
+切换后本站不再验证或保存可登录的密码。历史 PBKDF2 哈希仅在迁移时进入不可登录的归档表；中央账号负责密码验证。本站会话 token 只以哈希形式存入 SQLite，默认有效期为 7 天。活跃会话会自动延期，但服务端最多每小时刷新一次过期时间。
 
 ## 开发说明
 

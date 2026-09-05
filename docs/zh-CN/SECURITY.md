@@ -8,14 +8,16 @@
 
 - 默认监听 `127.0.0.1:8092`。生产环境建议继续绑定本机地址，通过 Caddy 或 Nginx 反向代理对外提供 HTTPS。
 - 不建议把 Python 内置 HTTP 服务直接暴露到公网。
-- `.env` 已在 `.gitignore` 中忽略，不要提交真实 `DEEPSEEK_API_KEY`、OSS AccessKey 或管理员初始化密码。
+- `.env` 已在 `.gitignore` 中忽略，不要提交真实 OIDC 客户端密钥、`DEEPSEEK_API_KEY` 或 OSS AccessKey。
 
 ## 认证和会话
 
-- 登录态使用 `Authorization: Bearer <token>` 请求头。
-- 服务端 session 默认有效期为 7 天；访问受保护接口时会滑动刷新过期时间。
-- 密码使用 PBKDF2-SHA256 加盐哈希存储。
-- 前端当前把 token 存在 `localStorage`。这便于静态前端使用，但如果页面出现 XSS，token 会一起暴露；因此禁止引入不可信脚本，升级 `web/vendor/` 依赖时要确认来源。
+- 登录采用 Accounts 的 OIDC Authorization Code + PKCE S256；客户端密钥只保存在后端。
+- 本站使用随机、不透明、`HttpOnly + SameSite=Lax` Cookie；生产环境同时启用 `Secure`。数据库只保存会话 token 哈希，不把凭证写入 `localStorage`。
+- 修改数据的 Cookie 会话请求必须通过 `X-CSRF-Token` 校验。服务端 session 默认有效期为 7 天，访问受保护接口时滑动刷新。
+- 本地密码注册、登录和修改密码在硬切换后关闭；旧 PBKDF2 哈希只允许迁入不可登录归档表。
+- 回调严格校验 RS256 签名、issuer、audience、nonce、过期时间和 UserInfo 的 `sub`；state 与授权码流程记录只能使用一次。
+- Back-Channel Logout 校验签名、事件、受众、时间和 `jti`，并按中央 `sid` 或 `sub` 撤销本站会话。
 
 ## 输入和文件
 

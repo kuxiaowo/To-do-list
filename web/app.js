@@ -16,7 +16,6 @@ const MANAGEBAC_WAKE_URL = 'managebac-sync://wake';
 const MANAGEBAC_INSTALLER_DOWNLOAD_URL = '/api/managebac-helper/installer';
 const MANAGEBAC_CONNECT_TIMEOUT_MS = 20000;
 const MANAGEBAC_REQUEST_TIMEOUT_MS = 30000;
-const AUTH_TOKEN_KEY = 'todo-list-auth-token-v1';
 const THEME_STORAGE_KEY = 'todo-list-theme-v1';
 const GUIDE_STORAGE_KEY = 'todo-list-guide-v1';
 const APP_SETTINGS_STORAGE_KEY = 'todo-list-app-settings-v1';
@@ -198,9 +197,8 @@ createApp({
       activeHabitId: '',
       habitForm: this.emptyHabitForm(),
       habitSyncConflicts: [],
-      authToken: localStorage.getItem(AUTH_TOKEN_KEY) || '',
+      csrfToken: '',
       currentUser: null,
-      authMode: 'login',
       accountMenuOpen: false,
       draggedTaskId: null,
       draggedScheduleItemId: null,
@@ -221,12 +219,8 @@ createApp({
       slotEditorWeekday: '1',
       slotEditorSlots: [],
       slotEditorWeekSlots: JSON.parse(JSON.stringify(DEFAULT_WEEK_SLOTS)),
-      loginForm: { nickname: '', password: '' },
-      registerForm: { name: '', nickname: '', password: '' },
       nicknameDialogVisible: false,
       nicknameForm: { nickname: '' },
-      passwordDialogVisible: false,
-      passwordForm: { currentPassword: '', newPassword: '', confirmPassword: '' },
       avatarDialogVisible: false,
       avatarLoading: false,
       avatarSourceUrl: '',
@@ -1059,6 +1053,7 @@ createApp({
     }
   },
   async mounted() {
+    localStorage.removeItem('todo-list-auth-token-v1');
     if (window.TodoI18n) window.TodoI18n.mount(this.locale);
     this.applyTheme();
     this.currentViewDateKey = this.formatDateKey(new Date());
@@ -1068,6 +1063,25 @@ createApp({
     this.setDdlCalendarMonth(this.currentViewDateKey);
     document.addEventListener('click', this.closeAccountMenu);
     await this.loadCurrentUser();
+    if (this.currentUser) {
+      window.sessionStorage.removeItem('todo-sso-probe');
+      window.localStorage.removeItem('todo-sso-suppressed-until');
+    } else {
+      const params = new URLSearchParams(window.location.search);
+      const silentFailed = params.get('sso') === 'none';
+      const suppressedUntil = Number(window.localStorage.getItem('todo-sso-suppressed-until') || 0);
+      const alreadyProbed = window.sessionStorage.getItem('todo-sso-probe') === '1';
+      if (silentFailed) {
+        params.delete('sso');
+        const query = params.toString();
+        window.history.replaceState({}, '', `${window.location.pathname}${query ? `?${query}` : ''}${window.location.hash}`);
+      } else if (!alreadyProbed && Date.now() >= suppressedUntil) {
+        window.sessionStorage.setItem('todo-sso-probe', '1');
+        window.location.replace('/auth/login?prompt=none');
+        return;
+      }
+      this.accountMenuOpen = true;
+    }
     await this.recordVisit('home');
     await this.loadSubjectTemplate();
     await this.loadScheduleConfig();
@@ -1256,12 +1270,13 @@ createApp({
       };
     },
     authHeaders() {
-      return this.authToken ? { Authorization: `Bearer ${this.authToken}` } : {};
+      return this.csrfToken ? { 'X-CSRF-Token': this.csrfToken } : {};
     },
     async apiJson(url, options = {}) {
       // Centralized JSON fetch wrapper for authenticated API requests.
       const response = await fetch(url, {
         ...options,
+        credentials: 'same-origin',
         headers: {
           ...(options.body ? { 'Content-Type': 'application/json' } : {}),
           ...this.authHeaders(),
@@ -1286,6 +1301,7 @@ createApp({
             ...this.authHeaders(),
             ...(options.headers || {})
           },
+          credentials: 'same-origin',
           signal: controller.signal
         });
         const payload = await response.json().catch(() => ({}));
@@ -3174,69 +3190,30 @@ createApp({
         .join('；');
     },
     async loadCurrentUser() {
-      if (!this.authToken) return;
       try {
         const payload = await this.apiJson(`${AUTH_API}/me`, { cache: 'no-store' });
         this.currentUser = payload.user;
+        this.csrfToken = payload.csrfToken || '';
       } catch (error) {
-        this.authToken = '';
+        this.csrfToken = '';
         this.currentUser = null;
-        localStorage.removeItem(AUTH_TOKEN_KEY);
       }
     },
     async login() {
-      try {
-        const payload = await this.apiJson(`${AUTH_API}/login`, {
-          method: 'POST',
-          body: JSON.stringify(this.loginForm)
-        });
-        this.authToken = payload.token;
-        this.currentUser = payload.user;
-        this.accountMenuOpen = false;
-        localStorage.setItem(AUTH_TOKEN_KEY, payload.token);
-        await this.loadSubjectTemplate();
-        await this.loadScheduleConfig();
-        await this.loadTasks();
-        await this.loadHabits();
-        await this.loadScheduleItems();
-        await this.recordVisit('home');
-        ElementPlus.ElMessage.success('登录成功。');
-      } catch (error) {
-        ElementPlus.ElMessage.error(`登录失败：${error.message}`);
-      }
+      window.sessionStorage.removeItem('todo-sso-probe');
+      window.localStorage.removeItem('todo-sso-suppressed-until');
+      window.location.assign('/auth/login');
     },
     async register() {
-      try {
-        const payload = await this.apiJson(`${AUTH_API}/register`, {
-          method: 'POST',
-          body: JSON.stringify(this.registerForm)
-        });
-        this.authToken = payload.token;
-        this.currentUser = payload.user;
-        this.accountMenuOpen = false;
-        localStorage.setItem(AUTH_TOKEN_KEY, payload.token);
-        await this.loadSubjectTemplate();
-        await this.loadScheduleConfig();
-        await this.loadTasks();
-        await this.loadHabits();
-        await this.loadScheduleItems();
-        await this.recordVisit('home');
-        ElementPlus.ElMessage.success('注册成功，已自动登录。');
-      } catch (error) {
-        ElementPlus.ElMessage.error(`注册失败：${error.message}`);
-      }
+      window.sessionStorage.removeItem('todo-sso-probe');
+      window.localStorage.removeItem('todo-sso-suppressed-until');
+      window.location.assign('/auth/login?screen_hint=signup');
     },
     openNicknameDialog() {
       if (!this.currentUser) return;
       this.accountMenuOpen = false;
       this.nicknameForm.nickname = this.currentUser.nickname || '';
       this.nicknameDialogVisible = true;
-    },
-    openPasswordDialog() {
-      if (!this.currentUser) return;
-      this.accountMenuOpen = false;
-      this.passwordForm = { currentPassword: '', newPassword: '', confirmPassword: '' };
-      this.passwordDialogVisible = true;
     },
     async saveNickname() {
       if (!this.currentUser) {
@@ -3258,42 +3235,10 @@ createApp({
           body: JSON.stringify({ nickname })
         });
         this.currentUser = payload.user;
-        this.loginForm.nickname = payload.user.nickname;
         this.nicknameDialogVisible = false;
         ElementPlus.ElMessage.success('昵称已更新。');
       } catch (error) {
         ElementPlus.ElMessage.error(`昵称更新失败：${error.message}`);
-      }
-    },
-    async savePassword() {
-      if (!this.currentUser) {
-        ElementPlus.ElMessage.warning('请先登录后再修改密码。');
-        return;
-      }
-      const currentPassword = this.passwordForm.currentPassword;
-      const newPassword = this.passwordForm.newPassword;
-      if (!currentPassword || !newPassword || !this.passwordForm.confirmPassword) {
-        ElementPlus.ElMessage.warning('请完整填写密码信息。');
-        return;
-      }
-      if (newPassword.length < 6) {
-        ElementPlus.ElMessage.warning('新密码至少需要 6 位。');
-        return;
-      }
-      if (newPassword !== this.passwordForm.confirmPassword) {
-        ElementPlus.ElMessage.warning('两次输入的新密码不一致。');
-        return;
-      }
-      try {
-        await this.apiJson(`${AUTH_API}/password`, {
-          method: 'PUT',
-          body: JSON.stringify({ currentPassword, newPassword })
-        });
-        this.passwordDialogVisible = false;
-        this.passwordForm = { currentPassword: '', newPassword: '', confirmPassword: '' };
-        ElementPlus.ElMessage.success('密码已更新。');
-      } catch (error) {
-        ElementPlus.ElMessage.error(`密码更新失败：${error.message}`);
       }
     },
     openAvatarDialog() {
@@ -3653,11 +3598,12 @@ createApp({
       return status === 'replied' ? 'success' : 'warning';
     },
     async logout() {
-      if (this.authToken) {
+      if (this.currentUser) {
         await this.apiJson(`${AUTH_API}/logout`, { method: 'POST' }).catch(() => {});
       }
-      this.authToken = '';
+      this.csrfToken = '';
       this.currentUser = null;
+      window.localStorage.setItem('todo-sso-suppressed-until', String(Date.now() + 10 * 60 * 1000));
       this.adminMode = false;
       this.adminSection = 'users';
       this.adminUsers = [];
@@ -3743,8 +3689,6 @@ createApp({
       };
       this.nicknameDialogVisible = false;
       this.nicknameForm.nickname = '';
-      this.passwordDialogVisible = false;
-      this.passwordForm = { currentPassword: '', newPassword: '', confirmPassword: '' };
       this.avatarDialogVisible = false;
       this.resetAvatarDraft();
       this.resetSubjectTemplateState();
@@ -3779,7 +3723,6 @@ createApp({
       this.scheduleTemplateVersions = [];
       this.scheduleDayOverrides = {};
       this.accountMenuOpen = true;
-      localStorage.removeItem(AUTH_TOKEN_KEY);
       ElementPlus.ElMessage.success('已退出登录。');
     },
     async loadTasks() {

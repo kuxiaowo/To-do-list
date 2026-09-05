@@ -31,10 +31,12 @@ class ServerRegressionTests(unittest.TestCase):
         self.original_data_dir = server.DATA_DIR
         self.original_db_path = server.DB_PATH
         self.original_iterations = server.PASSWORD_ITERATIONS
+        self.original_legacy_auth = server.LEGACY_AUTH_ENABLED
         self.temp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         server.DATA_DIR = Path(self.temp_dir.name)
         server.DB_PATH = server.DATA_DIR / 'todo-list.db'
         server.PASSWORD_ITERATIONS = 1_000
+        server.LEGACY_AUTH_ENABLED = True
         server.init_db()
 
         self.httpd = ThreadingHTTPServer(('127.0.0.1', 0), server.TodoHandler)
@@ -49,6 +51,7 @@ class ServerRegressionTests(unittest.TestCase):
         server.DATA_DIR = self.original_data_dir
         server.DB_PATH = self.original_db_path
         server.PASSWORD_ITERATIONS = self.original_iterations
+        server.LEGACY_AUTH_ENABLED = self.original_legacy_auth
         self.temp_dir.cleanup()
 
     def request(self, method, path, payload=None, token=None, extra_headers=None):
@@ -2322,6 +2325,11 @@ class ServerRegressionTests(unittest.TestCase):
             "this.filteredTasks.filter(task => task.dueAt && this.taskPool(task) === 'todo' && task.dueAt.startsWith(key))",
             app_js,
         )
+
+    def test_account_menu_links_to_nethub_account_center(self):
+        index_html = INDEX_HTML_PATH.read_text(encoding='utf-8')
+        self.assertIn('href="https://auth.nethub.wiki/account"', index_html)
+        self.assertIn('>前往账户中心</a>', index_html)
 
     def test_ai_frontend_explains_pending_task_placement(self):
         index_html = INDEX_HTML_PATH.read_text(encoding='utf-8')
