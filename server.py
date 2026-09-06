@@ -3249,9 +3249,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
                 {'error': 'central login is not configured'}, status=HTTPStatus.SERVICE_UNAVAILABLE
             )
         query = parse_qs(urlparse(self.path).query)
-        is_popup = query.get('popup', [''])[0] == '1'
-        flow_kind = 'popup' if is_popup else 'page'
-        raw_flow = f'{flow_kind}.{secrets.token_urlsafe(48)}'
+        raw_flow = secrets.token_urlsafe(48)
         state = secrets.token_urlsafe(32)
         nonce = secrets.token_urlsafe(32)
         verifier = secrets.token_urlsafe(64)
@@ -3393,7 +3391,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
             )
             conn.commit()
         return self.redirect_to(
-            '/?auth_popup=1' if raw_flow.startswith('popup.') else '/',
+            '/',
             cookies=[
                 self.cookie_header(SESSION_COOKIE_NAME, raw_session, SESSION_TTL_SECONDS),
                 self.cookie_header(OIDC_FLOW_COOKIE_NAME, '', 0),
