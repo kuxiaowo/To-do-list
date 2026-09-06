@@ -19,9 +19,6 @@ const MANAGEBAC_REQUEST_TIMEOUT_MS = 30000;
 const THEME_STORAGE_KEY = 'todo-list-theme-v1';
 const GUIDE_STORAGE_KEY = 'todo-list-guide-v1';
 const APP_SETTINGS_STORAGE_KEY = 'todo-list-app-settings-v1';
-const AUTH_POPUP_QUERY_KEY = 'auth_popup';
-const AUTH_POPUP_CHANNEL_NAME = 'nethub-auth:todo-list';
-const AUTH_POPUP_STORAGE_KEY = 'todo-list-auth-popup-complete';
 const SIDEBAR_AUTO_COLLAPSE_WIDTH = 1100;
 const DATE_RANGE_EXPAND_MARGIN = 21;
 const HABIT_SYNC_FUTURE_DAYS = 90;
@@ -52,55 +49,6 @@ const TIMELINE_START_DAY = 1;
 const PRIORITY_ORDER = { high: 0, medium: 1, low: 2 };
 const PRIORITY_LABELS = { high: '高优先级', medium: '中优先级', low: '低优先级' };
 
-let authPopupChannel = null;
-let authPopupReloadScheduled = false;
-
-function setupAuthPopupSync() {
-  const url = new URL(window.location.href);
-  if (url.searchParams.get(AUTH_POPUP_QUERY_KEY) === '1') {
-    url.searchParams.delete(AUTH_POPUP_QUERY_KEY);
-    window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`);
-    const completedAt = String(Date.now());
-    try {
-      window.localStorage.setItem(AUTH_POPUP_STORAGE_KEY, completedAt);
-    } catch (_error) {
-      // Storage can be unavailable in strict privacy modes; BroadcastChannel remains usable.
-    }
-    if ('BroadcastChannel' in window) {
-      try {
-        const channel = new BroadcastChannel(AUTH_POPUP_CHANNEL_NAME);
-        channel.postMessage({ type: 'login-complete', completedAt });
-        channel.close();
-      } catch (_error) {
-        // The storage event above is the compatibility fallback.
-      }
-    }
-    window.setTimeout(() => window.close(), 50);
-    return true;
-  }
-
-  const reloadAfterLogin = () => {
-    if (authPopupReloadScheduled) return;
-    authPopupReloadScheduled = true;
-    window.location.reload();
-  };
-  if ('BroadcastChannel' in window) {
-    try {
-      authPopupChannel = new BroadcastChannel(AUTH_POPUP_CHANNEL_NAME);
-      authPopupChannel.addEventListener('message', (event) => {
-        if (event.data?.type === 'login-complete') reloadAfterLogin();
-      });
-    } catch (_error) {
-      authPopupChannel = null;
-    }
-  }
-  window.addEventListener('storage', (event) => {
-    if (event.key === AUTH_POPUP_STORAGE_KEY && event.newValue) reloadAfterLogin();
-  });
-  return false;
-}
-
-setupAuthPopupSync();
 const DEFAULT_APP_SETTINGS = {
   aiEnabled: true,
   showHabitPool: true,
@@ -3257,12 +3205,12 @@ createApp({
     async login() {
       window.sessionStorage.removeItem('todo-sso-probe');
       window.localStorage.removeItem('todo-sso-suppressed-until');
-      window.open('/auth/login?popup=1', '_blank', 'noopener,noreferrer');
+      window.location.assign('/auth/login');
     },
     async register() {
       window.sessionStorage.removeItem('todo-sso-probe');
       window.localStorage.removeItem('todo-sso-suppressed-until');
-      window.open('/auth/login?screen_hint=signup&popup=1', '_blank', 'noopener,noreferrer');
+      window.location.assign('/auth/login?screen_hint=signup');
     },
     openNicknameDialog() {
       if (!this.currentUser) return;

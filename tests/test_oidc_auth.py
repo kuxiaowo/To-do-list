@@ -144,8 +144,8 @@ class OIDCAuthTests(unittest.TestCase):
         )
         self.assertEqual(status, HTTPStatus.GONE)
 
-    def test_popup_login_callback_returns_completion_marker(self):
-        status, headers, _ = self.request('GET', '/auth/login?popup=1')
+    def test_page_login_callback_returns_home(self):
+        status, headers, _ = self.request('GET', '/auth/login')
         self.assertEqual(status, HTTPStatus.FOUND)
         query = parse_qs(urlparse(dict(headers)['Location']).query)
         flow_cookie = self.cookie_from(headers, server.OIDC_FLOW_COOKIE_NAME)
@@ -163,7 +163,7 @@ class OIDCAuthTests(unittest.TestCase):
             )
 
         self.assertEqual(callback_status, HTTPStatus.FOUND)
-        self.assertEqual(dict(callback_headers)['Location'], '/?auth_popup=1')
+        self.assertEqual(dict(callback_headers)['Location'], '/')
         self.assertTrue(self.cookie_from(callback_headers, server.SESSION_COOKIE_NAME))
 
     def test_callback_state_is_one_time_even_when_exchange_fails(self):
