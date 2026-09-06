@@ -24,7 +24,7 @@ from http import HTTPStatus
 from http.cookies import SimpleCookie
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, quote, unquote, urlparse
+from urllib.parse import parse_qs, parse_qsl, quote, unquote, urlencode, urlparse, urlunparse
 
 import requests
 
@@ -344,10 +344,18 @@ def init_db() -> None:
                 state_hash TEXT NOT NULL,
                 nonce TEXT NOT NULL,
                 code_verifier TEXT NOT NULL,
+                return_path TEXT NOT NULL DEFAULT '/',
                 created_at INTEGER NOT NULL
             )
             '''
         )
+        oidc_flow_columns = {
+            row[1] for row in conn.execute('PRAGMA table_info(oidc_login_flows)').fetchall()
+        }
+        if 'return_path' not in oidc_flow_columns:
+            conn.execute(
+                "ALTER TABLE oidc_login_flows ADD COLUMN return_path TEXT NOT NULL DEFAULT '/'"
+            )
         conn.execute(
             '''
             CREATE TABLE IF NOT EXISTS backchannel_logout_jtis (
@@ -2405,6 +2413,33 @@ def static_cache_control(path: str, query: str) -> str:
     return 'no-cache'
 
 
+def safe_return_path(value: str | None, default: str = '/') -> str:
+    if not value:
+        return default
+    parsed = urlparse(value)
+    if (
+        parsed.scheme
+        or parsed.netloc
+        or not value.startswith('/')
+        or value.startswith('//')
+        or '\\' in value
+        or any(ord(character) < 32 for character in value)
+    ):
+        return default
+    return value
+
+
+def with_query_parameter(value: str, name: str, parameter: str) -> str:
+    parsed = urlparse(safe_return_path(value))
+    query = [
+        (key, item)
+        for key, item in parse_qsl(parsed.query, keep_blank_values=True)
+        if key != name
+    ]
+    query.append((name, parameter))
+    return urlunparse(parsed._replace(query=urlencode(query)))
+
+
 def find_managebac_installer() -> Path | None:
     direct_exes = sorted(MANAGEBAC_HELPER_DIR.glob('*.exe'))
     if len(direct_exes) == 1:
@@ -3249,6 +3284,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
                 {'error': 'central login is not configured'}, status=HTTPStatus.SERVICE_UNAVAILABLE
             )
         query = parse_qs(urlparse(self.path).query)
+        return_path = safe_return_path(str(query.get('next', ['/'])[0]))
         raw_flow = secrets.token_urlsafe(48)
         state = secrets.token_urlsafe(32)
         nonce = secrets.token_urlsafe(32)
@@ -3261,10 +3297,17 @@ class TodoHandler(SimpleHTTPRequestHandler):
             conn.execute(
                 '''
                 INSERT INTO oidc_login_flows
-                (token_hash, state_hash, nonce, code_verifier, created_at)
-                VALUES (?, ?, ?, ?, ?)
+                (token_hash, state_hash, nonce, code_verifier, return_path, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ''',
-                (self.token_digest(raw_flow), self.token_digest(state), nonce, verifier, now),
+                (
+                    self.token_digest(raw_flow),
+                    self.token_digest(state),
+                    nonce,
+                    verifier,
+                    return_path,
+                    now,
+                ),
             )
             conn.commit()
         location = authorization_url(
@@ -3284,20 +3327,10 @@ class TodoHandler(SimpleHTTPRequestHandler):
 
     def handle_oidc_callback(self):
         query = parse_qs(urlparse(self.path).query)
-        if query.get('error'):
-            if query['error'][0] == 'login_required':
-                return self.redirect_to(
-                    '/?sso=none',
-                    cookies=[self.cookie_header(OIDC_FLOW_COOKIE_NAME, '', 0)],
-                )
-            return self.write_json(
-                {'error': 'central login was rejected', 'detail': query['error'][0]},
-                status=HTTPStatus.BAD_REQUEST,
-            )
         code = str(query.get('code', [''])[0])
         state = str(query.get('state', [''])[0])
         raw_flow = self.request_cookie(OIDC_FLOW_COOKIE_NAME)
-        if not code or not state or not raw_flow:
+        if not state or not raw_flow:
             return self.write_json({'error': 'invalid OIDC callback'}, status=HTTPStatus.BAD_REQUEST)
         now = int(time.time())
         with get_db() as conn:
@@ -3317,6 +3350,19 @@ class TodoHandler(SimpleHTTPRequestHandler):
             or not hmac.compare_digest(str(flow['state_hash']), self.token_digest(state))
         ):
             return self.write_json({'error': 'OIDC state is invalid or expired'}, status=HTTPStatus.BAD_REQUEST)
+        return_path = safe_return_path(str(flow['return_path']))
+        if query.get('error'):
+            if query['error'][0] == 'login_required':
+                return self.redirect_to(
+                    with_query_parameter(return_path, 'sso', 'none'),
+                    cookies=[self.cookie_header(OIDC_FLOW_COOKIE_NAME, '', 0)],
+                )
+            return self.write_json(
+                {'error': 'central login was rejected', 'detail': query['error'][0]},
+                status=HTTPStatus.BAD_REQUEST,
+            )
+        if not code:
+            return self.write_json({'error': 'invalid OIDC callback'}, status=HTTPStatus.BAD_REQUEST)
         try:
             identity = exchange_authorization_code(
                 issuer=ACCOUNTS_ISSUER,
@@ -3391,7 +3437,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
             )
             conn.commit()
         return self.redirect_to(
-            '/',
+            return_path,
             cookies=[
                 self.cookie_header(SESSION_COOKIE_NAME, raw_session, SESSION_TTL_SECONDS),
                 self.cookie_header(OIDC_FLOW_COOKIE_NAME, '', 0),
