@@ -2316,13 +2316,16 @@ class ServerRegressionTests(unittest.TestCase):
         self.assertIn('target="_blank"', index_html)
         self.assertIn('<span>前往账户中心</span>', index_html)
         self.assertIn(
-            "window.open('/auth/login', '_blank', 'noopener,noreferrer')",
+            "window.open('/auth/login?popup=1', '_blank', 'noopener,noreferrer')",
             app_js,
         )
         self.assertIn(
-            "window.open('/auth/login?screen_hint=signup', '_blank', 'noopener,noreferrer')",
+            "window.open('/auth/login?screen_hint=signup&popup=1', '_blank', 'noopener,noreferrer')",
             app_js,
         )
+        self.assertIn("new BroadcastChannel(AUTH_POPUP_CHANNEL_NAME)", app_js)
+        self.assertIn("window.location.reload()", app_js)
+        self.assertIn("window.close()", app_js)
         self.assertIn("window.location.replace('/auth/login?prompt=none')", app_js)
 
     def test_ai_frontend_explains_pending_task_placement(self):
