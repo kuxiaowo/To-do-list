@@ -2309,6 +2309,7 @@ class ServerRegressionTests(unittest.TestCase):
     def test_account_menu_links_to_nethub_account_center(self):
         index_html = INDEX_HTML_PATH.read_text(encoding='utf-8')
         app_js = APP_JS_PATH.read_text(encoding='utf-8')
+        self.assertIn('v-if="currentUser"\n                  class="account-center-button"', index_html)
         self.assertIn(':href="currentUser.accountUrl"', index_html)
         self.assertIn('class="account-center-button"', index_html)
         self.assertIn('role="button"', index_html)

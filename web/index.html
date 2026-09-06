@@ -244,6 +244,7 @@
                   </div>
                 </div>
                 <a
+                  v-if="currentUser"
                   class="account-center-button"
                   :href="currentUser.accountUrl"
                   target="_blank"
