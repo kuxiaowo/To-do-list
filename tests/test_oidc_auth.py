@@ -144,8 +144,10 @@ class OIDCAuthTests(unittest.TestCase):
         )
         self.assertEqual(status, HTTPStatus.GONE)
 
-    def test_page_login_callback_returns_home(self):
-        status, headers, _ = self.request('GET', '/auth/login')
+    def test_page_login_callback_returns_requested_page(self):
+        status, headers, _ = self.request(
+            'GET', '/auth/login?next=%2F%3Fview%3Dcalendar%23today'
+        )
         self.assertEqual(status, HTTPStatus.FOUND)
         query = parse_qs(urlparse(dict(headers)['Location']).query)
         flow_cookie = self.cookie_from(headers, server.OIDC_FLOW_COOKIE_NAME)
@@ -163,8 +165,34 @@ class OIDCAuthTests(unittest.TestCase):
             )
 
         self.assertEqual(callback_status, HTTPStatus.FOUND)
-        self.assertEqual(dict(callback_headers)['Location'], '/')
+        self.assertEqual(dict(callback_headers)['Location'], '/?view=calendar#today')
         self.assertTrue(self.cookie_from(callback_headers, server.SESSION_COOKIE_NAME))
+
+    def test_oidc_login_rejects_external_return_path(self):
+        status, headers, _ = self.request(
+            'GET', '/auth/login?next=https%3A%2F%2Fevil.example%2F'
+        )
+        self.assertEqual(status, HTTPStatus.FOUND)
+        flow_cookie = self.cookie_from(headers, server.OIDC_FLOW_COOKIE_NAME)
+        with server.get_db() as connection:
+            flow = connection.execute('SELECT return_path FROM oidc_login_flows').fetchone()
+        self.assertEqual(flow['return_path'], '/')
+        self.assertTrue(flow_cookie)
+
+    def test_silent_login_failure_returns_to_requested_page(self):
+        status, headers, _ = self.request(
+            'GET', '/auth/login?prompt=none&next=%2F%3Fview%3Ddaily%23today'
+        )
+        query = parse_qs(urlparse(dict(headers)['Location']).query)
+        flow_cookie = self.cookie_from(headers, server.OIDC_FLOW_COOKIE_NAME)
+        callback = f"/auth/callback?error=login_required&state={query['state'][0]}"
+
+        callback_status, callback_headers, _ = self.request(
+            'GET', callback, headers={'Cookie': flow_cookie}
+        )
+
+        self.assertEqual(callback_status, HTTPStatus.FOUND)
+        self.assertEqual(dict(callback_headers)['Location'], '/?view=daily&sso=none#today')
 
     def test_callback_state_is_one_time_even_when_exchange_fails(self):
         status, headers, _ = self.request('GET', '/auth/login')

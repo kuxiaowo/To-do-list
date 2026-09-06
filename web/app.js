@@ -19,6 +19,7 @@ const MANAGEBAC_REQUEST_TIMEOUT_MS = 30000;
 const THEME_STORAGE_KEY = 'todo-list-theme-v1';
 const GUIDE_STORAGE_KEY = 'todo-list-guide-v1';
 const APP_SETTINGS_STORAGE_KEY = 'todo-list-app-settings-v1';
+const AUTH_RETURN_STATE_KEY = 'todo-list-auth-return-state-v1';
 const SIDEBAR_AUTO_COLLAPSE_WIDTH = 1100;
 const DATE_RANGE_EXPAND_MARGIN = 21;
 const HABIT_SYNC_FUTURE_DAYS = 90;
@@ -48,6 +49,10 @@ const TIMELINE_START_MONTH = 4;
 const TIMELINE_START_DAY = 1;
 const PRIORITY_ORDER = { high: 0, medium: 1, low: 2 };
 const PRIORITY_LABELS = { high: '高优先级', medium: '中优先级', low: '低优先级' };
+
+function currentReturnPath() {
+  return `${window.location.pathname}${window.location.search}${window.location.hash}`;
+}
 
 const DEFAULT_APP_SETTINGS = {
   aiEnabled: true,
@@ -1069,6 +1074,24 @@ createApp({
     if (this.currentUser) {
       window.sessionStorage.removeItem('todo-sso-probe');
       window.localStorage.removeItem('todo-sso-suppressed-until');
+      try {
+        const savedAuthState = JSON.parse(
+          window.sessionStorage.getItem(AUTH_RETURN_STATE_KEY) || 'null'
+        );
+        window.sessionStorage.removeItem(AUTH_RETURN_STATE_KEY);
+        if (savedAuthState && ['ddl', 'calendar', 'daily'].includes(savedAuthState.activePage)) {
+          this.activePage = savedAuthState.activePage;
+        }
+        if (
+          savedAuthState
+          && /^\d{4}-\d{2}-\d{2}$/.test(savedAuthState.currentViewDateKey || '')
+        ) {
+          this.currentViewDateKey = savedAuthState.currentViewDateKey;
+          this.pageViewDateKeys[this.activePage] = savedAuthState.currentViewDateKey;
+        }
+      } catch (_error) {
+        window.sessionStorage.removeItem(AUTH_RETURN_STATE_KEY);
+      }
     } else {
       const params = new URLSearchParams(window.location.search);
       const silentFailed = params.get('sso') === 'none';
@@ -1080,7 +1103,8 @@ createApp({
         window.history.replaceState({}, '', `${window.location.pathname}${query ? `?${query}` : ''}${window.location.hash}`);
       } else if (!alreadyProbed && Date.now() >= suppressedUntil) {
         window.sessionStorage.setItem('todo-sso-probe', '1');
-        window.location.replace('/auth/login?prompt=none');
+        const next = encodeURIComponent(currentReturnPath());
+        window.location.replace(`/auth/login?prompt=none&next=${next}`);
         return;
       }
       this.accountMenuOpen = true;
@@ -3205,12 +3229,21 @@ createApp({
     async login() {
       window.sessionStorage.removeItem('todo-sso-probe');
       window.localStorage.removeItem('todo-sso-suppressed-until');
-      window.location.assign('/auth/login');
+      window.sessionStorage.setItem(AUTH_RETURN_STATE_KEY, JSON.stringify({
+        activePage: this.activePage,
+        currentViewDateKey: this.currentViewDateKey
+      }));
+      window.location.assign(`/auth/login?next=${encodeURIComponent(currentReturnPath())}`);
     },
     async register() {
       window.sessionStorage.removeItem('todo-sso-probe');
       window.localStorage.removeItem('todo-sso-suppressed-until');
-      window.location.assign('/auth/login?screen_hint=signup');
+      window.sessionStorage.setItem(AUTH_RETURN_STATE_KEY, JSON.stringify({
+        activePage: this.activePage,
+        currentViewDateKey: this.currentViewDateKey
+      }));
+      const next = encodeURIComponent(currentReturnPath());
+      window.location.assign(`/auth/login?screen_hint=signup&next=${next}`);
     },
     openNicknameDialog() {
       if (!this.currentUser) return;
