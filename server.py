@@ -5,6 +5,7 @@ import base64
 import binascii
 import gzip
 import hashlib
+import html
 import hmac
 import io
 import ipaddress
@@ -3331,7 +3332,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
         state = str(query.get('state', [''])[0])
         raw_flow = self.request_cookie(OIDC_FLOW_COOKIE_NAME)
         if not state or not raw_flow:
-            return self.write_json({'error': 'invalid OIDC callback'}, status=HTTPStatus.BAD_REQUEST)
+            return self.write_auth_error('登录请求无效或浏览器信息已丢失，请重新登录。')
         now = int(time.time())
         with get_db() as conn:
             conn.execute('BEGIN IMMEDIATE')
@@ -3349,7 +3350,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
             or int(flow['created_at']) + OIDC_FLOW_TTL_SECONDS < now
             or not hmac.compare_digest(str(flow['state_hash']), self.token_digest(state))
         ):
-            return self.write_json({'error': 'OIDC state is invalid or expired'}, status=HTTPStatus.BAD_REQUEST)
+            return self.write_auth_error('登录请求已失效或已经使用过，请重新登录。')
         return_path = safe_return_path(str(flow['return_path']))
         if query.get('error'):
             if query['error'][0] == 'login_required':
@@ -3357,12 +3358,9 @@ class TodoHandler(SimpleHTTPRequestHandler):
                     with_query_parameter(return_path, 'sso', 'none'),
                     cookies=[self.cookie_header(OIDC_FLOW_COOKIE_NAME, '', 0)],
                 )
-            return self.write_json(
-                {'error': 'central login was rejected', 'detail': query['error'][0]},
-                status=HTTPStatus.BAD_REQUEST,
-            )
+            return self.write_auth_error('统一账号拒绝了本次登录，请重新尝试。')
         if not code:
-            return self.write_json({'error': 'invalid OIDC callback'}, status=HTTPStatus.BAD_REQUEST)
+            return self.write_auth_error('账号中心回调缺少授权码，请重新登录。')
         try:
             identity = exchange_authorization_code(
                 issuer=ACCOUNTS_ISSUER,
@@ -3374,8 +3372,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
                 nonce=str(flow['nonce']),
             )
         except OIDCError as exc:
-            return self.write_json(
-                {'error': 'central login failed', 'message': str(exc)},
+            return self.write_auth_error(
+                '暂时无法完成统一登录，请稍后重试。',
                 status=HTTPStatus.BAD_GATEWAY,
             )
         raw_session = secrets.token_urlsafe(48)
@@ -6965,6 +6963,45 @@ class TodoHandler(SimpleHTTPRequestHandler):
         self.send_header('Cache-Control', 'no-store')
         for name, value in headers or []:
             self.send_header(name, value)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def write_auth_error(
+        self,
+        message: str,
+        status: HTTPStatus = HTTPStatus.BAD_REQUEST,
+    ):
+        safe_message = html.escape(message)
+        body = f'''<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>登录未完成 · To-Do List</title>
+  <style>
+    body {{ margin: 0; min-height: 100vh; display: grid; place-items: center;
+      background: #f5f7fb; color: #1f2937; font-family: system-ui, sans-serif; }}
+    main {{ width: min(30rem, calc(100% - 3rem)); padding: 2rem; background: white;
+      border: 1px solid #e5e7eb; border-radius: 1rem; box-shadow: 0 1rem 3rem #11182712; }}
+    h1 {{ margin-top: 0; font-size: 1.5rem; }}
+    p {{ line-height: 1.7; }}
+    a {{ display: inline-block; margin-top: .5rem; padding: .7rem 1rem;
+      border-radius: .65rem; background: #2563eb; color: white; text-decoration: none; }}
+  </style>
+</head>
+<body><main>
+  <h1>登录没有完成</h1>
+  <p>{safe_message}</p>
+  <a href="/auth/login">重新登录</a>
+</main></body>
+</html>'''.encode('utf-8')
+        self.send_response(status)
+        self.send_header('Content-Type', 'text/html; charset=utf-8')
+        self.send_header('Content-Length', str(len(body)))
+        self.send_header('Cache-Control', 'no-store')
+        self.send_header(
+            'Set-Cookie', self.cookie_header(OIDC_FLOW_COOKIE_NAME, '', 0)
+        )
         self.end_headers()
         self.wfile.write(body)
 

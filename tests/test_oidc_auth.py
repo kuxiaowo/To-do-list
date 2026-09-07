@@ -206,6 +206,16 @@ class OIDCAuthTests(unittest.TestCase):
         second, _, _ = self.request('GET', callback, headers={'Cookie': flow_cookie})
         self.assertEqual(second, HTTPStatus.BAD_REQUEST)
 
+    def test_invalid_callback_returns_browser_friendly_error_page(self):
+        status, headers, body = self.request(
+            'GET', '/auth/callback?state=expired-state'
+        )
+
+        self.assertEqual(status, HTTPStatus.BAD_REQUEST)
+        self.assertIn('text/html', dict(headers)['Content-Type'])
+        self.assertIn('登录请求无效'.encode(), body)
+        self.assertNotIn(b'application/json', body)
+
     def test_backchannel_logout_revokes_sid_and_rejects_replay_side_effects(self):
         with server.get_db() as connection:
             cursor = connection.execute(
