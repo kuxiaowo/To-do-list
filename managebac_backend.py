@@ -23,6 +23,8 @@ MANAGEBAC_LOGIN_URL = f'{MANAGEBAC_ORIGIN}/login'
 MANAGEBAC_SESSIONS_URL = f'{MANAGEBAC_ORIGIN}/sessions'
 MANAGEBAC_TASKS_URL = f'{MANAGEBAC_ORIGIN}/student/tasks_and_deadlines'
 MANAGEBAC_ALLOWED_HOST = 'sdgj.managebac.cn'
+MANAGEBAC_ACCOUNTS_HOST = 'accounts.faria.cn'
+MANAGEBAC_ACCOUNTS_TOKEN_PATH = '/accounts/otsi'
 MANAGEBAC_COOKIE_KEY_ENV = 'MANAGEBAC_COOKIE_ENCRYPTION_KEY'
 MANAGEBAC_RESPONSE_LIMIT_BYTES = 5 * 1024 * 1024
 MANAGEBAC_REQUEST_TIMEOUT_SECONDS = 20
@@ -94,11 +96,34 @@ class ManageBacPreview:
     meta: dict
 
 
+def is_trusted_managebac_redirect(url: str) -> bool:
+    parsed = urllib.parse.urlparse(url)
+    try:
+        port = parsed.port
+    except ValueError:
+        return False
+    if (
+        parsed.scheme != 'https'
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in (None, 443)
+    ):
+        return False
+
+    target_host = (parsed.hostname or '').lower()
+    if target_host == MANAGEBAC_ALLOWED_HOST:
+        return True
+    return (
+        target_host == MANAGEBAC_ACCOUNTS_HOST
+        and parsed.path == MANAGEBAC_ACCOUNTS_TOKEN_PATH
+    )
+
+
 class _ManageBacRedirectHandler(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         parsed = urllib.parse.urlparse(newurl)
         target_host = (parsed.hostname or '').lower()
-        if parsed.scheme != 'https' or target_host != MANAGEBAC_ALLOWED_HOST:
+        if not is_trusted_managebac_redirect(newurl):
             print(
                 f'[ManageBac] error_type=untrusted_redirect '
                 f'target_host={json.dumps(target_host or None)}',
