@@ -4,6 +4,7 @@ import io
 import os
 import secrets
 import unittest
+import urllib.request
 from contextlib import redirect_stdout
 
 import managebac_backend
@@ -125,6 +126,42 @@ class ManageBacBackendTests(unittest.TestCase):
         )
         for sensitive_value in ('login-name', 'password', '/private/path', 'token', 'secret'):
             self.assertNotIn(sensitive_value, log_line)
+
+    def test_redirect_handler_allows_faria_otsi_token_exchange(self):
+        request = urllib.request.Request(
+            managebac_backend.MANAGEBAC_SESSIONS_URL,
+            data=b'credentials',
+            method='POST',
+        )
+        redirect_url = 'https://accounts.faria.cn/accounts/otsi?token=one-time-token'
+
+        redirected = managebac_backend._ManageBacRedirectHandler().redirect_request(
+            request,
+            None,
+            302,
+            'Found',
+            {},
+            redirect_url,
+        )
+
+        self.assertEqual(redirected.full_url, redirect_url)
+        self.assertEqual(redirected.get_method(), 'GET')
+        self.assertIsNone(redirected.data)
+
+    def test_faria_redirect_allowlist_is_limited_to_https_otsi(self):
+        trusted_url = 'https://accounts.faria.cn/accounts/otsi?token=one-time-token'
+        self.assertTrue(managebac_backend.is_trusted_managebac_redirect(trusted_url))
+
+        rejected_urls = (
+            'http://accounts.faria.cn/accounts/otsi?token=one-time-token',
+            'https://accounts.faria.cn:444/accounts/otsi?token=one-time-token',
+            'https://user:password@accounts.faria.cn/accounts/otsi?token=one-time-token',
+            'https://accounts.faria.cn/accounts/sign-in',
+            'https://accounts.faria.cn.evil.example/accounts/otsi?token=one-time-token',
+        )
+        for url in rejected_urls:
+            with self.subTest(url=url):
+                self.assertFalse(managebac_backend.is_trusted_managebac_redirect(url))
 
 
 if __name__ == '__main__':
