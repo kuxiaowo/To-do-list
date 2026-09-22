@@ -87,6 +87,7 @@ Then modify `.env` as needed. Example content:
 ```env
 TODO_HOST=127.0.0.1
 TODO_PORT=8092
+TODO_HTTP_MAX_WORKERS=32
 TODO_PUBLIC_URL=https://todolist.nethub.wiki
 ACCOUNTS_ISSUER=https://auth.nethub.wiki
 TODO_OIDC_CLIENT_ID=todo
@@ -99,6 +100,8 @@ DEEPSEEK_MODEL=deepseek-v4-flash
 DEEPSEEK_TIMEOUT_SECONDS=20
 MANAGEBAC_COOKIE_ENCRYPTION_KEY=replace-with-generated-key
 ```
+
+`TODO_HTTP_MAX_WORKERS` limits the number of requests processed concurrently and defaults to `32`. Once the limit is reached, new connections immediately receive `503 Service Unavailable` with `Retry-After: 1` so clients can retry later.
 
 Native access typically uses:
 

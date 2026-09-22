@@ -87,6 +87,7 @@ cp .env.example .env
 ```env
 TODO_HOST=127.0.0.1
 TODO_PORT=8092
+TODO_HTTP_MAX_WORKERS=32
 TODO_PUBLIC_URL=https://todolist.nethub.wiki
 ACCOUNTS_ISSUER=https://auth.nethub.wiki
 TODO_OIDC_CLIENT_ID=todo
@@ -99,6 +100,8 @@ DEEPSEEK_MODEL=deepseek-v4-flash
 DEEPSEEK_TIMEOUT_SECONDS=20
 MANAGEBAC_COOKIE_ENCRYPTION_KEY=replace-with-generated-key
 ```
+
+`TODO_HTTP_MAX_WORKERS` 限制服务器同时处理的请求数，默认值为 `32`。达到上限时，新连接会立即收到 `503 Service Unavailable`，并通过 `Retry-After: 1` 提示客户端稍后重试。
 
 本机访问通常使用：
 

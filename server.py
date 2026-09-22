@@ -19,6 +19,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
@@ -110,6 +111,7 @@ DATA_DIR = BASE_DIR / 'data'
 DB_PATH = DATA_DIR / 'todo-list.db'
 HOST = os.environ.get('TODO_HOST', '127.0.0.1')
 PORT = int(os.environ.get('TODO_PORT', '8092'))
+HTTP_MAX_WORKERS = max(1, int(os.environ.get('TODO_HTTP_MAX_WORKERS', '32')))
 PUBLIC_URL = os.environ.get('TODO_PUBLIC_URL', 'https://todolist.nethub.wiki').rstrip('/')
 ACCOUNTS_ISSUER = os.environ.get('ACCOUNTS_ISSUER', 'https://auth.nethub.wiki').rstrip('/')
 OIDC_CLIENT_ID = os.environ.get('TODO_OIDC_CLIENT_ID', 'todo').strip()
@@ -175,7 +177,11 @@ STATIC_FILE_PATHS = {'/index.html', '/app.js', '/i18n.js', '/style.css'}
 STATIC_DIRECTORY_PREFIXES = ('/vendor/', '/assets/')
 STATIC_GZIP_EXTENSIONS = {'.html', '.css', '.js', '.mjs', '.json', '.txt', '.svg'}
 STATIC_GZIP_MIN_BYTES = 512
-STATIC_GZIP_CACHE: dict[str, tuple[tuple[int, int], bytes]] = {}
+STATIC_GZIP_MAX_SOURCE_BYTES = 1024 * 1024
+STATIC_GZIP_CACHE_MAX_ENTRIES = 64
+STATIC_GZIP_CACHE_MAX_BYTES = 8 * 1024 * 1024
+STATIC_STREAM_CHUNK_BYTES = 64 * 1024
+STATIC_GZIP_CACHE: OrderedDict[str, tuple[tuple[int, int], bytes]] = OrderedDict()
 STATIC_GZIP_CACHE_LOCK = threading.Lock()
 MANAGEBAC_HELPER_DIR = BASE_DIR / 'managebac-sync-helper'
 DEFAULT_OSS_SIGN_EXPIRES_SECONDS = 10 * 60
@@ -2396,11 +2402,27 @@ def gzip_static_body(file_path: Path, raw: bytes, stat_result: os.stat_result) -
     with STATIC_GZIP_CACHE_LOCK:
         cached = STATIC_GZIP_CACHE.get(cache_key)
         if cached and cached[0] == signature:
+            STATIC_GZIP_CACHE.move_to_end(cache_key)
             return cached[1]
+        if cached:
+            del STATIC_GZIP_CACHE[cache_key]
 
     body = gzip.compress(raw, compresslevel=6)
     with STATIC_GZIP_CACHE_LOCK:
-        STATIC_GZIP_CACHE[cache_key] = (signature, body)
+        existing = STATIC_GZIP_CACHE.get(cache_key)
+        if existing and existing[0] == signature:
+            STATIC_GZIP_CACHE.move_to_end(cache_key)
+            return existing[1]
+        # A different version may have won a concurrent compression race.
+        # Keep it; lookups always verify the signature before returning it.
+        if existing is None and len(body) <= STATIC_GZIP_CACHE_MAX_BYTES:
+            STATIC_GZIP_CACHE[cache_key] = (signature, body)
+            while (
+                len(STATIC_GZIP_CACHE) > STATIC_GZIP_CACHE_MAX_ENTRIES
+                or sum(len(entry[1]) for entry in STATIC_GZIP_CACHE.values())
+                > STATIC_GZIP_CACHE_MAX_BYTES
+            ):
+                STATIC_GZIP_CACHE.popitem(last=False)
     return body
 
 
@@ -2579,6 +2601,13 @@ class TodoHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(WEB_DIR), **kwargs)
 
+    def stream_file(self, file_obj) -> None:
+        while True:
+            chunk = file_obj.read(STATIC_STREAM_CHUNK_BYTES)
+            if not chunk:
+                return
+            self.wfile.write(chunk)
+
     def handle_static_file(self, send_body: bool = True):
         parsed = urlparse(self.path)
         normalized, file_path = static_file_path(parsed.path)
@@ -2586,31 +2615,52 @@ class TodoHandler(SimpleHTTPRequestHandler):
             self.send_error(HTTPStatus.NOT_FOUND, 'Not found')
             return
         try:
-            stat_result = file_path.stat()
-            raw = file_path.read_bytes()
+            file_obj = file_path.open('rb')
         except OSError:
             self.send_error(HTTPStatus.NOT_FOUND, 'Not found')
             return
+        try:
+            try:
+                stat_result = os.fstat(file_obj.fileno())
+                should_gzip = (
+                    STATIC_GZIP_MIN_BYTES
+                    <= stat_result.st_size
+                    <= STATIC_GZIP_MAX_SOURCE_BYTES
+                    and is_gzip_static_file(file_path)
+                    and accepts_gzip(self.headers.get('Accept-Encoding', ''))
+                )
+                body = None
+                if should_gzip:
+                    raw = file_obj.read(STATIC_GZIP_MAX_SOURCE_BYTES + 1)
+                    if len(raw) == stat_result.st_size:
+                        body = gzip_static_body(file_path, raw, stat_result)
+                    else:
+                        # The file changed after fstat(). Fall back to bounded streaming.
+                        should_gzip = False
+                        stat_result = os.fstat(file_obj.fileno())
+                    file_obj.seek(0)
+            except OSError:
+                self.send_error(HTTPStatus.NOT_FOUND, 'Not found')
+                return
 
-        should_gzip = (
-            len(raw) >= STATIC_GZIP_MIN_BYTES
-            and is_gzip_static_file(file_path)
-            and accepts_gzip(self.headers.get('Accept-Encoding', ''))
-        )
-        body = gzip_static_body(file_path, raw, stat_result) if should_gzip else raw
-
-        self.send_response(HTTPStatus.OK)
-        self.send_header('Content-Type', self.guess_type(str(file_path)))
-        self.send_header('Content-Length', str(len(body)))
-        self.send_header('Last-Modified', self.date_time_string(stat_result.st_mtime))
-        self.send_header('Cache-Control', static_cache_control(normalized, parsed.query))
-        if is_gzip_static_file(file_path):
-            self.send_header('Vary', 'Accept-Encoding')
-        if should_gzip:
-            self.send_header('Content-Encoding', 'gzip')
-        self.end_headers()
-        if send_body:
-            self.wfile.write(body)
+            self.send_response(HTTPStatus.OK)
+            self.send_header('Content-Type', self.guess_type(str(file_path)))
+            content_length = len(body) if body is not None else stat_result.st_size
+            self.send_header('Content-Length', str(content_length))
+            self.send_header('Last-Modified', self.date_time_string(stat_result.st_mtime))
+            self.send_header('Cache-Control', static_cache_control(normalized, parsed.query))
+            if is_gzip_static_file(file_path):
+                self.send_header('Vary', 'Accept-Encoding')
+            if should_gzip:
+                self.send_header('Content-Encoding', 'gzip')
+            self.end_headers()
+            if send_body:
+                if body is not None:
+                    self.wfile.write(body)
+                else:
+                    self.stream_file(file_obj)
+        finally:
+            file_obj.close()
 
     def do_GET(self):
         path = urlparse(self.path).path
@@ -2783,25 +2833,28 @@ class TodoHandler(SimpleHTTPRequestHandler):
             self.send_error(HTTPStatus.NOT_FOUND, 'Not found')
             return
         try:
-            size = file_path.stat().st_size
+            file_obj = file_path.open('rb')
         except OSError:
-            self.send_error(HTTPStatus.NOT_FOUND, 'Not found')
-            return
-        if size > MAX_AVATAR_BYTES:
             self.send_error(HTTPStatus.NOT_FOUND, 'Not found')
             return
         try:
-            raw = file_path.read_bytes() if send_body else b''
-        except OSError:
-            self.send_error(HTTPStatus.NOT_FOUND, 'Not found')
-            return
-        self.send_response(HTTPStatus.OK)
-        self.send_header('Content-Type', avatar_content_type(filename))
-        self.send_header('Content-Length', str(size))
-        self.send_header('Cache-Control', 'public, max-age=31536000, immutable')
-        self.end_headers()
-        if send_body:
-            self.wfile.write(raw)
+            try:
+                size = os.fstat(file_obj.fileno()).st_size
+            except OSError:
+                self.send_error(HTTPStatus.NOT_FOUND, 'Not found')
+                return
+            if size > MAX_AVATAR_BYTES:
+                self.send_error(HTTPStatus.NOT_FOUND, 'Not found')
+                return
+            self.send_response(HTTPStatus.OK)
+            self.send_header('Content-Type', avatar_content_type(filename))
+            self.send_header('Content-Length', str(size))
+            self.send_header('Cache-Control', 'public, max-age=31536000, immutable')
+            self.end_headers()
+            if send_body:
+                self.stream_file(file_obj)
+        finally:
+            file_obj.close()
 
     def managebac_login_failure_count(self, conn: sqlite3.Connection, user_id: int, ip: str) -> int:
         window_start = managebac_login_failure_window_start()
@@ -7027,10 +7080,72 @@ class TodoHandler(SimpleHTTPRequestHandler):
         super().log_message(format, *args)
 
 
+class BoundedThreadingHTTPServer(ThreadingHTTPServer):
+    """Threading HTTP server with a hard cap and immediate overload response."""
+
+    daemon_threads = True
+
+    def __init__(self, server_address, request_handler_class, *, max_workers=HTTP_MAX_WORKERS):
+        self.max_workers = max(1, int(max_workers))
+        self._worker_slots = threading.BoundedSemaphore(self.max_workers)
+        super().__init__(server_address, request_handler_class)
+
+    def process_request(self, request, client_address):
+        if not self._worker_slots.acquire(blocking=False):
+            self._reject_overload(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._worker_slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._worker_slots.release()
+
+    def _reject_overload(self, request):
+        body = b'Service temporarily unavailable\n'
+        response = (
+            b'HTTP/1.1 503 Service Unavailable\r\n'
+            b'Content-Type: text/plain; charset=utf-8\r\n'
+            + f'Content-Length: {len(body)}\r\n'.encode('ascii')
+            + b'Retry-After: 1\r\nConnection: close\r\n\r\n'
+            + body
+        )
+        try:
+            # On Windows, closing a socket with unread request bytes can turn a
+            # successfully written HTTP response into a client-visible reset.
+            # Read at most one small HTTP header with a tight timeout. This
+            # keeps rejection bounded while avoiding a TCP reset caused by
+            # closing a Windows socket that still has request bytes queued.
+            request.settimeout(0.1)
+            received = bytearray()
+            while len(received) < 64 * 1024 and b'\r\n\r\n' not in received:
+                try:
+                    chunk = request.recv(min(4096, 64 * 1024 - len(received)))
+                except (BlockingIOError, TimeoutError):
+                    break
+                if not chunk:
+                    break
+                received.extend(chunk)
+            request.settimeout(0.25)
+            request.sendall(response)
+        except OSError:
+            pass
+        finally:
+            self.shutdown_request(request)
+
+
 if __name__ == '__main__':
     init_db()
-    server = ThreadingHTTPServer((HOST, PORT), TodoHandler)
-    print(f'Serving To-Do List on http://{HOST}:{PORT} (db: {DB_PATH})')
+    server = BoundedThreadingHTTPServer((HOST, PORT), TodoHandler)
+    print(
+        f'Serving To-Do List on http://{HOST}:{PORT} '
+        f'(db: {DB_PATH}, max workers: {HTTP_MAX_WORKERS})'
+    )
     try:
         server.serve_forever()
     except KeyboardInterrupt:
