@@ -48,6 +48,7 @@ from oidc_client import (
     exchange_authorization_code,
     validate_logout_token,
 )
+from database_adapter import D1Error, D1GatewayConnection, create_d1_connection
 
 BASE_DIR = Path(__file__).resolve().parent
 WEB_DIR = BASE_DIR / 'web'
@@ -109,6 +110,10 @@ load_dotenv()
 
 DATA_DIR = BASE_DIR / 'data'
 DB_PATH = DATA_DIR / 'todo-list.db'
+DB_BACKEND = os.environ.get('TODO_DB_BACKEND', 'sqlite').strip().lower()
+D1_GATEWAY_URL = os.environ.get('TODO_D1_GATEWAY_URL', '').strip()
+D1_GATEWAY_SECRET = os.environ.get('TODO_D1_GATEWAY_SECRET', '').strip()
+D1_GATEWAY_TIMEOUT_SECONDS = float(os.environ.get('TODO_D1_GATEWAY_TIMEOUT_SECONDS', '15'))
 HOST = os.environ.get('TODO_HOST', '127.0.0.1')
 PORT = int(os.environ.get('TODO_PORT', '8092'))
 HTTP_MAX_WORKERS = max(1, int(os.environ.get('TODO_HTTP_MAX_WORKERS', '32')))
@@ -299,6 +304,10 @@ def configure_db_connection(conn: sqlite3.Connection, *, enable_wal: bool = Fals
         journal_mode = conn.execute('PRAGMA journal_mode = WAL').fetchone()[0]
         if str(journal_mode).lower() != 'wal':
             raise RuntimeError(f'Failed to enable SQLite WAL mode (got {journal_mode!r})')
+    # D1 has no connection-local PRAGMA settings.  Production connections are
+    # configured by the gateway and must never touch a local SQLite file.
+    if DB_BACKEND != 'sqlite':
+        return
     conn.execute('PRAGMA synchronous = NORMAL')
     conn.execute('PRAGMA foreign_keys = ON')
     conn.execute(f'PRAGMA busy_timeout = {DB_BUSY_TIMEOUT_MS}')
@@ -306,6 +315,10 @@ def configure_db_connection(conn: sqlite3.Connection, *, enable_wal: bool = Fals
 
 def init_db() -> None:
     """Create the SQLite schema and apply small in-place migrations."""
+    if DB_BACKEND != 'sqlite':
+        # Schema deployment is intentionally a separate D1 migration step.
+        avatar_dir().mkdir(parents=True, exist_ok=True)
+        return
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     avatar_dir().mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(
@@ -832,7 +845,15 @@ def init_db() -> None:
         migrate_existing_avatars(conn)
 
 
-def get_db() -> sqlite3.Connection:
+def get_db():
+    if DB_BACKEND == 'd1':
+        return create_d1_connection(
+            D1_GATEWAY_URL,
+            D1_GATEWAY_SECRET,
+            timeout=D1_GATEWAY_TIMEOUT_SECONDS,
+        )
+    if DB_BACKEND != 'sqlite':
+        raise RuntimeError(f'Unsupported TODO_DB_BACKEND: {DB_BACKEND}')
     conn = sqlite3.connect(
         DB_PATH,
         timeout=DB_BUSY_TIMEOUT_MS / 1000,
@@ -2092,12 +2113,27 @@ def normalize_deepseek_usage(usage: object) -> dict:
 
 def record_ai_usage(conn: sqlite3.Connection, user_id: int, model: str, call_type: str, usage: object) -> dict:
     normalized = normalize_deepseek_usage(usage)
-    conn.execute(
+    # The quota check and usage insert must be one conditional statement.  A
+    # separate SELECT followed by INSERT allows concurrent D1 requests to
+    # overshoot the limit because D1 does not provide connection transactions.
+    cursor = conn.execute(
         '''
         INSERT INTO ai_usage_logs
         (user_id, model, call_type, prompt_tokens, completion_tokens, total_tokens,
          prompt_cache_hit_tokens, prompt_cache_miss_tokens, reasoning_tokens, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        WHERE (SELECT COALESCE(SUM(prompt_tokens), 0) FROM ai_usage_logs
+               WHERE user_id = ? AND created_at >= datetime('now', '-' ||
+                 COALESCE((SELECT window_hours FROM ai_token_limits WHERE user_id = ?),
+                   COALESCE(json_extract((SELECT value FROM app_settings WHERE key = ?), '$.windowHours'), ?)) || ' hours')) + ?
+              <= COALESCE((SELECT input_token_limit FROM ai_token_limits WHERE user_id = ?),
+                COALESCE(json_extract((SELECT value FROM app_settings WHERE key = ?), '$.inputTokenLimit'), ?))
+          AND (SELECT COALESCE(SUM(completion_tokens), 0) FROM ai_usage_logs
+               WHERE user_id = ? AND created_at >= datetime('now', '-' ||
+                 COALESCE((SELECT window_hours FROM ai_token_limits WHERE user_id = ?),
+                   COALESCE(json_extract((SELECT value FROM app_settings WHERE key = ?), '$.windowHours'), ?)) || ' hours')) + ?
+              <= COALESCE((SELECT output_token_limit FROM ai_token_limits WHERE user_id = ?),
+                COALESCE(json_extract((SELECT value FROM app_settings WHERE key = ?), '$.outputTokenLimit'), ?))
         ''',
         (
             user_id,
@@ -2110,8 +2146,13 @@ def record_ai_usage(conn: sqlite3.Connection, user_id: int, model: str, call_typ
             normalized['promptCacheMissTokens'],
             normalized['reasoningTokens'],
             now_iso(),
+            user_id, user_id, AI_TOKEN_LIMIT_SETTING_KEY, DEFAULT_AI_TOKEN_WINDOW_HOURS,
+            normalized['promptTokens'], user_id, AI_TOKEN_LIMIT_SETTING_KEY, DEFAULT_AI_INPUT_TOKEN_LIMIT,
+            user_id, user_id, AI_TOKEN_LIMIT_SETTING_KEY, DEFAULT_AI_TOKEN_WINDOW_HOURS,
+            normalized['completionTokens'], user_id, AI_TOKEN_LIMIT_SETTING_KEY, DEFAULT_AI_OUTPUT_TOKEN_LIMIT,
         ),
     )
+    normalized['_recorded'] = (getattr(cursor, 'rowcount', 0) or 0) > 0
     return normalized
 
 
@@ -2321,6 +2362,51 @@ def record_installer_download(
         ),
     )
     return installer_download_limit_status(conn, user_id)
+
+
+def reserve_installer_download(
+    conn,
+    user_id: int,
+    source: str,
+    object_key: str,
+    filename: str,
+    ip: str,
+    user_agent: str,
+) -> tuple[bool, dict]:
+    """Atomically consume one installer-download slot.
+
+    The limit lookup is advisory configuration data.  The count predicate and
+    insert are one SQL statement, so concurrent requests cannot both consume
+    the same final slot on either SQLite or D1.
+    """
+    limit = effective_installer_download_limit(conn, user_id)
+    cutoff = installer_download_window_start(limit['windowHours'])
+    cursor = conn.execute(
+        '''
+        INSERT INTO installer_download_logs
+            (user_id, source, object_key, filename, ip, user_agent, created_at)
+        SELECT ?, ?, ?, ?, ?, ?, ?
+        WHERE (
+            SELECT COUNT(*)
+            FROM installer_download_logs
+            WHERE user_id = ? AND created_at >= ?
+        ) < ?
+        ''',
+        (
+            user_id,
+            str(source or '')[:20],
+            str(object_key or '')[:1000],
+            str(filename or '')[:500],
+            str(ip or '')[:80],
+            str(user_agent or '')[:1000],
+            now_iso(),
+            user_id,
+            cutoff,
+            limit['linkLimit'],
+        ),
+    )
+    status = installer_download_limit_status(conn, user_id)
+    return cursor.rowcount == 1, status
 
 
 def normalize_ip(value: str) -> str:
@@ -3000,8 +3086,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
 
             timestamp = now_iso()
             with get_db() as conn:
-                conn.execute(
-                    '''
+                upsert_sql = '''
                     INSERT INTO managebac_sessions
                     (user_id, encrypted_cookie_jar, connected_at, updated_at, last_verified_at)
                     VALUES (?, ?, ?, ?, ?)
@@ -3010,19 +3095,20 @@ class TodoHandler(SimpleHTTPRequestHandler):
                         connected_at = excluded.connected_at,
                         updated_at = excluded.updated_at,
                         last_verified_at = excluded.last_verified_at
-                    ''',
-                    (user_id, encrypted_cookie_jar, timestamp, timestamp, timestamp),
-                )
-                self.log_operation(
-                    conn,
-                    user_id,
-                    user_id,
-                    'managebac.login',
-                    'managebac_session',
-                    str(user_id),
-                    {'cookieCount': preview.meta.get('cookieCount', 0)},
-                )
-                conn.commit()
+                '''
+                params = (user_id, encrypted_cookie_jar, timestamp, timestamp, timestamp)
+                detail = {'cookieCount': preview.meta.get('cookieCount', 0)}
+                if isinstance(conn, D1GatewayConnection):
+                    conn.batch([
+                        {'sql': upsert_sql, 'params': list(params)},
+                        self.operation_log_statement(user_id, user_id, 'managebac.login',
+                            'managebac_session', str(user_id), detail, created_at=timestamp),
+                    ])
+                else:
+                    conn.execute(upsert_sql, params)
+                    self.log_operation(conn, user_id, user_id, 'managebac.login',
+                        'managebac_session', str(user_id), detail)
+                    conn.commit()
             return self.write_json({
                 'ok': True,
                 'connected': True,
@@ -3059,16 +3145,17 @@ class TodoHandler(SimpleHTTPRequestHandler):
                 encrypted_cookie_jar = encrypt_cookie_jar(preview.cookie_jar_json, user_id)
             except ManageBacSessionExpired as error:
                 with get_db() as conn:
-                    conn.execute('DELETE FROM managebac_sessions WHERE user_id = ?', (user_id,))
-                    self.log_operation(
-                        conn,
-                        user_id,
-                        user_id,
-                        'managebac.session_expired',
-                        'managebac_session',
-                        str(user_id),
-                    )
-                    conn.commit()
+                    if isinstance(conn, D1GatewayConnection):
+                        conn.batch([
+                            {'sql': 'DELETE FROM managebac_sessions WHERE user_id = ?', 'params': [user_id]},
+                            self.operation_log_statement(user_id, user_id, 'managebac.session_expired',
+                                'managebac_session', str(user_id)),
+                        ])
+                    else:
+                        conn.execute('DELETE FROM managebac_sessions WHERE user_id = ?', (user_id,))
+                        self.log_operation(conn, user_id, user_id, 'managebac.session_expired',
+                            'managebac_session', str(user_id))
+                        conn.commit()
                 return self.write_json(
                     {'error': 'managebac_reauth_required', 'message': str(error), 'requiresLogin': True},
                     status=HTTPStatus.CONFLICT,
@@ -3116,17 +3203,20 @@ class TodoHandler(SimpleHTTPRequestHandler):
         user_id = int(user['id'])
         with managebac_user_lock(user_id):
             with get_db() as conn:
-                cursor = conn.execute('DELETE FROM managebac_sessions WHERE user_id = ?', (user_id,))
-                if cursor.rowcount:
-                    self.log_operation(
-                        conn,
-                        user_id,
-                        user_id,
-                        'managebac.disconnect',
-                        'managebac_session',
-                        str(user_id),
-                    )
-                conn.commit()
+                if isinstance(conn, D1GatewayConnection):
+                    conn.batch([
+                        self.operation_log_statement(user_id, user_id, 'managebac.disconnect',
+                            'managebac_session', str(user_id),
+                            where_sql='EXISTS (SELECT 1 FROM managebac_sessions WHERE user_id = ?)',
+                            where_params=(user_id,)),
+                        {'sql': 'DELETE FROM managebac_sessions WHERE user_id = ?', 'params': [user_id]},
+                    ])
+                else:
+                    cursor = conn.execute('DELETE FROM managebac_sessions WHERE user_id = ?', (user_id,))
+                    if cursor.rowcount:
+                        self.log_operation(conn, user_id, user_id, 'managebac.disconnect',
+                            'managebac_session', str(user_id))
+                    conn.commit()
         return self.write_json({
             'ok': True,
             'connected': False,
@@ -3184,11 +3274,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
                     status=HTTPStatus.BAD_GATEWAY,
                 )
             with get_db() as conn:
-                conn.execute('BEGIN IMMEDIATE')
-                limit_status = installer_download_limit_status(conn, user_id)
-                if limit_status['exceeded']:
-                    return self.write_json(installer_download_limit_error(limit_status), status=HTTPStatus.TOO_MANY_REQUESTS)
-                next_status = record_installer_download(
+                reserved, next_status = reserve_installer_download(
                     conn,
                     user_id,
                     'oss',
@@ -3197,6 +3283,9 @@ class TodoHandler(SimpleHTTPRequestHandler):
                     self.request_ip(),
                     str(self.headers.get('User-Agent', '')),
                 )
+                if not reserved:
+                    limit_status = installer_download_limit_status(conn, user_id)
+                    return self.write_json(installer_download_limit_error(limit_status), status=HTTPStatus.TOO_MANY_REQUESTS)
                 conn.commit()
             return self.write_json({
                 'ok': True,
@@ -3223,12 +3312,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
             )
         filename = file_path.name
         with get_db() as conn:
-            conn.execute('BEGIN IMMEDIATE')
-            limit_status = installer_download_limit_status(conn, user_id)
-            if limit_status['exceeded']:
-                source.close()
-                return self.write_json(installer_download_limit_error(limit_status), status=HTTPStatus.TOO_MANY_REQUESTS)
-            record_installer_download(
+            reserved, limit_status = reserve_installer_download(
                 conn,
                 user_id,
                 'local',
@@ -3237,6 +3321,9 @@ class TodoHandler(SimpleHTTPRequestHandler):
                 self.request_ip(),
                 str(self.headers.get('User-Agent', '')),
             )
+            if not reserved:
+                source.close()
+                return self.write_json(installer_download_limit_error(limit_status), status=HTTPStatus.TOO_MANY_REQUESTS)
             conn.commit()
         self.send_response(HTTPStatus.OK)
         self.send_header('Content-Type', 'application/vnd.microsoft.portable-executable')
@@ -3347,23 +3434,24 @@ class TodoHandler(SimpleHTTPRequestHandler):
         screen_hint = 'signup' if query.get('screen_hint', [''])[0] == 'signup' else None
         now = int(time.time())
         with get_db() as conn:
-            conn.execute('DELETE FROM oidc_login_flows WHERE created_at < ?', (now - 600,))
-            conn.execute(
-                '''
+            insert_sql = '''
                 INSERT INTO oidc_login_flows
                 (token_hash, state_hash, nonce, code_verifier, return_path, created_at)
                 VALUES (?, ?, ?, ?, ?, ?)
-                ''',
-                (
-                    self.token_digest(raw_flow),
-                    self.token_digest(state),
-                    nonce,
-                    verifier,
-                    return_path,
-                    now,
-                ),
+            '''
+            params = (
+                self.token_digest(raw_flow), self.token_digest(state), nonce,
+                verifier, return_path, now,
             )
-            conn.commit()
+            if isinstance(conn, D1GatewayConnection):
+                conn.batch([
+                    {'sql': 'DELETE FROM oidc_login_flows WHERE created_at < ?', 'params': [now - 600]},
+                    {'sql': insert_sql, 'params': list(params)},
+                ])
+            else:
+                conn.execute('DELETE FROM oidc_login_flows WHERE created_at < ?', (now - 600,))
+                conn.execute(insert_sql, params)
+                conn.commit()
         location = authorization_url(
             issuer=ACCOUNTS_ISSUER,
             client_id=OIDC_CLIENT_ID,
@@ -3388,16 +3476,22 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return self.write_auth_error('登录请求无效或浏览器信息已丢失，请重新登录。')
         now = int(time.time())
         with get_db() as conn:
-            conn.execute('BEGIN IMMEDIATE')
-            flow = conn.execute(
-                'SELECT * FROM oidc_login_flows WHERE token_hash = ?',
-                (self.token_digest(raw_flow),),
-            ).fetchone()
-            conn.execute(
-                'DELETE FROM oidc_login_flows WHERE token_hash = ?',
-                (self.token_digest(raw_flow),),
-            )
-            conn.commit()
+            if isinstance(conn, D1GatewayConnection):
+                flow = conn.execute(
+                    'DELETE FROM oidc_login_flows WHERE token_hash = ? RETURNING *',
+                    (self.token_digest(raw_flow),),
+                ).fetchone()
+            else:
+                conn.execute('BEGIN IMMEDIATE')
+                flow = conn.execute(
+                    'SELECT * FROM oidc_login_flows WHERE token_hash = ?',
+                    (self.token_digest(raw_flow),),
+                ).fetchone()
+                conn.execute(
+                    'DELETE FROM oidc_login_flows WHERE token_hash = ?',
+                    (self.token_digest(raw_flow),),
+                )
+                conn.commit()
         if (
             not flow
             or int(flow['created_at']) + OIDC_FLOW_TTL_SECONDS < now
@@ -3432,61 +3526,102 @@ class TodoHandler(SimpleHTTPRequestHandler):
         raw_session = secrets.token_urlsafe(48)
         csrf_token = secrets.token_urlsafe(32)
         with get_db() as conn:
-            conn.execute('BEGIN IMMEDIATE')
             user = conn.execute('SELECT * FROM users WHERE auth_sub = ?', (identity.sub,)).fetchone()
-            if user is None:
-                nickname = self.available_nickname(conn, identity.username, identity.sub)
-                cursor = conn.execute(
-                    '''
-                    INSERT INTO users
-                    (name, nickname, password_hash, role, avatar_file, avatar_updated_at,
-                     avatar_color, auth_sub, created_at)
-                    VALUES (?, ?, '', 'student', '', '', ?, ?, ?)
-                    ''',
+            if isinstance(conn, D1GatewayConnection):
+                created_at = now_iso()
+                statements = []
+                if user is None:
+                    nickname = self.available_nickname(conn, identity.username, identity.sub)
+                    generated_user_id = secrets.randbelow(2**62 - 1) + 1
+                    statements.extend([
+                        (
+                            '''INSERT INTO users
+                               (id, name, nickname, password_hash, role, avatar_file,
+                                avatar_updated_at, avatar_color, auth_sub, created_at)
+                               VALUES (?, ?, ?, '', 'student', '', '', ?, ?, ?)
+                               ON CONFLICT DO NOTHING''',
+                            (generated_user_id, identity.display_name[:64], nickname,
+                             DEFAULT_AVATAR_COLOR, identity.sub, created_at),
+                        ),
+                        (
+                            '''INSERT INTO operation_logs
+                               (actor_user_id,target_user_id,action,entity_type,entity_id,
+                                detail_json,ip,created_at)
+                               SELECT id,id,'auth.oidc_first_login','user',CAST(id AS TEXT),?,?,?
+                               FROM users WHERE id=?''',
+                            (json.dumps({'authSub': identity.sub}, ensure_ascii=False),
+                             self.request_ip(), created_at, generated_user_id),
+                        ),
+                    ])
+                statements.extend([
                     (
-                        identity.display_name[:64],
-                        nickname,
-                        DEFAULT_AVATAR_COLOR,
-                        identity.sub,
-                        now_iso(),
+                        '''INSERT INTO sessions
+                           (token,user_id,auth_sub,sid,csrf_token,expires_at,created_at)
+                           SELECT ?,id,?,?,?,?,? FROM users WHERE auth_sub=?''',
+                        (self.token_digest(raw_session), identity.sub, identity.sid,
+                         csrf_token, now + SESSION_TTL_SECONDS, created_at, identity.sub),
                     ),
+                    (
+                        '''INSERT INTO operation_logs
+                           (actor_user_id,target_user_id,action,entity_type,entity_id,
+                            detail_json,ip,created_at)
+                           SELECT id,id,'auth.oidc_login','user',CAST(id AS TEXT),'{}',?,?
+                           FROM users WHERE auth_sub=?''',
+                        (self.request_ip(), created_at, identity.sub),
+                    ),
+                ])
+                results = conn.batch(statements)
+                session_result = results[-2]
+                if session_result.rowcount != 1 and user is None:
+                    # A different subject may have claimed the same nickname
+                    # after our availability check.  The first batch wrote
+                    # nothing because every dependent INSERT is conditional;
+                    # retry once with the now-suffixed available nickname.
+                    generated_user_id = secrets.randbelow(2**62 - 1) + 1
+                    nickname = self.available_nickname(conn, identity.username, identity.sub)
+                    statements[0] = (
+                        statements[0][0],
+                        (generated_user_id, identity.display_name[:64], nickname,
+                         DEFAULT_AVATAR_COLOR, identity.sub, created_at),
+                    )
+                    statements[1] = (
+                        statements[1][0],
+                        (json.dumps({'authSub': identity.sub}, ensure_ascii=False),
+                         self.request_ip(), created_at, generated_user_id),
+                    )
+                    results = conn.batch(statements)
+                    session_result = results[-2]
+                if session_result.rowcount != 1:
+                    raise D1Error('OIDC user/session batch did not create a session')
+                user = conn.execute('SELECT * FROM users WHERE auth_sub = ?', (identity.sub,)).fetchone()
+            else:
+                conn.execute('BEGIN IMMEDIATE')
+                if user is None:
+                    nickname = self.available_nickname(conn, identity.username, identity.sub)
+                    cursor = conn.execute(
+                        '''
+                        INSERT INTO users
+                        (name, nickname, password_hash, role, avatar_file, avatar_updated_at,
+                         avatar_color, auth_sub, created_at)
+                        VALUES (?, ?, '', 'student', '', '', ?, ?, ?)
+                        ''',
+                        (identity.display_name[:64], nickname, DEFAULT_AVATAR_COLOR,
+                         identity.sub, now_iso()),
+                    )
+                    user_id = int(cursor.lastrowid)
+                    user = conn.execute('SELECT * FROM users WHERE id = ?', (user_id,)).fetchone()
+                    self.log_operation(conn, user_id, user_id, 'auth.oidc_first_login',
+                                       'user', str(user_id), {'authSub': identity.sub})
+                conn.execute(
+                    '''INSERT INTO sessions
+                       (token,user_id,auth_sub,sid,csrf_token,expires_at,created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                    (self.token_digest(raw_session), int(user['id']), identity.sub,
+                     identity.sid, csrf_token, now + SESSION_TTL_SECONDS, now_iso()),
                 )
-                user_id = int(cursor.lastrowid)
-                user = conn.execute('SELECT * FROM users WHERE id = ?', (user_id,)).fetchone()
-                self.log_operation(
-                    conn,
-                    user_id,
-                    user_id,
-                    'auth.oidc_first_login',
-                    'user',
-                    str(user_id),
-                    {'authSub': identity.sub},
-                )
-            conn.execute(
-                '''
-                INSERT INTO sessions
-                (token, user_id, auth_sub, sid, csrf_token, expires_at, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                ''',
-                (
-                    self.token_digest(raw_session),
-                    int(user['id']),
-                    identity.sub,
-                    identity.sid,
-                    csrf_token,
-                    now + SESSION_TTL_SECONDS,
-                    now_iso(),
-                ),
-            )
-            self.log_operation(
-                conn,
-                int(user['id']),
-                int(user['id']),
-                'auth.oidc_login',
-                'user',
-                str(user['id']),
-            )
-            conn.commit()
+                self.log_operation(conn, int(user['id']), int(user['id']),
+                                   'auth.oidc_login', 'user', str(user['id']))
+                conn.commit()
         return self.redirect_to(
             return_path,
             cookies=[
@@ -3534,25 +3669,38 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return self.write_json({'error': 'invalid logout token'}, status=HTTPStatus.BAD_REQUEST)
         now = int(time.time())
         with get_db() as conn:
-            conn.execute('BEGIN IMMEDIATE')
-            replay = conn.execute(
-                'SELECT 1 FROM backchannel_logout_jtis WHERE jti = ?', (str(claims['jti']),)
-            ).fetchone()
-            if not replay:
-                conn.execute(
-                    'INSERT INTO backchannel_logout_jtis (jti, received_at) VALUES (?, ?)',
-                    (str(claims['jti']), now),
+            if isinstance(conn, D1GatewayConnection):
+                session_sql = (
+                    'DELETE FROM sessions WHERE sid = ?'
+                    if claims.get('sid')
+                    else 'DELETE FROM sessions WHERE auth_sub = ?'
                 )
-                if claims.get('sid'):
-                    conn.execute('DELETE FROM sessions WHERE sid = ?', (str(claims['sid']),))
-                else:
+                session_value = str(claims.get('sid') or claims['sub'])
+                conn.batch([
+                    {'sql': 'INSERT INTO backchannel_logout_jtis (jti, received_at) VALUES (?, ?) ON CONFLICT(jti) DO NOTHING', 'params': [str(claims['jti']), now]},
+                    {'sql': session_sql, 'params': [session_value]},
+                    {'sql': 'DELETE FROM backchannel_logout_jtis WHERE received_at < ?', 'params': [now - 86400]},
+                ])
+            else:
+                conn.execute('BEGIN IMMEDIATE')
+                replay = conn.execute(
+                    'SELECT 1 FROM backchannel_logout_jtis WHERE jti = ?', (str(claims['jti']),)
+                ).fetchone()
+                if not replay:
                     conn.execute(
-                        'DELETE FROM sessions WHERE auth_sub = ?', (str(claims['sub']),)
+                        'INSERT INTO backchannel_logout_jtis (jti, received_at) VALUES (?, ?)',
+                        (str(claims['jti']), now),
                     )
-                conn.execute(
-                    'DELETE FROM backchannel_logout_jtis WHERE received_at < ?', (now - 86400,)
-                )
-            conn.commit()
+                    if claims.get('sid'):
+                        conn.execute('DELETE FROM sessions WHERE sid = ?', (str(claims['sid']),))
+                    else:
+                        conn.execute(
+                            'DELETE FROM sessions WHERE auth_sub = ?', (str(claims['sub']),)
+                        )
+                    conn.execute(
+                        'DELETE FROM backchannel_logout_jtis WHERE received_at < ?', (now - 86400,)
+                    )
+                conn.commit()
         return self.write_json({'ok': True})
 
     def require_admin(self):
@@ -3591,6 +3739,42 @@ class TodoHandler(SimpleHTTPRequestHandler):
                 now_iso(),
             ),
         )
+
+    def operation_log_statement(
+        self,
+        actor_user_id: int | None,
+        target_user_id: int,
+        action: str,
+        entity_type: str,
+        entity_id: str | None = None,
+        detail: dict | None = None,
+        *,
+        where_sql: str = '',
+        where_params: tuple | list = (),
+        created_at: str | None = None,
+    ) -> dict:
+        """Build a log INSERT that can participate in an atomic D1 batch."""
+        sql = '''
+            INSERT INTO operation_logs
+            (actor_user_id, target_user_id, action, entity_type, entity_id, detail_json, ip, created_at)
+            SELECT ?, ?, ?, ?, ?, ?, ?, ?
+        '''
+        if where_sql:
+            sql += f' WHERE {where_sql}'
+        return {
+            'sql': sql,
+            'params': [
+                actor_user_id,
+                target_user_id,
+                action,
+                entity_type,
+                entity_id,
+                json.dumps(detail or {}, ensure_ascii=False),
+                self.request_ip(),
+                created_at or now_iso(),
+                *where_params,
+            ],
+        }
 
     def fetch_tasks_for_user(self, conn: sqlite3.Connection, user_id: int) -> list[dict]:
         rows = conn.execute(
@@ -3661,6 +3845,9 @@ class TodoHandler(SimpleHTTPRequestHandler):
         with get_db() as conn:
             normalized = record_ai_usage(conn, int(user_id), deepseek_model(), call_type, usage)
             conn.commit()
+            if not normalized.get('_recorded', True):
+                status = ai_token_limit_status(conn, int(user_id))
+                raise AiTokenLimitExceeded(ai_token_limit_error(status))
             return normalized
 
     def call_deepseek_chat_recorded(self, messages: list[dict], user_id: int, call_type: str) -> str:
@@ -4447,17 +4634,19 @@ class TodoHandler(SimpleHTTPRequestHandler):
         if error:
             return self.write_json({'error': error}, status=HTTPStatus.BAD_REQUEST)
         with get_db() as conn:
-            set_ai_global_token_limit(conn, limit)
-            self.log_operation(
-                conn,
-                int(admin['id']),
-                int(admin['id']),
-                'admin.ai_token.global_limit_update',
-                'ai_token_limit',
-                'global',
-                {'limit': limit},
-            )
-            conn.commit()
+            if isinstance(conn, D1GatewayConnection):
+                conn.batch([
+                    {'sql': '''INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)
+                        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at''',
+                     'params': [AI_TOKEN_LIMIT_SETTING_KEY, json.dumps(limit, ensure_ascii=False), now_iso()]},
+                    self.operation_log_statement(int(admin['id']), int(admin['id']),
+                        'admin.ai_token.global_limit_update', 'ai_token_limit', 'global', {'limit': limit}),
+                ])
+            else:
+                set_ai_global_token_limit(conn, limit)
+                self.log_operation(conn, int(admin['id']), int(admin['id']),
+                    'admin.ai_token.global_limit_update', 'ai_token_limit', 'global', {'limit': limit})
+                conn.commit()
         return self.write_json({'ok': True, 'globalLimit': limit})
 
     def handle_admin_update_user_ai_token_limit(self, user_id_text: str):
@@ -4478,18 +4667,23 @@ class TodoHandler(SimpleHTTPRequestHandler):
             user_row = self.ensure_user_exists(conn, user_id)
             if not user_row:
                 return self.write_json({'error': 'user not found'}, status=HTTPStatus.NOT_FOUND)
-            set_ai_user_token_limit(conn, user_id, limit)
+            if isinstance(conn, D1GatewayConnection):
+                conn.batch([
+                    {'sql': '''INSERT INTO ai_token_limits
+                        (user_id, window_hours, input_token_limit, output_token_limit, updated_at)
+                        VALUES (?, ?, ?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET
+                        window_hours=excluded.window_hours, input_token_limit=excluded.input_token_limit,
+                        output_token_limit=excluded.output_token_limit, updated_at=excluded.updated_at''',
+                     'params': [user_id, limit['windowHours'], limit['inputTokenLimit'], limit['outputTokenLimit'], now_iso()]},
+                    self.operation_log_statement(int(admin['id']), user_id,
+                        'admin.ai_token.user_limit_update', 'ai_token_limit', str(user_id), {'limit': limit}),
+                ])
+            else:
+                set_ai_user_token_limit(conn, user_id, limit)
+                self.log_operation(conn, int(admin['id']), user_id,
+                    'admin.ai_token.user_limit_update', 'ai_token_limit', str(user_id), {'limit': limit})
+                conn.commit()
             effective_limit = effective_ai_token_limit(conn, user_id)
-            self.log_operation(
-                conn,
-                int(admin['id']),
-                user_id,
-                'admin.ai_token.user_limit_update',
-                'ai_token_limit',
-                str(user_id),
-                {'limit': limit},
-            )
-            conn.commit()
         return self.write_json({'ok': True, 'userId': user_id, 'effectiveLimit': effective_limit})
 
     def handle_admin_clear_user_ai_token_limit(self, user_id_text: str):
@@ -4504,18 +4698,18 @@ class TodoHandler(SimpleHTTPRequestHandler):
             user_row = self.ensure_user_exists(conn, user_id)
             if not user_row:
                 return self.write_json({'error': 'user not found'}, status=HTTPStatus.NOT_FOUND)
-            conn.execute('DELETE FROM ai_token_limits WHERE user_id = ?', (user_id,))
+            if isinstance(conn, D1GatewayConnection):
+                conn.batch([
+                    {'sql': 'DELETE FROM ai_token_limits WHERE user_id = ?', 'params': [user_id]},
+                    self.operation_log_statement(int(admin['id']), user_id,
+                        'admin.ai_token.user_limit_clear', 'ai_token_limit', str(user_id), {}),
+                ])
+            else:
+                conn.execute('DELETE FROM ai_token_limits WHERE user_id = ?', (user_id,))
+                self.log_operation(conn, int(admin['id']), user_id,
+                    'admin.ai_token.user_limit_clear', 'ai_token_limit', str(user_id), {})
+                conn.commit()
             effective_limit = effective_ai_token_limit(conn, user_id)
-            self.log_operation(
-                conn,
-                int(admin['id']),
-                user_id,
-                'admin.ai_token.user_limit_clear',
-                'ai_token_limit',
-                str(user_id),
-                {},
-            )
-            conn.commit()
         return self.write_json({'ok': True, 'userId': user_id, 'effectiveLimit': effective_limit})
 
     def handle_admin_clear_all_ai_token_limits(self):
@@ -4523,17 +4717,18 @@ class TodoHandler(SimpleHTTPRequestHandler):
         if not admin:
             return
         with get_db() as conn:
-            deleted = conn.execute('DELETE FROM ai_token_limits').rowcount
-            self.log_operation(
-                conn,
-                int(admin['id']),
-                int(admin['id']),
-                'admin.ai_token.user_limits_clear_all',
-                'ai_token_limit',
-                'all',
-                {'deleted': int(deleted or 0)},
-            )
-            conn.commit()
+            if isinstance(conn, D1GatewayConnection):
+                results = conn.batch([
+                    {'sql': 'DELETE FROM ai_token_limits', 'params': []},
+                    self.operation_log_statement(int(admin['id']), int(admin['id']),
+                        'admin.ai_token.user_limits_clear_all', 'ai_token_limit', 'all', {}),
+                ])
+                deleted = results[0].rowcount
+            else:
+                deleted = conn.execute('DELETE FROM ai_token_limits').rowcount
+                self.log_operation(conn, int(admin['id']), int(admin['id']),
+                    'admin.ai_token.user_limits_clear_all', 'ai_token_limit', 'all', {'deleted': int(deleted or 0)})
+                conn.commit()
         return self.write_json({'ok': True, 'deleted': int(deleted or 0)})
 
     def handle_admin_installer_downloads_summary(self):
@@ -4677,17 +4872,19 @@ class TodoHandler(SimpleHTTPRequestHandler):
         if error:
             return self.write_json({'error': error}, status=HTTPStatus.BAD_REQUEST)
         with get_db() as conn:
-            set_installer_global_download_limit(conn, limit)
-            self.log_operation(
-                conn,
-                int(admin['id']),
-                int(admin['id']),
-                'admin.installer_download.global_limit_update',
-                'installer_download_limit',
-                'global',
-                {'limit': limit},
-            )
-            conn.commit()
+            if isinstance(conn, D1GatewayConnection):
+                conn.batch([
+                    {'sql': '''INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)
+                        ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at''',
+                     'params': [INSTALLER_DOWNLOAD_LIMIT_SETTING_KEY, json.dumps(limit, ensure_ascii=False), now_iso()]},
+                    self.operation_log_statement(int(admin['id']), int(admin['id']),
+                        'admin.installer_download.global_limit_update', 'installer_download_limit', 'global', {'limit': limit}),
+                ])
+            else:
+                set_installer_global_download_limit(conn, limit)
+                self.log_operation(conn, int(admin['id']), int(admin['id']),
+                    'admin.installer_download.global_limit_update', 'installer_download_limit', 'global', {'limit': limit})
+                conn.commit()
         return self.write_json({'ok': True, 'globalLimit': limit})
 
     def handle_admin_update_user_installer_download_limit(self, user_id_text: str):
@@ -4708,18 +4905,22 @@ class TodoHandler(SimpleHTTPRequestHandler):
             user_row = self.ensure_user_exists(conn, user_id)
             if not user_row:
                 return self.write_json({'error': 'user not found'}, status=HTTPStatus.NOT_FOUND)
-            set_installer_user_download_limit(conn, user_id, limit)
+            if isinstance(conn, D1GatewayConnection):
+                conn.batch([
+                    {'sql': '''INSERT INTO installer_download_limits
+                        (user_id, window_hours, link_limit, updated_at) VALUES (?, ?, ?, ?)
+                        ON CONFLICT(user_id) DO UPDATE SET window_hours=excluded.window_hours,
+                        link_limit=excluded.link_limit, updated_at=excluded.updated_at''',
+                     'params': [user_id, limit['windowHours'], limit['linkLimit'], now_iso()]},
+                    self.operation_log_statement(int(admin['id']), user_id,
+                        'admin.installer_download.user_limit_update', 'installer_download_limit', str(user_id), {'limit': limit}),
+                ])
+            else:
+                set_installer_user_download_limit(conn, user_id, limit)
+                self.log_operation(conn, int(admin['id']), user_id,
+                    'admin.installer_download.user_limit_update', 'installer_download_limit', str(user_id), {'limit': limit})
+                conn.commit()
             effective_limit = effective_installer_download_limit(conn, user_id)
-            self.log_operation(
-                conn,
-                int(admin['id']),
-                user_id,
-                'admin.installer_download.user_limit_update',
-                'installer_download_limit',
-                str(user_id),
-                {'limit': limit},
-            )
-            conn.commit()
         return self.write_json({'ok': True, 'userId': user_id, 'effectiveLimit': effective_limit})
 
     def handle_admin_clear_user_installer_download_limit(self, user_id_text: str):
@@ -4734,18 +4935,18 @@ class TodoHandler(SimpleHTTPRequestHandler):
             user_row = self.ensure_user_exists(conn, user_id)
             if not user_row:
                 return self.write_json({'error': 'user not found'}, status=HTTPStatus.NOT_FOUND)
-            conn.execute('DELETE FROM installer_download_limits WHERE user_id = ?', (user_id,))
+            if isinstance(conn, D1GatewayConnection):
+                conn.batch([
+                    {'sql': 'DELETE FROM installer_download_limits WHERE user_id = ?', 'params': [user_id]},
+                    self.operation_log_statement(int(admin['id']), user_id,
+                        'admin.installer_download.user_limit_clear', 'installer_download_limit', str(user_id), {}),
+                ])
+            else:
+                conn.execute('DELETE FROM installer_download_limits WHERE user_id = ?', (user_id,))
+                self.log_operation(conn, int(admin['id']), user_id,
+                    'admin.installer_download.user_limit_clear', 'installer_download_limit', str(user_id), {})
+                conn.commit()
             effective_limit = effective_installer_download_limit(conn, user_id)
-            self.log_operation(
-                conn,
-                int(admin['id']),
-                user_id,
-                'admin.installer_download.user_limit_clear',
-                'installer_download_limit',
-                str(user_id),
-                {},
-            )
-            conn.commit()
         return self.write_json({'ok': True, 'userId': user_id, 'effectiveLimit': effective_limit})
 
     def handle_admin_clear_all_installer_download_limits(self):
@@ -4753,17 +4954,18 @@ class TodoHandler(SimpleHTTPRequestHandler):
         if not admin:
             return
         with get_db() as conn:
-            deleted = conn.execute('DELETE FROM installer_download_limits').rowcount
-            self.log_operation(
-                conn,
-                int(admin['id']),
-                int(admin['id']),
-                'admin.installer_download.user_limits_clear_all',
-                'installer_download_limit',
-                'all',
-                {'deleted': int(deleted or 0)},
-            )
-            conn.commit()
+            if isinstance(conn, D1GatewayConnection):
+                results = conn.batch([
+                    {'sql': 'DELETE FROM installer_download_limits', 'params': []},
+                    self.operation_log_statement(int(admin['id']), int(admin['id']),
+                        'admin.installer_download.user_limits_clear_all', 'installer_download_limit', 'all', {}),
+                ])
+                deleted = results[0].rowcount
+            else:
+                deleted = conn.execute('DELETE FROM installer_download_limits').rowcount
+                self.log_operation(conn, int(admin['id']), int(admin['id']),
+                    'admin.installer_download.user_limits_clear_all', 'installer_download_limit', 'all', {'deleted': int(deleted or 0)})
+                conn.commit()
         return self.write_json({'ok': True, 'deleted': int(deleted or 0)})
 
     def handle_admin_users(self):
@@ -4860,17 +5062,20 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return self.write_json({'error': error}, status=HTTPStatus.BAD_REQUEST)
         with get_db() as conn:
             old_limit = get_registration_ip_limit(conn)
-            set_registration_ip_limit(conn, limit)
-            self.log_operation(
-                conn,
-                int(admin['id']),
-                int(admin['id']),
-                'admin.registration_ip_limit.update',
-                'setting',
-                REGISTRATION_IP_LIMIT_SETTING_KEY,
-                {'oldLimit': old_limit, 'newLimit': limit},
-            )
-            conn.commit()
+            detail = {'oldLimit': old_limit, 'newLimit': limit}
+            if isinstance(conn, D1GatewayConnection):
+                conn.batch([
+                    {'sql': '''INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)
+                        ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at''',
+                     'params': [REGISTRATION_IP_LIMIT_SETTING_KEY, json.dumps(limit, ensure_ascii=False), now_iso()]},
+                    self.operation_log_statement(int(admin['id']), int(admin['id']),
+                        'admin.registration_ip_limit.update', 'setting', REGISTRATION_IP_LIMIT_SETTING_KEY, detail),
+                ])
+            else:
+                set_registration_ip_limit(conn, limit)
+                self.log_operation(conn, int(admin['id']), int(admin['id']),
+                    'admin.registration_ip_limit.update', 'setting', REGISTRATION_IP_LIMIT_SETTING_KEY, detail)
+                conn.commit()
         return self.write_json({'ok': True, 'registrationIpLimit': limit})
 
     def handle_admin_update_feedback_settings(self):
@@ -4889,18 +5094,21 @@ class TodoHandler(SimpleHTTPRequestHandler):
 
         with get_db() as conn:
             old_limit = get_feedback_limit(conn)
-            set_feedback_limit(conn, feedback_limit)
-            if old_limit != feedback_limit:
-                self.log_operation(
-                    conn,
-                    int(admin['id']),
-                    int(admin['id']),
-                    'admin.feedback.limit_update',
-                    'setting',
-                    FEEDBACK_LIMIT_SETTING_KEY,
-                    {'oldPendingLimit': old_limit, 'newPendingLimit': feedback_limit},
-                )
-            conn.commit()
+            detail = {'oldPendingLimit': old_limit, 'newPendingLimit': feedback_limit}
+            if isinstance(conn, D1GatewayConnection):
+                statements = [{'sql': '''INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at''',
+                    'params': [FEEDBACK_LIMIT_SETTING_KEY, str(feedback_limit), now_iso()]}]
+                if old_limit != feedback_limit:
+                    statements.append(self.operation_log_statement(int(admin['id']), int(admin['id']),
+                        'admin.feedback.limit_update', 'setting', FEEDBACK_LIMIT_SETTING_KEY, detail))
+                conn.batch(statements)
+            else:
+                set_feedback_limit(conn, feedback_limit)
+                if old_limit != feedback_limit:
+                    self.log_operation(conn, int(admin['id']), int(admin['id']),
+                        'admin.feedback.limit_update', 'setting', FEEDBACK_LIMIT_SETTING_KEY, detail)
+                conn.commit()
         return self.write_json({'ok': True, 'feedbackLimitPerUser': feedback_limit})
 
     def handle_admin_reply_feedback(self, feedback_id_text: str):
@@ -4921,27 +5129,33 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return self.write_json({'error': 'reply is too long', 'message': '回复内容不能超过 1000 个字符。'}, status=HTTPStatus.BAD_REQUEST)
         now = now_iso()
         with get_db() as conn:
-            row = conn.execute('SELECT id, user_id, content FROM feedback WHERE id = ?', (feedback_id,)).fetchone()
+            row = conn.execute('SELECT id, user_id, content, updated_at FROM feedback WHERE id = ?', (feedback_id,)).fetchone()
             if not row:
                 return self.write_json({'error': 'feedback not found'}, status=HTTPStatus.NOT_FOUND)
-            conn.execute(
-                '''
+            update_sql = '''
                 UPDATE feedback
                 SET admin_reply = ?, replied_by = ?, status = 'replied', updated_at = ?
-                WHERE id = ?
-                ''',
-                (reply, admin['id'], now, feedback_id),
-            )
-            self.log_operation(
-                conn,
-                int(admin['id']),
-                int(row['user_id']),
-                'admin.feedback.reply',
-                'feedback',
-                str(feedback_id),
-                {'reply': reply},
-            )
-            conn.commit()
+                WHERE id = ? AND updated_at = ?
+            '''
+            if isinstance(conn, D1GatewayConnection):
+                results = conn.batch([
+                    {'sql': update_sql, 'params': [reply, admin['id'], now, feedback_id, row['updated_at']]},
+                    self.operation_log_statement(
+                        int(admin['id']), int(row['user_id']), 'admin.feedback.reply',
+                        'feedback', str(feedback_id), {'reply': reply},
+                        where_sql='EXISTS (SELECT 1 FROM feedback WHERE id = ? AND updated_at = ?)',
+                        where_params=(feedback_id, now), created_at=now,
+                    ),
+                ])
+                if results[0].rowcount != 1:
+                    return self.write_json({'error': 'feedback was modified concurrently'}, status=HTTPStatus.CONFLICT)
+            else:
+                conn.execute(update_sql.replace(' AND updated_at = ?', ''), (reply, admin['id'], now, feedback_id))
+                self.log_operation(
+                    conn, int(admin['id']), int(row['user_id']), 'admin.feedback.reply',
+                    'feedback', str(feedback_id), {'reply': reply},
+                )
+                conn.commit()
             updated = conn.execute(
                 '''
                 SELECT feedback.id, feedback.user_id, feedback.content, feedback.admin_reply,
@@ -4977,21 +5191,30 @@ class TodoHandler(SimpleHTTPRequestHandler):
             ).fetchone()
             if not row:
                 return self.write_json({'error': 'feedback not found'}, status=HTTPStatus.NOT_FOUND)
-            conn.execute('DELETE FROM feedback WHERE id = ?', (feedback_id,))
-            self.log_operation(
-                conn,
-                int(admin['id']),
-                int(row['user_id']),
-                'admin.feedback.delete',
-                'feedback',
-                str(feedback_id),
-                {
-                    'user': f"{row['user_name']}({row['user_nickname']})",
-                    'content': row['content'],
-                    'hadReply': bool(row['admin_reply']),
-                },
-            )
-            conn.commit()
+            detail = {
+                'user': f"{row['user_name']}({row['user_nickname']})",
+                'content': row['content'],
+                'hadReply': bool(row['admin_reply']),
+            }
+            if isinstance(conn, D1GatewayConnection):
+                results = conn.batch([
+                    self.operation_log_statement(
+                        int(admin['id']), int(row['user_id']), 'admin.feedback.delete',
+                        'feedback', str(feedback_id), detail,
+                        where_sql='EXISTS (SELECT 1 FROM feedback WHERE id = ?)',
+                        where_params=(feedback_id,),
+                    ),
+                    {'sql': 'DELETE FROM feedback WHERE id = ?', 'params': [feedback_id]},
+                ])
+                if results[-1].rowcount != 1:
+                    return self.write_json({'error': 'feedback not found'}, status=HTTPStatus.NOT_FOUND)
+            else:
+                conn.execute('DELETE FROM feedback WHERE id = ?', (feedback_id,))
+                self.log_operation(
+                    conn, int(admin['id']), int(row['user_id']), 'admin.feedback.delete',
+                    'feedback', str(feedback_id), detail,
+                )
+                conn.commit()
         return self.write_json({'ok': True, 'id': feedback_id})
 
     def handle_admin_update_user(self, user_id_text: str):
@@ -5016,17 +5239,23 @@ class TodoHandler(SimpleHTTPRequestHandler):
                 return self.write_json({'error': 'user not found'}, status=HTTPStatus.NOT_FOUND)
             if user['name'] == name:
                 return self.write_json({'ok': True, 'user': public_user(user)})
-            conn.execute('UPDATE users SET name = ? WHERE id = ?', (name, user_id))
-            self.log_operation(
-                conn,
-                int(admin['id']),
-                user_id,
-                'admin.user.update',
-                'user',
-                str(user_id),
-                {'oldName': user['name'], 'newName': name, 'nickname': user['nickname']},
-            )
-            conn.commit()
+            detail = {'oldName': user['name'], 'newName': name, 'nickname': user['nickname']}
+            if isinstance(conn, D1GatewayConnection):
+                results = conn.batch([
+                    {'sql': 'UPDATE users SET name = ? WHERE id = ? AND name = ?',
+                     'params': [name, user_id, user['name']]},
+                    self.operation_log_statement(
+                        int(admin['id']), user_id, 'admin.user.update', 'user', str(user_id), detail,
+                        where_sql='EXISTS (SELECT 1 FROM users WHERE id = ? AND name = ?)',
+                        where_params=(user_id, name),
+                    ),
+                ])
+                if results[0].rowcount != 1:
+                    return self.write_json({'error': 'user was modified concurrently'}, status=HTTPStatus.CONFLICT)
+            else:
+                conn.execute('UPDATE users SET name = ? WHERE id = ?', (name, user_id))
+                self.log_operation(conn, int(admin['id']), user_id, 'admin.user.update', 'user', str(user_id), detail)
+                conn.commit()
             updated = self.ensure_user_exists(conn, user_id)
         return self.write_json({'ok': True, 'user': public_user(updated)})
 
@@ -5052,42 +5281,49 @@ class TodoHandler(SimpleHTTPRequestHandler):
             habit_count = conn.execute('SELECT COUNT(*) FROM habits WHERE user_id = ?', (user_id,)).fetchone()[0]
             log_count = conn.execute('SELECT COUNT(*) FROM operation_logs WHERE target_user_id = ?', (user_id,)).fetchone()[0]
             feedback_count = conn.execute('SELECT COUNT(*) FROM feedback WHERE user_id = ?', (user_id,)).fetchone()[0]
-
-            conn.execute('DELETE FROM sessions WHERE user_id = ?', (user_id,))
-            conn.execute('DELETE FROM schedule_items WHERE user_id = ?', (user_id,))
-            conn.execute('DELETE FROM habits WHERE user_id = ?', (user_id,))
-            conn.execute('DELETE FROM tasks WHERE user_id = ?', (user_id,))
-            conn.execute('DELETE FROM schedule_template_versions WHERE user_id = ?', (user_id,))
-            conn.execute('DELETE FROM schedule_day_overrides WHERE user_id = ?', (user_id,))
-            conn.execute('UPDATE feedback SET replied_by = NULL WHERE replied_by = ?', (user_id,))
-            conn.execute('DELETE FROM feedback WHERE user_id = ?', (user_id,))
-            conn.execute('UPDATE operation_logs SET actor_user_id = NULL WHERE actor_user_id = ?', (user_id,))
-            conn.execute('DELETE FROM operation_logs WHERE target_user_id = ?', (user_id,))
-            cursor = conn.execute('DELETE FROM users WHERE id = ?', (user_id,))
-            if cursor.rowcount != 1:
-                return self.write_json({'error': 'user not found'}, status=HTTPStatus.NOT_FOUND)
-            self.log_operation(
-                conn,
-                int(admin['id']),
-                int(admin['id']),
-                'admin.user.delete',
-                'user',
-                str(user_id),
-                {
-                    'deletedUser': {
-                        'id': user['id'],
-                        'name': user['name'],
-                        'nickname': user['nickname'],
-                        'role': user['role'],
-                    },
-                    'deletedTaskCount': int(task_count),
-                    'deletedScheduleItemCount': int(schedule_count),
-                    'deletedHabitCount': int(habit_count),
-                    'deletedFeedbackCount': int(feedback_count),
-                    'deletedLogCount': int(log_count),
-                },
-            )
-            conn.commit()
+            detail = {
+                'deletedUser': {'id': user['id'], 'name': user['name'], 'nickname': user['nickname'], 'role': user['role']},
+                'deletedTaskCount': int(task_count),
+                'deletedScheduleItemCount': int(schedule_count),
+                'deletedHabitCount': int(habit_count),
+                'deletedFeedbackCount': int(feedback_count),
+                'deletedLogCount': int(log_count),
+            }
+            mutations = [
+                ('DELETE FROM sessions WHERE user_id = ?', (user_id,)),
+                ('DELETE FROM schedule_items WHERE user_id = ?', (user_id,)),
+                ('DELETE FROM habits WHERE user_id = ?', (user_id,)),
+                ('DELETE FROM tasks WHERE user_id = ?', (user_id,)),
+                ('DELETE FROM schedule_template_versions WHERE user_id = ?', (user_id,)),
+                ('DELETE FROM schedule_day_overrides WHERE user_id = ?', (user_id,)),
+                ('UPDATE feedback SET replied_by = NULL WHERE replied_by = ?', (user_id,)),
+                ('DELETE FROM feedback WHERE user_id = ?', (user_id,)),
+                ('UPDATE operation_logs SET actor_user_id = NULL WHERE actor_user_id = ?', (user_id,)),
+                ('DELETE FROM operation_logs WHERE target_user_id = ?', (user_id,)),
+            ]
+            if isinstance(conn, D1GatewayConnection):
+                statements = [{'sql': sql, 'params': list(params)} for sql, params in mutations]
+                statements.extend([
+                    {'sql': 'DELETE FROM users WHERE id = ?', 'params': [user_id]},
+                    self.operation_log_statement(
+                        int(admin['id']), int(admin['id']), 'admin.user.delete', 'user',
+                        str(user_id), detail,
+                    ),
+                ])
+                results = conn.batch(statements)
+                if results[-2].rowcount != 1:
+                    return self.write_json({'error': 'user not found'}, status=HTTPStatus.NOT_FOUND)
+            else:
+                for sql, params in mutations:
+                    conn.execute(sql, params)
+                cursor = conn.execute('DELETE FROM users WHERE id = ?', (user_id,))
+                if cursor.rowcount != 1:
+                    return self.write_json({'error': 'user not found'}, status=HTTPStatus.NOT_FOUND)
+                self.log_operation(
+                    conn, int(admin['id']), int(admin['id']), 'admin.user.delete',
+                    'user', str(user_id), detail,
+                )
+                conn.commit()
         return self.write_json({'ok': True, 'id': user_id})
 
     def handle_admin_user_tasks(self, user_id: int):
@@ -5204,24 +5440,43 @@ class TodoHandler(SimpleHTTPRequestHandler):
                     },
                     status=HTTPStatus.CONFLICT,
                 )
-            cursor = conn.execute(
-                '''
-                INSERT INTO feedback (user_id, content, admin_reply, replied_by, status, created_at, updated_at)
-                VALUES (?, ?, '', NULL, 'pending', ?, ?)
-                ''',
-                (user['id'], content, now, now),
-            )
-            feedback_id = cursor.lastrowid
-            self.log_operation(
-                conn,
-                int(user['id']),
-                int(user['id']),
-                'feedback.create',
-                'feedback',
-                str(feedback_id),
-                {'content': content},
-            )
-            conn.commit()
+            if isinstance(conn, D1GatewayConnection):
+                feedback_id = secrets.randbelow(2**62 - 1) + 1
+                results = conn.batch([
+                    {
+                        'sql': '''INSERT INTO feedback
+                            (id, user_id, content, admin_reply, replied_by, status, created_at, updated_at)
+                            SELECT ?, ?, ?, '', NULL, 'pending', ?, ?
+                            WHERE (SELECT COUNT(*) FROM feedback
+                                   WHERE user_id = ? AND status != 'replied') < ?''',
+                        'params': [feedback_id, user['id'], content, now, now, user['id'], feedback_limit],
+                    },
+                    self.operation_log_statement(
+                        int(user['id']), int(user['id']), 'feedback.create', 'feedback',
+                        str(feedback_id), {'content': content},
+                        where_sql='EXISTS (SELECT 1 FROM feedback WHERE id = ? AND user_id = ?)',
+                        where_params=(feedback_id, user['id']), created_at=now,
+                    ),
+                ])
+                if results[0].rowcount != 1:
+                    return self.write_json(
+                        {'error': 'feedback limit reached', 'message': f'每个用户未回复的反馈不能超过 {feedback_limit} 条，请等待管理员回复或删除旧反馈。'},
+                        status=HTTPStatus.CONFLICT,
+                    )
+            else:
+                cursor = conn.execute(
+                    '''
+                    INSERT INTO feedback (user_id, content, admin_reply, replied_by, status, created_at, updated_at)
+                    VALUES (?, ?, '', NULL, 'pending', ?, ?)
+                    ''',
+                    (user['id'], content, now, now),
+                )
+                feedback_id = cursor.lastrowid
+                self.log_operation(
+                    conn, int(user['id']), int(user['id']), 'feedback.create',
+                    'feedback', str(feedback_id), {'content': content},
+                )
+                conn.commit()
             row = conn.execute(
                 '''
                 SELECT id, user_id, content, admin_reply, replied_by, status, created_at, updated_at
@@ -5248,17 +5503,27 @@ class TodoHandler(SimpleHTTPRequestHandler):
             ).fetchone()
             if not row:
                 return self.write_json({'error': 'feedback not found'}, status=HTTPStatus.NOT_FOUND)
-            conn.execute('DELETE FROM feedback WHERE id = ? AND user_id = ?', (feedback_id, user['id']))
-            self.log_operation(
-                conn,
-                int(user['id']),
-                int(user['id']),
-                'feedback.delete',
-                'feedback',
-                str(feedback_id),
-                {'content': row['content'], 'hadReply': bool(row['admin_reply'])},
-            )
-            conn.commit()
+            detail = {'content': row['content'], 'hadReply': bool(row['admin_reply'])}
+            if isinstance(conn, D1GatewayConnection):
+                results = conn.batch([
+                    self.operation_log_statement(
+                        int(user['id']), int(user['id']), 'feedback.delete', 'feedback',
+                        str(feedback_id), detail,
+                        where_sql='EXISTS (SELECT 1 FROM feedback WHERE id = ? AND user_id = ?)',
+                        where_params=(feedback_id, user['id']),
+                    ),
+                    {'sql': 'DELETE FROM feedback WHERE id = ? AND user_id = ?',
+                     'params': [feedback_id, user['id']]},
+                ])
+                if results[-1].rowcount != 1:
+                    return self.write_json({'error': 'feedback not found'}, status=HTTPStatus.NOT_FOUND)
+            else:
+                conn.execute('DELETE FROM feedback WHERE id = ? AND user_id = ?', (feedback_id, user['id']))
+                self.log_operation(
+                    conn, int(user['id']), int(user['id']), 'feedback.delete',
+                    'feedback', str(feedback_id), detail,
+                )
+                conn.commit()
         return self.write_json({'ok': True, 'id': feedback_id})
 
     def handle_ai_chat(self):
@@ -5525,26 +5790,31 @@ class TodoHandler(SimpleHTTPRequestHandler):
         if error:
             return self.write_json({'error': error}, status=HTTPStatus.BAD_REQUEST)
         with get_db() as conn:
-            conn.execute(
-                '''
+            updated_at = now_iso()
+            upsert_sql = '''
                 INSERT INTO subject_templates (user_id, subjects_json, updated_at)
                 VALUES (?, ?, ?)
                 ON CONFLICT(user_id) DO UPDATE SET
                     subjects_json = excluded.subjects_json,
                     updated_at = excluded.updated_at
-                ''',
-                (user['id'], json.dumps(subjects, ensure_ascii=False), now_iso()),
-            )
-            self.log_operation(
-                conn,
-                int(user['id']),
-                int(user['id']),
-                'subject_template.update',
-                'subject_template',
-                str(user['id']),
-                {'count': len(subjects), 'enabledCount': sum(1 for item in subjects if item.get('enabled'))},
-            )
-            conn.commit()
+            '''
+            params = (user['id'], json.dumps(subjects, ensure_ascii=False), updated_at)
+            detail = {'count': len(subjects), 'enabledCount': sum(1 for item in subjects if item.get('enabled'))}
+            if isinstance(conn, D1GatewayConnection):
+                conn.batch([
+                    {'sql': upsert_sql, 'params': list(params)},
+                    self.operation_log_statement(
+                        int(user['id']), int(user['id']), 'subject_template.update',
+                        'subject_template', str(user['id']), detail, created_at=updated_at,
+                    ),
+                ])
+            else:
+                conn.execute(upsert_sql, params)
+                self.log_operation(
+                    conn, int(user['id']), int(user['id']), 'subject_template.update',
+                    'subject_template', str(user['id']), detail,
+                )
+                conn.commit()
         return self.write_json({'ok': True, 'subjects': subjects, 'defaultSubjects': DEFAULT_SUBJECTS})
 
     def validate_task_payload(self, payload: dict, user_id: int, task_id: str | None = None):
@@ -5592,27 +5862,34 @@ class TodoHandler(SimpleHTTPRequestHandler):
 
         with get_db() as conn:
             try:
-                conn.execute(
-                    '''
+                insert_sql = '''
                     INSERT INTO tasks (id, user_id, title, subject, due_at, pool, priority, note, completed, created_at, updated_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ''',
-                    (
-                        task['id'], task['userId'], task['title'], task['subject'], task['dueAt'], task['pool'],
-                        task['priority'], task['note'], 1 if task['completed'] else 0,
-                        task['createdAt'], task['updatedAt'],
-                    ),
+                '''
+                insert_params = (
+                    task['id'], task['userId'], task['title'], task['subject'], task['dueAt'], task['pool'],
+                    task['priority'], task['note'], 1 if task['completed'] else 0,
+                    task['createdAt'], task['updatedAt'],
                 )
-                self.log_operation(
-                    conn,
-                    int(user['id']),
-                    int(user['id']),
-                    'task.create',
-                    'task',
-                    task['id'],
-                    {'title': task['title'], 'pool': task['pool'], 'dueAt': task['dueAt']},
-                )
-                conn.commit()
+                detail = {'title': task['title'], 'pool': task['pool'], 'dueAt': task['dueAt']}
+                if isinstance(conn, D1GatewayConnection):
+                    results = conn.batch([
+                        {'sql': insert_sql.replace('VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                         '''SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                            WHERE NOT EXISTS (SELECT 1 FROM tasks WHERE id = ?)'''),
+                         'params': [*insert_params, task['id']]},
+                        self.operation_log_statement(
+                            int(user['id']), int(user['id']), 'task.create', 'task', task['id'], detail,
+                            where_sql='EXISTS (SELECT 1 FROM tasks WHERE id = ? AND user_id = ?)',
+                            where_params=(task['id'], user['id']), created_at=task['updatedAt'],
+                        ),
+                    ])
+                    if results[0].rowcount != 1:
+                        return self.write_json({'error': 'task id already exists'}, status=HTTPStatus.CONFLICT)
+                else:
+                    conn.execute(insert_sql, insert_params)
+                    self.log_operation(conn, int(user['id']), int(user['id']), 'task.create', 'task', task['id'], detail)
+                    conn.commit()
             except sqlite3.IntegrityError:
                 return self.write_json({'error': 'task id already exists'}, status=HTTPStatus.CONFLICT)
             row = conn.execute(
@@ -5634,47 +5911,59 @@ class TodoHandler(SimpleHTTPRequestHandler):
 
         with get_db() as conn:
             existing = conn.execute(
-                'SELECT id, title, completed FROM tasks WHERE id = ? AND user_id = ?',
+                'SELECT id, title, completed, updated_at FROM tasks WHERE id = ? AND user_id = ?',
                 (task_id, user['id']),
             ).fetchone()
             if not existing:
                 return self.write_json({'error': 'task not found'}, status=HTTPStatus.NOT_FOUND)
-            conn.execute(
-                '''
+            update_sql = '''
                 UPDATE tasks
                 SET title = ?, subject = ?, due_at = ?, pool = ?, priority = ?, note = ?, completed = ?, updated_at = ?
                 WHERE id = ? AND user_id = ?
-                ''',
-                (
-                    task['title'], task['subject'], task['dueAt'], task['pool'], task['priority'], task['note'],
-                    1 if task['completed'] else 0, task['updatedAt'], task_id, user['id'],
-                ),
+            '''
+            update_params = (
+                task['title'], task['subject'], task['dueAt'], task['pool'], task['priority'], task['note'],
+                1 if task['completed'] else 0, task['updatedAt'], task_id, user['id'],
             )
             action = 'task.update'
             if bool(existing['completed']) != bool(task['completed']):
                 action = 'task.complete' if task['completed'] else 'task.reopen'
-            if (
+            complete_linked = (
                 not bool(existing['completed'])
                 and bool(task['completed'])
-            ):
-                conn.execute(
-                    '''
+            )
+            schedule_sql = '''
                     UPDATE schedule_items
                     SET completed = 1, updated_at = ?
                     WHERE task_id = ? AND user_id = ? AND completed = 0
-                    ''',
-                    (task['updatedAt'], task_id, user['id']),
-                )
-            self.log_operation(
-                conn,
-                int(user['id']),
-                int(user['id']),
-                action,
-                'task',
-                task_id,
-                {'title': task['title'], 'previousTitle': existing['title']},
-            )
-            conn.commit()
+            '''
+            detail = {'title': task['title'], 'previousTitle': existing['title']}
+            if isinstance(conn, D1GatewayConnection):
+                statements = [{
+                    'sql': update_sql + ' AND updated_at = ?',
+                    'params': [*update_params, existing['updated_at']],
+                }]
+                if complete_linked:
+                    statements.append({
+                        'sql': schedule_sql + ''' AND EXISTS (
+                            SELECT 1 FROM tasks WHERE id = ? AND user_id = ? AND updated_at = ?
+                        )''',
+                        'params': [task['updatedAt'], task_id, user['id'], task_id, user['id'], task['updatedAt']],
+                    })
+                statements.append(self.operation_log_statement(
+                    int(user['id']), int(user['id']), action, 'task', task_id, detail,
+                    where_sql='EXISTS (SELECT 1 FROM tasks WHERE id = ? AND user_id = ? AND updated_at = ?)',
+                    where_params=(task_id, user['id'], task['updatedAt']), created_at=task['updatedAt'],
+                ))
+                results = conn.batch(statements)
+                if results[0].rowcount != 1:
+                    return self.write_json({'error': 'task not found'}, status=HTTPStatus.NOT_FOUND)
+            else:
+                conn.execute(update_sql, update_params)
+                if complete_linked:
+                    conn.execute(schedule_sql, (task['updatedAt'], task_id, user['id']))
+                self.log_operation(conn, int(user['id']), int(user['id']), action, 'task', task_id, detail)
+                conn.commit()
             row = conn.execute(
                 'SELECT id, user_id, title, subject, due_at, pool, priority, note, completed, created_at, updated_at FROM tasks WHERE id = ? AND user_id = ?',
                 (task_id, user['id']),
@@ -5689,18 +5978,24 @@ class TodoHandler(SimpleHTTPRequestHandler):
             existing = conn.execute('SELECT title FROM tasks WHERE id = ? AND user_id = ?', (task_id, user['id'])).fetchone()
             if not existing:
                 return self.write_json({'error': 'task not found'}, status=HTTPStatus.NOT_FOUND)
-            conn.execute('DELETE FROM schedule_items WHERE task_id = ? AND user_id = ?', (task_id, user['id']))
-            cursor = conn.execute('DELETE FROM tasks WHERE id = ? AND user_id = ?', (task_id, user['id']))
-            self.log_operation(
-                conn,
-                int(user['id']),
-                int(user['id']),
-                'task.delete',
-                'task',
-                task_id,
-                {'title': existing['title']},
-            )
-            conn.commit()
+            detail = {'title': existing['title']}
+            if isinstance(conn, D1GatewayConnection):
+                results = conn.batch([
+                    {'sql': 'DELETE FROM schedule_items WHERE task_id = ? AND user_id = ?', 'params': [task_id, user['id']]},
+                    self.operation_log_statement(
+                        int(user['id']), int(user['id']), 'task.delete', 'task', task_id, detail,
+                        where_sql='EXISTS (SELECT 1 FROM tasks WHERE id = ? AND user_id = ?)',
+                        where_params=(task_id, user['id']),
+                    ),
+                    {'sql': 'DELETE FROM tasks WHERE id = ? AND user_id = ?', 'params': [task_id, user['id']]},
+                ])
+                if results[-1].rowcount != 1:
+                    return self.write_json({'error': 'task not found'}, status=HTTPStatus.NOT_FOUND)
+            else:
+                conn.execute('DELETE FROM schedule_items WHERE task_id = ? AND user_id = ?', (task_id, user['id']))
+                conn.execute('DELETE FROM tasks WHERE id = ? AND user_id = ?', (task_id, user['id']))
+                self.log_operation(conn, int(user['id']), int(user['id']), 'task.delete', 'task', task_id, detail)
+                conn.commit()
         return self.write_json({'ok': True})
 
     def normalize_habit_payload(self, payload: dict, user_id: int, habit_id: str | None = None):
@@ -5818,6 +6113,84 @@ class TodoHandler(SimpleHTTPRequestHandler):
             current = add_days_key(current, 1)
         return dates
 
+    def d1_habit_instance_statements(
+        self,
+        conn: D1GatewayConnection,
+        user_id: int,
+        habit: dict,
+        window_start: str,
+        window_end: str,
+        *,
+        reset_future_uncompleted: bool = False,
+        guard_updated_at: str | None = None,
+    ) -> list[dict]:
+        """Build instance mutations for inclusion in the caller's D1 batch."""
+        record = {
+            'id': habit['id'],
+            'task_id': habit['taskId'],
+            'weekdays_json': json.dumps(habit['weekdays']),
+            'slot_key_base': habit['slotKeyBase'],
+            'slot_label': habit['slotLabel'],
+            'slot_start': habit['slotStart'],
+            'slot_end': habit['slotEnd'],
+            'duration_minutes': habit['durationMinutes'],
+            'start_date': habit['startDate'],
+            'end_date': habit['endDate'],
+        }
+        dates = self.habit_date_keys(record, window_start, window_end)
+        excluded = set()
+        if dates:
+            rows = conn.execute(
+                '''SELECT schedule_date FROM habit_instance_exclusions
+                   WHERE user_id = ? AND habit_id = ? AND schedule_date >= ? AND schedule_date <= ?''',
+                (user_id, habit['id'], window_start, window_end),
+            ).fetchall()
+            excluded = {str(row['schedule_date']) for row in rows}
+        statements = []
+        if reset_future_uncompleted:
+            guard_sql = ''
+            guard_params = []
+            if guard_updated_at is not None:
+                guard_sql = ''' AND EXISTS (
+                    SELECT 1 FROM habits WHERE id = ? AND user_id = ? AND updated_at = ?
+                )'''
+                guard_params = [habit['id'], user_id, guard_updated_at]
+            statements.append({
+                'sql': '''DELETE FROM schedule_items
+                    WHERE user_id = ? AND habit_id = ? AND schedule_date >= ? AND completed = 0''' + guard_sql,
+                'params': [user_id, habit['id'], today_key(), *guard_params],
+            })
+        created_at = now_iso()
+        for date_key in dates:
+            if date_key in excluded:
+                continue
+            target_slot_key = f"{date_key}-{habit['slotKeyBase']}"
+            statements.append({
+                'sql': '''INSERT INTO schedule_items
+                    (id, user_id, task_id, habit_id, schedule_date, slot_key, slot_label,
+                     slot_start, slot_end, item_start, item_end, duration_minutes,
+                     sort_order, note, completed, created_at, updated_at)
+                    SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                           (SELECT COALESCE(MAX(sort_order), 0) + 1024 FROM schedule_items
+                            WHERE user_id = ? AND schedule_date = ? AND slot_key = ?),
+                           '', 0, ?, ?
+                    WHERE (? IS NULL OR EXISTS (
+                        SELECT 1 FROM habits WHERE id = ? AND user_id = ? AND updated_at = ?
+                    )) AND NOT EXISTS (
+                        SELECT 1 FROM schedule_items
+                        WHERE user_id = ? AND habit_id = ? AND schedule_date = ?
+                    )''',
+                'params': [
+                    f"schedule-{int(time.time() * 1000)}-{secrets.token_hex(4)}",
+                    user_id, habit['taskId'], habit['id'], date_key, target_slot_key,
+                    habit['slotLabel'], habit['slotStart'], habit['slotEnd'], habit['slotStart'],
+                    habit['slotEnd'], habit['durationMinutes'], user_id, date_key, target_slot_key,
+                    created_at, created_at, guard_updated_at, habit['id'], user_id,
+                    guard_updated_at, user_id, habit['id'], date_key,
+                ],
+            })
+        return statements
+
     def sync_habit_instances(
         self,
         conn: sqlite3.Connection,
@@ -5884,6 +6257,46 @@ class TodoHandler(SimpleHTTPRequestHandler):
                 inserts.append((habit, date_key, target_slot_key))
 
         if conflicts and strict:
+            return conflicts
+
+        is_d1 = isinstance(conn, D1GatewayConnection)
+        if is_d1:
+            statements = []
+            if reset_future_uncompleted and habit_ids:
+                placeholders = ','.join('?' for _ in habit_ids)
+                statements.append({
+                    'sql': f'''DELETE FROM schedule_items
+                        WHERE user_id = ? AND habit_id IN ({placeholders})
+                          AND schedule_date >= ? AND completed = 0''',
+                    'params': [user_id, *habit_ids, today],
+                })
+            now = now_iso()
+            for habit, date_key, target_slot_key in inserts:
+                item_id = f"schedule-{int(time.time() * 1000)}-{secrets.token_hex(4)}"
+                statements.append({
+                    'sql': '''INSERT INTO schedule_items
+                        (id, user_id, task_id, habit_id, schedule_date, slot_key, slot_label,
+                         slot_start, slot_end, item_start, item_end, duration_minutes,
+                         sort_order, note, completed, created_at, updated_at)
+                        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                               (SELECT COALESCE(MAX(sort_order), 0) + 1024
+                                FROM schedule_items
+                                WHERE user_id = ? AND schedule_date = ? AND slot_key = ?),
+                               '', 0, ?, ?
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM schedule_items
+                            WHERE user_id = ? AND habit_id = ? AND schedule_date = ?
+                        )''',
+                    'params': [
+                        item_id, user_id, habit['task_id'], habit['id'], date_key,
+                        target_slot_key, habit['slot_label'], habit['slot_start'], habit['slot_end'],
+                        habit['slot_start'], habit['slot_end'], habit['duration_minutes'],
+                        user_id, date_key, target_slot_key, now, now,
+                        user_id, habit['id'], date_key,
+                    ],
+                })
+            if statements:
+                conn.batch(statements)
             return conflicts
 
         if reset_future_uncompleted and habit_ids:
@@ -5974,36 +6387,53 @@ class TodoHandler(SimpleHTTPRequestHandler):
         if error:
             return self.write_json(error, status=HTTPStatus.BAD_REQUEST)
         with get_db() as conn:
-            task_id = self.create_habit_task(conn, habit)
+            is_d1 = isinstance(conn, D1GatewayConnection)
+            if not is_d1:
+                conn.execute('BEGIN IMMEDIATE')
+            task_id = f"habit-task-{int(time.time() * 1000)}-{secrets.token_hex(4)}" if is_d1 else self.create_habit_task(conn, habit)
+            habit['taskId'] = task_id
             now = now_iso()
-            conn.execute(
-                '''
+            habit_sql = '''
                 INSERT INTO habits
                 (id, user_id, task_id, weekdays_json, slot_key_base, slot_label, slot_start, slot_end,
                  duration_minutes, start_date, end_date, active, archived, created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
-                ''',
-                (
-                    habit['id'], user['id'], task_id, json.dumps(habit['weekdays']),
-                    habit['slotKeyBase'], habit['slotLabel'], habit['slotStart'], habit['slotEnd'],
-                    habit['durationMinutes'], habit['startDate'], habit['endDate'], 1 if habit['active'] else 0,
-                    now, now,
-                ),
+            '''
+            habit_params = (
+                habit['id'], user['id'], task_id, json.dumps(habit['weekdays']),
+                habit['slotKeyBase'], habit['slotLabel'], habit['slotStart'], habit['slotEnd'],
+                habit['durationMinutes'], habit['startDate'], habit['endDate'], 1 if habit['active'] else 0,
+                now, now,
             )
             sync_to = habit['endDate'] or add_days_key(today_key(), HABIT_SYNC_FUTURE_DAYS)
-            conflicts = self.sync_habit_instances(
-                conn,
-                int(user['id']),
-                [habit['id']],
-                today_key(),
-                sync_to,
-                strict=True,
-            )
-            if conflicts:
-                conn.rollback()
-                return self.write_json({'error': 'habit schedule conflict', 'conflicts': conflicts}, status=HTTPStatus.CONFLICT)
-            self.log_operation(conn, int(user['id']), int(user['id']), 'habit.create', 'habit', habit['id'], {'title': habit['title']})
-            conn.commit()
+            if is_d1:
+                task_sql = '''INSERT INTO tasks
+                    (id, user_id, title, subject, due_at, pool, priority, note, completed, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, '', 'habit', ?, ?, 0, ?, ?)'''
+                statements = [
+                    {'sql': task_sql, 'params': [task_id, habit['userId'], habit['title'], habit['subject'], habit['priority'], habit['note'], now, now]},
+                    {'sql': habit_sql, 'params': list(habit_params)},
+                    *self.d1_habit_instance_statements(conn, int(user['id']), habit, today_key(), sync_to),
+                    self.operation_log_statement(
+                        int(user['id']), int(user['id']), 'habit.create', 'habit',
+                        habit['id'], {'title': habit['title']},
+                        where_sql='EXISTS (SELECT 1 FROM habits WHERE id = ? AND user_id = ?)',
+                        where_params=(habit['id'], user['id']), created_at=now,
+                    ),
+                ]
+                results = conn.batch(statements)
+                if results[0].rowcount != 1 or results[1].rowcount != 1:
+                    raise D1Error('habit create batch did not create task and habit')
+            else:
+                conn.execute(habit_sql, habit_params)
+                conflicts = self.sync_habit_instances(
+                    conn, int(user['id']), [habit['id']], today_key(), sync_to, strict=True,
+                )
+                if conflicts:
+                    conn.rollback()
+                    return self.write_json({'error': 'habit schedule conflict', 'conflicts': conflicts}, status=HTTPStatus.CONFLICT)
+                self.log_operation(conn, int(user['id']), int(user['id']), 'habit.create', 'habit', habit['id'], {'title': habit['title']})
+                conn.commit()
             rows = self.fetch_habits_for_user(conn, int(user['id']))
         return self.write_json({'ok': True, 'habit': next(item for item in rows if item['id'] == habit['id'])}, status=HTTPStatus.CREATED)
 
@@ -6018,50 +6448,65 @@ class TodoHandler(SimpleHTTPRequestHandler):
         if error:
             return self.write_json(error, status=HTTPStatus.BAD_REQUEST)
         with get_db() as conn:
+            is_d1 = isinstance(conn, D1GatewayConnection)
+            if not is_d1:
+                conn.execute('BEGIN IMMEDIATE')
             existing = conn.execute('SELECT * FROM habits WHERE id = ? AND user_id = ? AND archived = 0', (habit_id, user['id'])).fetchone()
             if not existing:
                 return self.write_json({'error': 'habit not found'}, status=HTTPStatus.NOT_FOUND)
             now = now_iso()
             task_id = existing['task_id']
-            conn.execute(
-                '''
+            habit['taskId'] = task_id
+            task_sql = '''
                 UPDATE tasks
                 SET title = ?, subject = ?, priority = ?, note = ?, updated_at = ?
                 WHERE id = ? AND user_id = ?
-                ''',
-                (
-                    habit['title'], habit['subject'], habit['priority'], habit['note'],
-                    now, task_id, user['id'],
-                ),
-            )
-            conn.execute(
-                '''
+            '''
+            task_params = (habit['title'], habit['subject'], habit['priority'], habit['note'], now, task_id, user['id'])
+            habit_sql = '''
                 UPDATE habits
                 SET task_id = ?, weekdays_json = ?, slot_key_base = ?, slot_label = ?, slot_start = ?, slot_end = ?,
                     duration_minutes = ?, start_date = ?, end_date = ?, active = ?, updated_at = ?
                 WHERE id = ? AND user_id = ?
-                ''',
-                (
-                    task_id, json.dumps(habit['weekdays']), habit['slotKeyBase'], habit['slotLabel'],
-                    habit['slotStart'], habit['slotEnd'], habit['durationMinutes'], habit['startDate'],
-                    habit['endDate'], 1 if habit['active'] else 0, now, habit_id, user['id'],
-                ),
+            '''
+            habit_params = (
+                task_id, json.dumps(habit['weekdays']), habit['slotKeyBase'], habit['slotLabel'],
+                habit['slotStart'], habit['slotEnd'], habit['durationMinutes'], habit['startDate'],
+                habit['endDate'], 1 if habit['active'] else 0, now, habit_id, user['id'],
             )
             sync_to = habit['endDate'] or add_days_key(today_key(), HABIT_SYNC_FUTURE_DAYS)
-            conflicts = self.sync_habit_instances(
-                conn,
-                int(user['id']),
-                [habit_id],
-                today_key(),
-                sync_to,
-                reset_future_uncompleted=True,
-                strict=True,
-            )
-            if conflicts:
-                conn.rollback()
-                return self.write_json({'error': 'habit schedule conflict', 'conflicts': conflicts}, status=HTTPStatus.CONFLICT)
-            self.log_operation(conn, int(user['id']), int(user['id']), 'habit.update', 'habit', habit_id, {'title': habit['title']})
-            conn.commit()
+            if is_d1:
+                statements = [
+                    {'sql': task_sql + ''' AND EXISTS (
+                        SELECT 1 FROM habits WHERE id = ? AND user_id = ? AND updated_at = ?
+                    )''', 'params': [*task_params, habit_id, user['id'], existing['updated_at']]},
+                    {'sql': habit_sql + ' AND updated_at = ?', 'params': [*habit_params, existing['updated_at']]},
+                    *self.d1_habit_instance_statements(
+                        conn, int(user['id']), habit, today_key(), sync_to,
+                        reset_future_uncompleted=True, guard_updated_at=now,
+                    ),
+                    self.operation_log_statement(
+                        int(user['id']), int(user['id']), 'habit.update', 'habit', habit_id,
+                        {'title': habit['title']},
+                        where_sql='EXISTS (SELECT 1 FROM habits WHERE id = ? AND user_id = ? AND updated_at = ?)',
+                        where_params=(habit_id, user['id'], now), created_at=now,
+                    ),
+                ]
+                results = conn.batch(statements)
+                if results[1].rowcount != 1:
+                    return self.write_json({'error': 'habit was modified concurrently'}, status=HTTPStatus.CONFLICT)
+            else:
+                conn.execute(task_sql, task_params)
+                conn.execute(habit_sql, habit_params)
+                conflicts = self.sync_habit_instances(
+                    conn, int(user['id']), [habit_id], today_key(), sync_to,
+                    reset_future_uncompleted=True, strict=True,
+                )
+                if conflicts:
+                    conn.rollback()
+                    return self.write_json({'error': 'habit schedule conflict', 'conflicts': conflicts}, status=HTTPStatus.CONFLICT)
+                self.log_operation(conn, int(user['id']), int(user['id']), 'habit.update', 'habit', habit_id, {'title': habit['title']})
+                conn.commit()
             rows = self.fetch_habits_for_user(conn, int(user['id']))
         return self.write_json({'ok': True, 'habit': next(item for item in rows if item['id'] == habit_id)})
 
@@ -6070,22 +6515,30 @@ class TodoHandler(SimpleHTTPRequestHandler):
         if not user:
             return
         with get_db() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            is_d1 = isinstance(conn, D1GatewayConnection)
+            if not is_d1:
+                conn.execute('BEGIN IMMEDIATE')
             existing = conn.execute('SELECT id FROM habits WHERE id = ? AND user_id = ? AND archived = 0', (habit_id, user['id'])).fetchone()
             if not existing:
                 return self.write_json({'error': 'habit not found'}, status=HTTPStatus.NOT_FOUND)
             now = now_iso()
-            conn.execute('UPDATE habits SET archived = 1, active = 0, updated_at = ? WHERE id = ? AND user_id = ?', (now, habit_id, user['id']))
-            conn.execute(
-                'DELETE FROM schedule_items WHERE user_id = ? AND habit_id = ? AND completed = 0',
-                (user['id'], habit_id),
-            )
-            conn.execute(
-                'DELETE FROM habit_instance_exclusions WHERE user_id = ? AND habit_id = ?',
-                (user['id'], habit_id),
-            )
-            self.log_operation(conn, int(user['id']), int(user['id']), 'habit.delete', 'habit', habit_id, {})
-            conn.commit()
+            if is_d1:
+                conn.batch([
+                    {'sql': '''INSERT INTO operation_logs
+                        (actor_user_id, target_user_id, action, entity_type, entity_id, detail_json, ip, created_at)
+                        SELECT ?, ?, ?, ?, ?, ?, ?, ?
+                        WHERE EXISTS (SELECT 1 FROM habits WHERE id = ? AND user_id = ? AND archived = 0)''',
+                     'params': [int(user['id']), int(user['id']), 'habit.delete', 'habit', habit_id, '{}', self.request_ip(), now, habit_id, user['id']]},
+                    {'sql': 'UPDATE habits SET archived = 1, active = 0, updated_at = ? WHERE id = ? AND user_id = ? AND archived = 0', 'params': [now, habit_id, user['id']]},
+                    {'sql': 'DELETE FROM schedule_items WHERE user_id = ? AND habit_id = ? AND completed = 0', 'params': [user['id'], habit_id]},
+                    {'sql': 'DELETE FROM habit_instance_exclusions WHERE user_id = ? AND habit_id = ?', 'params': [user['id'], habit_id]},
+                ])
+            else:
+                conn.execute('UPDATE habits SET archived = 1, active = 0, updated_at = ? WHERE id = ? AND user_id = ?', (now, habit_id, user['id']))
+                conn.execute('DELETE FROM schedule_items WHERE user_id = ? AND habit_id = ? AND completed = 0', (user['id'], habit_id))
+                conn.execute('DELETE FROM habit_instance_exclusions WHERE user_id = ? AND habit_id = ?', (user['id'], habit_id))
+                self.log_operation(conn, int(user['id']), int(user['id']), 'habit.delete', 'habit', habit_id, {})
+                conn.commit()
         return self.write_json({'ok': True})
 
     def handle_list_schedule_items(self):
@@ -6167,23 +6620,27 @@ class TodoHandler(SimpleHTTPRequestHandler):
                 return self.write_json(conflict, status=HTTPStatus.CONFLICT)
 
             now = now_iso()
-            conn.execute(
-                '''
+            insert_sql = '''
                 INSERT INTO schedule_template_versions (user_id, effective_from, slots_json, created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?)
-                ''',
-                (user['id'], effective_from, json.dumps(week_slots, ensure_ascii=False), now, now),
-            )
-            self.log_operation(
-                conn,
-                int(user['id']),
-                int(user['id']),
-                'schedule_config.template_update',
-                'schedule_config',
-                effective_from,
-                {'effectiveFrom': effective_from},
-            )
-            conn.commit()
+            '''
+            params = (user['id'], effective_from, json.dumps(week_slots, ensure_ascii=False), now, now)
+            detail = {'effectiveFrom': effective_from}
+            if isinstance(conn, D1GatewayConnection):
+                conn.batch([
+                    {'sql': insert_sql, 'params': list(params)},
+                    self.operation_log_statement(
+                        int(user['id']), int(user['id']), 'schedule_config.template_update',
+                        'schedule_config', effective_from, detail, created_at=now,
+                    ),
+                ])
+            else:
+                conn.execute(insert_sql, params)
+                self.log_operation(
+                    conn, int(user['id']), int(user['id']), 'schedule_config.template_update',
+                    'schedule_config', effective_from, detail,
+                )
+                conn.commit()
         return self.write_json({'ok': True})
 
     def handle_update_schedule_day_slots(self, date_key: str):
@@ -6204,25 +6661,29 @@ class TodoHandler(SimpleHTTPRequestHandler):
             if conflict:
                 return self.write_json(conflict, status=HTTPStatus.CONFLICT)
             now = now_iso()
-            conn.execute(
-                '''
+            upsert_sql = '''
                 INSERT INTO schedule_day_overrides (user_id, schedule_date, slots_json, created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(user_id, schedule_date)
                 DO UPDATE SET slots_json = excluded.slots_json, updated_at = excluded.updated_at
-                ''',
-                (user['id'], date_key, json.dumps(slots, ensure_ascii=False), now, now),
-            )
-            self.log_operation(
-                conn,
-                int(user['id']),
-                int(user['id']),
-                'schedule_config.day_update',
-                'schedule_config',
-                date_key,
-                {'date': date_key},
-            )
-            conn.commit()
+            '''
+            params = (user['id'], date_key, json.dumps(slots, ensure_ascii=False), now, now)
+            detail = {'date': date_key}
+            if isinstance(conn, D1GatewayConnection):
+                conn.batch([
+                    {'sql': upsert_sql, 'params': list(params)},
+                    self.operation_log_statement(
+                        int(user['id']), int(user['id']), 'schedule_config.day_update',
+                        'schedule_config', date_key, detail, created_at=now,
+                    ),
+                ])
+            else:
+                conn.execute(upsert_sql, params)
+                self.log_operation(
+                    conn, int(user['id']), int(user['id']), 'schedule_config.day_update',
+                    'schedule_config', date_key, detail,
+                )
+                conn.commit()
         return self.write_json({'ok': True})
 
     def handle_reset_schedule_day(self, date_key: str):
@@ -6236,17 +6697,23 @@ class TodoHandler(SimpleHTTPRequestHandler):
             conflict = conflict_with_existing_items(conn, int(user['id']), [date_key], {date_key: template_slots})
             if conflict:
                 return self.write_json(conflict, status=HTTPStatus.CONFLICT)
-            conn.execute('DELETE FROM schedule_day_overrides WHERE user_id = ? AND schedule_date = ?', (user['id'], date_key))
-            self.log_operation(
-                conn,
-                int(user['id']),
-                int(user['id']),
-                'schedule_config.day_reset',
-                'schedule_config',
-                date_key,
-                {'date': date_key},
-            )
-            conn.commit()
+            detail = {'date': date_key}
+            if isinstance(conn, D1GatewayConnection):
+                conn.batch([
+                    {'sql': 'DELETE FROM schedule_day_overrides WHERE user_id = ? AND schedule_date = ?',
+                     'params': [user['id'], date_key]},
+                    self.operation_log_statement(
+                        int(user['id']), int(user['id']), 'schedule_config.day_reset',
+                        'schedule_config', date_key, detail,
+                    ),
+                ])
+            else:
+                conn.execute('DELETE FROM schedule_day_overrides WHERE user_id = ? AND schedule_date = ?', (user['id'], date_key))
+                self.log_operation(
+                    conn, int(user['id']), int(user['id']), 'schedule_config.day_reset',
+                    'schedule_config', date_key, detail,
+                )
+                conn.commit()
         return self.write_json({'ok': True})
 
     def handle_reset_schedule_config(self):
@@ -6271,18 +6738,23 @@ class TodoHandler(SimpleHTTPRequestHandler):
             conflict = conflict_with_existing_items(conn, int(user['id']), dates, next_slots)
             if conflict:
                 return self.write_json(conflict, status=HTTPStatus.CONFLICT)
-            conn.execute('DELETE FROM schedule_day_overrides WHERE user_id = ?', (user['id'],))
-            conn.execute('DELETE FROM schedule_template_versions WHERE user_id = ?', (user['id'],))
-            self.log_operation(
-                conn,
-                int(user['id']),
-                int(user['id']),
-                'schedule_config.reset',
-                'schedule_config',
-                None,
-                {},
-            )
-            conn.commit()
+            if isinstance(conn, D1GatewayConnection):
+                conn.batch([
+                    {'sql': 'DELETE FROM schedule_day_overrides WHERE user_id = ?', 'params': [user['id']]},
+                    {'sql': 'DELETE FROM schedule_template_versions WHERE user_id = ?', 'params': [user['id']]},
+                    self.operation_log_statement(
+                        int(user['id']), int(user['id']), 'schedule_config.reset',
+                        'schedule_config', None, {},
+                    ),
+                ])
+            else:
+                conn.execute('DELETE FROM schedule_day_overrides WHERE user_id = ?', (user['id'],))
+                conn.execute('DELETE FROM schedule_template_versions WHERE user_id = ?', (user['id'],))
+                self.log_operation(
+                    conn, int(user['id']), int(user['id']), 'schedule_config.reset',
+                    'schedule_config', None, {},
+                )
+                conn.commit()
         return self.write_json({'ok': True})
 
     def validate_schedule_payload(
@@ -6358,12 +6830,14 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return
         item_id = f"schedule-{int(time.time() * 1000)}-{secrets.token_hex(4)}"
         with get_db() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            is_d1 = isinstance(conn, D1GatewayConnection)
+            if not is_d1:
+                conn.execute('BEGIN IMMEDIATE')
             item, error = self.validate_schedule_payload(conn, payload, int(user['id']))
             if error:
                 return self.write_json(error, status=HTTPStatus.BAD_REQUEST)
             sort_order = item['sortOrder']
-            if sort_order is None:
+            if sort_order is None and not is_d1:
                 sort_order = float(conn.execute(
                     """
                     SELECT COALESCE(MAX(sort_order), 0) + 1024 FROM schedule_items
@@ -6371,30 +6845,56 @@ class TodoHandler(SimpleHTTPRequestHandler):
                     """,
                     (user['id'], item['date'], item['slotKey']),
                 ).fetchone()[0])
-            conn.execute(
+            created_at = now_iso()
+            detail = {'taskId': item['taskId'], 'date': item['date'], 'slotLabel': item['slotLabel']}
+            if is_d1:
+                insert_sql = """
+                    INSERT INTO schedule_items
+                    (id, user_id, task_id, schedule_date, slot_key, slot_label, slot_start, slot_end,
+                     item_start, item_end, duration_minutes, sort_order, note, completed, created_at, updated_at)
+                    SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                           COALESCE(?, (SELECT COALESCE(MAX(sort_order), 0) + 1024
+                                        FROM schedule_items
+                                        WHERE user_id = ? AND schedule_date = ? AND slot_key = ?)),
+                           ?, 0, ?, ?
+                    WHERE EXISTS (SELECT 1 FROM tasks WHERE id = ? AND user_id = ?)
                 """
-                INSERT INTO schedule_items
-                (id, user_id, task_id, schedule_date, slot_key, slot_label, slot_start, slot_end,
-                 item_start, item_end, duration_minutes, sort_order, note, completed, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
+                insert_params = [
                     item_id, user['id'], item['taskId'], item['date'], item['slotKey'], item['slotLabel'],
                     item['slotStart'], item['slotEnd'], item['startTime'], item['endTime'],
-                    item['durationMinutes'], sort_order, item['note'],
-                    0, now_iso(), now_iso(),
-                ),
-            )
-            self.log_operation(
-                conn,
-                int(user['id']),
-                int(user['id']),
-                'schedule_item.create',
-                'schedule_item',
-                item_id,
-                {'taskId': item['taskId'], 'date': item['date'], 'slotLabel': item['slotLabel']},
-            )
-            conn.commit()
+                    item['durationMinutes'], sort_order, user['id'], item['date'], item['slotKey'],
+                    item['note'], created_at, created_at, item['taskId'], user['id'],
+                ]
+                results = conn.batch([
+                    {'sql': insert_sql, 'params': insert_params},
+                    self.operation_log_statement(
+                        int(user['id']), int(user['id']), 'schedule_item.create',
+                        'schedule_item', item_id, detail,
+                        where_sql='EXISTS (SELECT 1 FROM schedule_items WHERE id = ? AND user_id = ?)',
+                        where_params=(item_id, user['id']), created_at=created_at,
+                    ),
+                ])
+                if results[0].rowcount != 1:
+                    return self.write_json({'error': 'task not found'}, status=HTTPStatus.BAD_REQUEST)
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO schedule_items
+                    (id, user_id, task_id, schedule_date, slot_key, slot_label, slot_start, slot_end,
+                     item_start, item_end, duration_minutes, sort_order, note, completed, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        item_id, user['id'], item['taskId'], item['date'], item['slotKey'], item['slotLabel'],
+                        item['slotStart'], item['slotEnd'], item['startTime'], item['endTime'],
+                        item['durationMinutes'], sort_order, item['note'], 0, created_at, created_at,
+                    ),
+                )
+                self.log_operation(
+                    conn, int(user['id']), int(user['id']), 'schedule_item.create',
+                    'schedule_item', item_id, detail,
+                )
+                conn.commit()
         return self.write_json({'ok': True, 'id': item_id}, status=HTTPStatus.CREATED)
 
     def handle_update_schedule_item(self, item_id: str):
@@ -6405,7 +6905,9 @@ class TodoHandler(SimpleHTTPRequestHandler):
         if payload is None:
             return
         with get_db() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            is_d1 = isinstance(conn, D1GatewayConnection)
+            if not is_d1:
+                conn.execute('BEGIN IMMEDIATE')
             existing = conn.execute('SELECT * FROM schedule_items WHERE id = ? AND user_id = ?', (item_id, user['id'])).fetchone()
             if not existing:
                 return self.write_json({'error': 'schedule item not found'}, status=HTTPStatus.NOT_FOUND)
@@ -6480,33 +6982,43 @@ class TodoHandler(SimpleHTTPRequestHandler):
             if 'completed' in payload and not isinstance(payload.get('completed'), bool):
                 return self.write_json({'error': 'completed must be a boolean'}, status=HTTPStatus.BAD_REQUEST)
             completed = bool(payload.get('completed')) if 'completed' in payload else bool(existing['completed'])
-            conn.execute(
-                """
+            updated_at = now_iso()
+            update_sql = """
                 UPDATE schedule_items
                 SET schedule_date = ?, slot_key = ?, slot_label = ?, slot_start = ?, slot_end = ?,
                     item_start = ?, item_end = ?, duration_minutes = ?, sort_order = ?, note = ?, completed = ?, updated_at = ?
-                WHERE id = ? AND user_id = ?
-                """,
-                (
+                WHERE id = ? AND user_id = ? AND updated_at = ?
+                """
+            update_params = (
                     item['date'], item['slotKey'], item['slotLabel'], item['slotStart'], item['slotEnd'],
                     item['startTime'], item['endTime'], item['durationMinutes'], item['sortOrder'],
                     item['note'], 1 if completed else 0,
-                    now_iso(), item_id, user['id'],
-                ),
-            )
+                    updated_at, item_id, user['id'], existing['updated_at'],
+                )
             action = 'schedule_item.update'
             if bool(existing['completed']) != completed:
                 action = 'schedule_item.complete' if completed else 'schedule_item.reopen'
-            self.log_operation(
-                conn,
-                int(user['id']),
-                int(user['id']),
-                action,
-                'schedule_item',
-                item_id,
-                {'taskId': item['taskId'], 'date': item['date'], 'slotLabel': item['slotLabel']},
-            )
-            conn.commit()
+            detail = {'taskId': item['taskId'], 'date': item['date'], 'slotLabel': item['slotLabel']}
+            if is_d1:
+                results = conn.batch([
+                    {'sql': update_sql, 'params': list(update_params)},
+                    {'sql': '''INSERT INTO operation_logs
+                        (actor_user_id, target_user_id, action, entity_type, entity_id, detail_json, ip, created_at)
+                        SELECT ?, ?, ?, ?, ?, ?, ?, ?
+                        WHERE EXISTS (SELECT 1 FROM schedule_items WHERE id = ? AND user_id = ? AND updated_at = ?)''',
+                     'params': [int(user['id']), int(user['id']), action, 'schedule_item', item_id,
+                                json.dumps(detail, ensure_ascii=False), self.request_ip(), updated_at,
+                                item_id, user['id'], updated_at]},
+                ])
+                if not results or results[0].rowcount == 0:
+                    return self.write_json(
+                        {'error': 'schedule item was modified concurrently'},
+                        status=HTTPStatus.CONFLICT,
+                    )
+            else:
+                conn.execute(update_sql.replace(' AND updated_at = ?', ''), update_params[:-1])
+                self.log_operation(conn, int(user['id']), int(user['id']), action, 'schedule_item', item_id, detail)
+                conn.commit()
         return self.write_json({'ok': True, 'id': item_id})
 
     def handle_delete_schedule_item(self, item_id: str):
@@ -6514,7 +7026,9 @@ class TodoHandler(SimpleHTTPRequestHandler):
         if not user:
             return
         with get_db() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            is_d1 = isinstance(conn, D1GatewayConnection)
+            if not is_d1:
+                conn.execute('BEGIN IMMEDIATE')
             existing = conn.execute(
                 '''
                 SELECT schedule_items.task_id, schedule_items.habit_id, schedule_items.schedule_date,
@@ -6527,38 +7041,42 @@ class TodoHandler(SimpleHTTPRequestHandler):
             ).fetchone()
             if not existing:
                 return self.write_json({'error': 'schedule item not found'}, status=HTTPStatus.NOT_FOUND)
+            statements = []
             if existing['habit_id']:
-                conn.execute(
+                exclusion = (
                     '''
                     INSERT OR IGNORE INTO habit_instance_exclusions
                     (user_id, habit_id, schedule_date, created_at)
-                    VALUES (?, ?, ?, ?)
+                    SELECT ?, ?, ?, ? WHERE EXISTS (
+                        SELECT 1 FROM schedule_items WHERE id = ? AND user_id = ?
+                    )
                     ''',
-                    (user['id'], existing['habit_id'], existing['schedule_date'], now_iso()),
+                    (user['id'], existing['habit_id'], existing['schedule_date'], now_iso(), item_id, user['id']),
                 )
-            conn.execute('DELETE FROM schedule_items WHERE id = ? AND user_id = ?', (item_id, user['id']))
+                statements.append({'sql': exclusion[0], 'params': list(exclusion[1])})
+            detail = {'taskId': existing['task_id'], 'habitId': existing['habit_id'], 'date': existing['schedule_date'], 'slotLabel': existing['slot_label']}
+            log_statement = {'sql': '''INSERT INTO operation_logs
+                (actor_user_id, target_user_id, action, entity_type, entity_id, detail_json, ip, created_at)
+                SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (
+                    SELECT 1 FROM schedule_items WHERE id = ? AND user_id = ?
+                )''', 'params': [int(user['id']), int(user['id']), 'schedule_item.delete', 'schedule_item', item_id, json.dumps(detail, ensure_ascii=False), self.request_ip(), now_iso(), item_id, user['id']]}
+            if is_d1:
+                statements.append(log_statement)
+            statements.append({'sql': 'DELETE FROM schedule_items WHERE id = ? AND user_id = ?', 'params': [item_id, user['id']]})
             if not existing['habit_id'] and existing['task_pool'] == 'schedule':
-                remaining = conn.execute(
-                    'SELECT 1 FROM schedule_items WHERE user_id = ? AND task_id = ? LIMIT 1',
-                    (user['id'], existing['task_id']),
-                ).fetchone()
-                if not remaining:
-                    conn.execute('DELETE FROM tasks WHERE id = ? AND user_id = ?', (existing['task_id'], user['id']))
-            self.log_operation(
-                conn,
-                int(user['id']),
-                int(user['id']),
-                'schedule_item.delete',
-                'schedule_item',
-                item_id,
-                {
-                    'taskId': existing['task_id'],
-                    'habitId': existing['habit_id'],
-                    'date': existing['schedule_date'],
-                    'slotLabel': existing['slot_label'],
-                },
-            )
-            conn.commit()
+                statements.append({'sql': '''DELETE FROM tasks WHERE id = ? AND user_id = ?
+                    AND NOT EXISTS (SELECT 1 FROM schedule_items WHERE user_id = ? AND task_id = ?)''',
+                    'params': [existing['task_id'], user['id'], user['id'], existing['task_id']]})
+            if is_d1:
+                conn.batch(statements)
+            else:
+                if statements and existing['habit_id']:
+                    conn.execute(statements[0]['sql'], tuple(statements[0]['params']))
+                self.log_operation(conn, int(user['id']), int(user['id']), 'schedule_item.delete', 'schedule_item', item_id, detail)
+                conn.execute('DELETE FROM schedule_items WHERE id = ? AND user_id = ?', (item_id, user['id']))
+                if not existing['habit_id'] and existing['task_pool'] == 'schedule':
+                    conn.execute('DELETE FROM tasks WHERE id = ? AND user_id = ? AND NOT EXISTS (SELECT 1 FROM schedule_items WHERE user_id = ? AND task_id = ?)', (existing['task_id'], user['id'], user['id'], existing['task_id']))
+                conn.commit()
         return self.write_json({'ok': True})
 
     def handle_auth_register(self):
@@ -6574,6 +7092,72 @@ class TodoHandler(SimpleHTTPRequestHandler):
         nickname = str(payload.get('nickname', '')).strip()
         password = str(payload.get('password', ''))
         request_ip = self.request_ip()
+
+        # D1 has no connection transaction. Reserve the registration attempt with
+        # one conditional INSERT so concurrent requests cannot all pass the limit
+        # check before writing their log. SQLite keeps the legacy transaction path.
+        if DB_BACKEND == 'd1':
+            if not name or not nickname or not password:
+                with get_db() as conn:
+                    record_registration_attempt(conn, request_ip, nickname, 'invalid_required')
+                return self.write_json({'error': 'name, nickname and password are required'}, status=HTTPStatus.BAD_REQUEST)
+            if len(name) > 64 or len(nickname) > 32:
+                with get_db() as conn:
+                    record_registration_attempt(conn, request_ip, nickname, 'invalid_length')
+                return self.write_json({'error': 'name or nickname is too long'}, status=HTTPStatus.BAD_REQUEST)
+            if len(password) < 6:
+                with get_db() as conn:
+                    record_registration_attempt(conn, request_ip, nickname, 'invalid_password')
+                return self.write_json({'error': 'password must be at least 6 characters'}, status=HTTPStatus.BAD_REQUEST)
+            with get_db() as conn:
+                limit = get_registration_ip_limit(conn)
+                start_key = registration_ip_window_start(limit['windowHours'])
+                created_at = now_iso()
+                user_id = secrets.randbelow(2**62 - 1) + 1
+                results = conn.batch([
+                    {
+                        'sql': '''INSERT INTO users
+                            (id, name, nickname, password_hash, role, created_at)
+                            SELECT ?, ?, ?, ?, 'student', ?
+                            WHERE (SELECT COUNT(*) FROM registration_attempt_logs
+                                   WHERE ip = ? AND created_at >= ?) < ?
+                              AND NOT EXISTS (SELECT 1 FROM users WHERE nickname = ? COLLATE NOCASE)''',
+                        'params': [user_id, name, nickname, hash_password(password), created_at,
+                                   request_ip, start_key, limit['attemptLimit'], nickname],
+                    },
+                    {
+                        'sql': '''INSERT INTO registration_attempt_logs
+                            (ip, nickname, result, user_id, created_at)
+                            SELECT ?, ?,
+                                   CASE
+                                     WHEN EXISTS (SELECT 1 FROM users WHERE id = ?) THEN 'success'
+                                     WHEN (SELECT COUNT(*) FROM registration_attempt_logs
+                                           WHERE ip = ? AND created_at >= ?) >= ? THEN 'rate_limited'
+                                     ELSE 'duplicate_nickname'
+                                   END,
+                                   CASE WHEN EXISTS (SELECT 1 FROM users WHERE id = ?) THEN ? ELSE NULL END,
+                                   ?''',
+                        'params': [request_ip, nickname[:32], user_id, request_ip, start_key,
+                                   limit['attemptLimit'], user_id, user_id, created_at],
+                    },
+                    self.operation_log_statement(
+                        user_id, user_id, 'auth.register', 'user', str(user_id),
+                        {'nickname': nickname},
+                        where_sql='EXISTS (SELECT 1 FROM users WHERE id = ?)',
+                        where_params=(user_id,), created_at=created_at,
+                    ),
+                ])
+                if results[0].rowcount != 1:
+                    status = registration_ip_limit_status(conn, request_ip)
+                    if status['exceeded']:
+                        return self.write_json(registration_ip_limit_error(status), status=HTTPStatus.TOO_MANY_REQUESTS)
+                    return self.write_json({'error': 'nickname already exists'}, status=HTTPStatus.CONFLICT)
+                user = conn.execute(
+                    '''SELECT id, name, nickname, role, avatar_file, avatar_updated_at, avatar_color
+                       FROM users WHERE id = ?''',
+                    (user_id,),
+                ).fetchone()
+            return self.issue_session_response(user)
 
         with get_db() as conn:
             conn.execute('BEGIN IMMEDIATE')
@@ -6643,17 +7227,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
             user = conn.execute('SELECT * FROM users WHERE nickname = ? COLLATE NOCASE', (nickname,)).fetchone()
             if not user or not verify_password(password, user['password_hash']):
                 return self.write_json({'error': 'invalid nickname or password'}, status=HTTPStatus.UNAUTHORIZED)
-            self.log_operation(
-                conn,
-                int(user['id']),
-                int(user['id']),
-                'auth.login',
-                'user',
-                str(user['id']),
-                {'nickname': user['nickname']},
-            )
-            conn.commit()
-        return self.issue_session_response(user)
+        return self.issue_session_response(user, login_detail={'nickname': user['nickname']})
 
     def handle_auth_me(self):
         user = self.current_user()
@@ -6884,20 +7458,27 @@ class TodoHandler(SimpleHTTPRequestHandler):
                 return self.write_json({'error': 'user not found'}, status=HTTPStatus.NOT_FOUND)
             if current['nickname'] == nickname:
                 return self.write_json({'ok': True, 'user': public_user(current)})
-            try:
-                conn.execute('UPDATE users SET nickname = ? WHERE id = ?', (nickname, user['id']))
-            except sqlite3.IntegrityError:
-                return self.write_json({'error': 'nickname already exists', 'message': '这个昵称已被使用。'}, status=HTTPStatus.CONFLICT)
-            self.log_operation(
-                conn,
-                int(user['id']),
-                int(user['id']),
-                'user.nickname.update',
-                'user',
-                str(user['id']),
-                {'oldNickname': current['nickname'], 'newNickname': nickname},
-            )
-            conn.commit()
+            detail = {'oldNickname': current['nickname'], 'newNickname': nickname}
+            if isinstance(conn, D1GatewayConnection):
+                results = conn.batch([
+                    {'sql': '''UPDATE users SET nickname = ? WHERE id = ? AND nickname = ?
+                        AND NOT EXISTS (SELECT 1 FROM users WHERE nickname = ? COLLATE NOCASE AND id != ?)''',
+                     'params': [nickname, user['id'], current['nickname'], nickname, user['id']]},
+                    self.operation_log_statement(int(user['id']), int(user['id']),
+                        'user.nickname.update', 'user', str(user['id']), detail,
+                        where_sql='EXISTS (SELECT 1 FROM users WHERE id = ? AND nickname = ?)',
+                        where_params=(user['id'], nickname)),
+                ])
+                if results[0].rowcount != 1:
+                    return self.write_json({'error': 'nickname conflict', 'message': '昵称已被使用或账号已更改。'}, status=HTTPStatus.CONFLICT)
+            else:
+                try:
+                    conn.execute('UPDATE users SET nickname = ? WHERE id = ?', (nickname, user['id']))
+                except sqlite3.IntegrityError:
+                    return self.write_json({'error': 'nickname already exists', 'message': '这个昵称已被使用。'}, status=HTTPStatus.CONFLICT)
+                self.log_operation(conn, int(user['id']), int(user['id']),
+                    'user.nickname.update', 'user', str(user['id']), detail)
+                conn.commit()
             updated = conn.execute(
                 'SELECT id, name, nickname, role, avatar_file, avatar_updated_at, avatar_color FROM users WHERE id = ?',
                 (user['id'],),
@@ -6928,40 +7509,55 @@ class TodoHandler(SimpleHTTPRequestHandler):
                 return self.write_json({'error': 'user not found'}, status=HTTPStatus.NOT_FOUND)
             if not verify_password(current_password, current['password_hash']):
                 return self.write_json({'error': 'current password is incorrect', 'message': '原密码不正确。'}, status=HTTPStatus.UNAUTHORIZED)
-            conn.execute('UPDATE users SET password_hash = ? WHERE id = ?', (hash_password(new_password), user['id']))
-            self.log_operation(
-                conn,
-                int(user['id']),
-                int(user['id']),
-                'user.password.update',
-                'user',
-                str(user['id']),
-                {'nickname': current['nickname']},
-            )
-            conn.commit()
+            new_hash = hash_password(new_password)
+            detail = {'nickname': current['nickname']}
+            if isinstance(conn, D1GatewayConnection):
+                results = conn.batch([
+                    {'sql': 'UPDATE users SET password_hash = ? WHERE id = ? AND password_hash = ?',
+                     'params': [new_hash, user['id'], current['password_hash']]},
+                    self.operation_log_statement(int(user['id']), int(user['id']),
+                        'user.password.update', 'user', str(user['id']), detail,
+                        where_sql='EXISTS (SELECT 1 FROM users WHERE id = ? AND password_hash = ?)',
+                        where_params=(user['id'], new_hash)),
+                ])
+                if results[0].rowcount != 1:
+                    return self.write_json({'error': 'user was modified concurrently'}, status=HTTPStatus.CONFLICT)
+            else:
+                conn.execute('UPDATE users SET password_hash = ? WHERE id = ?', (new_hash, user['id']))
+                self.log_operation(conn, int(user['id']), int(user['id']),
+                    'user.password.update', 'user', str(user['id']), detail)
+                conn.commit()
         return self.write_json({'ok': True})
 
-    def issue_session_response(self, user):
+    def issue_session_response(self, user, *, login_detail: dict | None = None):
         token = secrets.token_urlsafe(32)
         expires_at = int(time.time()) + SESSION_TTL_SECONDS
         csrf_token = secrets.token_urlsafe(32)
         with get_db() as conn:
-            conn.execute(
-                '''
+            created_at = now_iso()
+            session_sql = '''
                 INSERT INTO sessions
                 (token, user_id, auth_sub, sid, csrf_token, expires_at, created_at)
                 VALUES (?, ?, ?, '', ?, ?, ?)
-                ''',
-                (
-                    token if LEGACY_AUTH_ENABLED else self.token_digest(token),
-                    user['id'],
-                    row_value(user, 'auth_sub', '') or '',
-                    csrf_token,
-                    expires_at,
-                    now_iso(),
-                ),
+            '''
+            session_params = (
+                token if LEGACY_AUTH_ENABLED else self.token_digest(token), user['id'],
+                row_value(user, 'auth_sub', '') or '', csrf_token, expires_at, created_at,
             )
-            conn.commit()
+            if isinstance(conn, D1GatewayConnection) and login_detail is not None:
+                conn.batch([
+                    {'sql': session_sql, 'params': list(session_params)},
+                    self.operation_log_statement(
+                        int(user['id']), int(user['id']), 'auth.login', 'user',
+                        str(user['id']), login_detail, created_at=created_at,
+                    ),
+                ])
+            else:
+                conn.execute(session_sql, session_params)
+                if login_detail is not None:
+                    self.log_operation(conn, int(user['id']), int(user['id']),
+                        'auth.login', 'user', str(user['id']), login_detail)
+                conn.commit()
         payload = {'user': public_user(user), 'csrfToken': csrf_token}
         if LEGACY_AUTH_ENABLED:
             payload['token'] = token
