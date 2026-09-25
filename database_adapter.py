@@ -73,6 +73,7 @@ class D1GatewayConnection:
         signature = hmac.new(self.secret, message, hashlib.sha256).hexdigest()
         request = urllib.request.Request(self.url, data=payload, method='POST', headers={
             'Content-Type': 'application/json',
+            'User-Agent': 'NetHub-D1-Client/1.0',
             'X-DB-Request-ID': request_id,
             'X-DB-Timestamp': timestamp,
             'X-DB-Signature': signature,
