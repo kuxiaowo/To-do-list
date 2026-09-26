@@ -1,0 +1,21 @@
+name = "todo-list-d1-gateway"
+main = "src/worker.js"
+compatibility_date = "2026-09-01"
+workers_dev = true
+preview_urls = false
+
+[vars]
+ALLOW_IN_MEMORY_REPLAY = "false"
+
+[[durable_objects.bindings]]
+name = "REPLAY_GUARD"
+class_name = "ReplayGuard"
+
+[[migrations]]
+tag = "replay-guard-v1"
+new_sqlite_classes = ["ReplayGuard"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "todo-list-d1"
+database_id = "8e32ada9-94e0-4407-8ea3-91578c8519eb"
