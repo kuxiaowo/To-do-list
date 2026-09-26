@@ -17,6 +17,7 @@ from joserfc import jwt
 from joserfc.jwk import import_key
 
 import server
+from database_adapter import D1Cursor, D1GatewayConnection
 from oidc_client import (
     OIDCError,
     OIDCIdentity,
@@ -84,6 +85,32 @@ class OIDCAuthTests(unittest.TestCase):
             if header.lower() == 'set-cookie' and value.startswith(name + '='):
                 return value.split(';', 1)[0]
         return ''
+
+    def test_d1_callback_consumes_flow_without_returning(self):
+        state = 'test-state'
+        flow_cookie = 'test-flow-token'
+        flow = {
+            'state_hash': server.TodoHandler.token_digest(state),
+            'created_at': int(time.time()),
+            'return_path': '/',
+        }
+        connection = D1GatewayConnection('https://db.example.test/', 'test-secret')
+        with mock.patch.object(connection, 'batch', return_value=[
+            D1Cursor({'rows': [flow], 'meta': {'changes': 0}}),
+            D1Cursor({'rows': [], 'meta': {'changes': 1}}),
+        ]) as batch, mock.patch.object(server, 'get_db', return_value=connection):
+            status, headers, _ = self.request(
+                'GET', f'/auth/callback?error=login_required&state={state}',
+                headers={'Cookie': f'{server.OIDC_FLOW_COOKIE_NAME}={flow_cookie}'},
+            )
+        self.assertEqual(status, HTTPStatus.FOUND)
+        self.assertEqual(dict(headers)['Location'], '/?sso=none')
+        statements = batch.call_args.args[0]
+        self.assertEqual(len(statements), 2)
+        self.assertTrue(statements[0][0].strip().startswith('SELECT *'))
+        self.assertTrue(statements[1][0].strip().startswith('DELETE FROM'))
+        self.assertNotIn('RETURNING', statements[1][0])
+        self.assertEqual(statements[0][1], statements[1][1])
 
     def test_oidc_login_callback_creates_local_member_and_cookie_session(self):
         status, headers, _ = self.request('GET', '/auth/login')
