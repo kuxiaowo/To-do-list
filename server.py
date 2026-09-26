@@ -3478,13 +3478,15 @@ class TodoHandler(SimpleHTTPRequestHandler):
         with get_db() as conn:
             if isinstance(conn, D1GatewayConnection):
                 token_hash = self.token_digest(raw_flow)
-                results = conn.batch([
-                    ('SELECT * FROM oidc_login_flows WHERE token_hash = ?', (token_hash,)),
-                    ('DELETE FROM oidc_login_flows WHERE token_hash = ?', (token_hash,)),
-                ])
-                flow = results[0].fetchone()
-                if flow is not None and results[1].rowcount != 1:
-                    return self.write_auth_error('登录请求未能被安全消费，请重新登录。')
+                flow = conn.execute(
+                    'SELECT * FROM oidc_login_flows WHERE token_hash = ?', (token_hash,)
+                ).fetchone()
+                if flow is not None:
+                    deleted = conn.execute(
+                        'DELETE FROM oidc_login_flows WHERE token_hash = ?', (token_hash,)
+                    )
+                    if deleted.rowcount != 1:
+                        return self.write_auth_error('登录请求未能被安全消费，请重新登录。')
             else:
                 conn.execute('BEGIN IMMEDIATE')
                 flow = conn.execute(

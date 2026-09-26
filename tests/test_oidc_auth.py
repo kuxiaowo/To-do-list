@@ -95,17 +95,17 @@ class OIDCAuthTests(unittest.TestCase):
             'return_path': '/',
         }
         connection = D1GatewayConnection('https://db.example.test/', 'test-secret')
-        with mock.patch.object(connection, 'batch', return_value=[
+        with mock.patch.object(connection, 'execute', side_effect=[
             D1Cursor({'rows': [flow], 'meta': {'changes': 0}}),
             D1Cursor({'rows': [], 'meta': {'changes': 1}}),
-        ]) as batch, mock.patch.object(server, 'get_db', return_value=connection):
+        ]) as execute, mock.patch.object(server, 'get_db', return_value=connection):
             status, headers, _ = self.request(
                 'GET', f'/auth/callback?error=login_required&state={state}',
                 headers={'Cookie': f'{server.OIDC_FLOW_COOKIE_NAME}={flow_cookie}'},
             )
         self.assertEqual(status, HTTPStatus.FOUND)
         self.assertEqual(dict(headers)['Location'], '/?sso=none')
-        statements = batch.call_args.args[0]
+        statements = [call.args for call in execute.call_args_list]
         self.assertEqual(len(statements), 2)
         self.assertTrue(statements[0][0].strip().startswith('SELECT *'))
         self.assertTrue(statements[1][0].strip().startswith('DELETE FROM'))
