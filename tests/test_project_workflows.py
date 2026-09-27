@@ -775,51 +775,13 @@ class ProjectWorkflowTests(unittest.TestCase):
             self.assertEqual(conn.execute('SELECT COUNT(*) FROM tasks WHERE user_id = ?', (user['id'],)).fetchone()[0], 0)
             self.assertEqual(conn.execute('SELECT COUNT(*) FROM schedule_items WHERE user_id = ?', (user['id'],)).fetchone()[0], 0)
 
-    def test_visit_tracking_admin_traffic_and_frontend_scaffolding(self):
+    def test_legacy_visit_endpoints_removed_and_frontend_links_to_accounts(self):
         admin_token, admin_user = self.register_user('traffic-admin', name='Admin')
         self.make_admin(admin_user['id'])
-
-        status, payload = self.request('POST', '/api/visits', {'page': 'home', 'path': '/'}, token=admin_token)
-        self.assertEqual(status, HTTPStatus.OK, payload)
-
-        status, payload = self.request('POST', '/api/visits', {'page': 'home', 'path': '/'})
-        self.assertEqual(status, HTTPStatus.OK, payload)
-
-        status, payload = self.request('POST', '/api/visits', {'page': 'admin', 'path': '/admin'}, token=admin_token)
-        self.assertEqual(status, HTTPStatus.OK, payload)
-
-        status, payload = self.request('GET', '/api/admin/traffic/summary?view=6h&page=1&pageSize=5', token=admin_token)
-        self.assertEqual(status, HTTPStatus.OK)
-        self.assertEqual(payload['trafficView'], '6h')
-        self.assertGreaterEqual(payload['totalVisits'], 1)
-        self.assertTrue(payload['recentVisits'])
-
-        status, payload = self.request(
-            'GET',
-            f"/api/admin/traffic/summary?view=6h&page=1&pageSize=5&userId={admin_user['id']}",
-            token=admin_token,
-        )
-        self.assertEqual(status, HTTPStatus.OK)
-        self.assertEqual(payload['userFilter'], str(admin_user['id']))
-        self.assertEqual(payload['totalVisits'], 2)
-        self.assertTrue(all(row['userId'] == admin_user['id'] for row in payload['recentVisits']))
-
-        status, payload = self.request(
-            'GET',
-            '/api/admin/traffic/summary?view=6h&page=1&pageSize=5&userId=anonymous',
-            token=admin_token,
-        )
-        self.assertEqual(status, HTTPStatus.OK)
-        self.assertEqual(payload['userFilter'], 'anonymous')
-        self.assertEqual(payload['totalVisits'], 1)
-        self.assertTrue(all(row['user'] is None for row in payload['recentVisits']))
-
-        status, payload = self.request(
-            'GET',
-            '/api/admin/traffic/summary?view=6h&page=1&pageSize=5&userId=bad',
-            token=admin_token,
-        )
-        self.assertEqual(status, HTTPStatus.BAD_REQUEST)
+        status, _ = self.request('POST', '/api/visits', {'page': 'home'}, token=admin_token)
+        self.assertEqual(status, HTTPStatus.NOT_FOUND)
+        status, _ = self.request('GET', '/api/admin/traffic/summary', token=admin_token)
+        self.assertEqual(status, HTTPStatus.NOT_FOUND)
 
         app_js = APP_JS_PATH.read_text(encoding='utf-8')
         index_html = INDEX_HTML_PATH.read_text(encoding='utf-8')
@@ -830,15 +792,11 @@ class ProjectWorkflowTests(unittest.TestCase):
             'feedbackDialogVisible',
             'habitDialogVisible',
             'scheduleDialogVisible',
-            "recordVisit('home')",
-            'adminTrafficUserFilter',
-            'handleAdminTrafficUserFilterChange',
-            "adminSection === 'traffic'",
             "adminSection === 'aiUsage'",
         ]:
             self.assertIn(marker, index_html + app_js)
-        self.assertIn('匿名访问', index_html)
-        self.assertIn('traffic-filter-row', style_css)
+        self.assertIn('auth.nethub.wiki/admin/analytics', index_html)
+        self.assertNotIn("recordVisit('home')", app_js)
         self.assertIn('@media (max-width: 720px)', style_css)
         self.assertIn('[data-theme="dark"]', style_css)
 

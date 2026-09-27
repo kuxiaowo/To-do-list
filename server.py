@@ -553,7 +553,6 @@ def init_db() -> None:
                 entity_type TEXT NOT NULL,
                 entity_id TEXT,
                 detail_json TEXT NOT NULL DEFAULT '{}',
-                ip TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL,
                 FOREIGN KEY(actor_user_id) REFERENCES users(id) ON DELETE SET NULL,
                 FOREIGN KEY(target_user_id) REFERENCES users(id) ON DELETE CASCADE
@@ -597,39 +596,6 @@ def init_db() -> None:
         )
         conn.execute(
             '''
-            CREATE TABLE IF NOT EXISTS visit_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ip TEXT NOT NULL DEFAULT '',
-                page TEXT NOT NULL,
-                path TEXT NOT NULL DEFAULT '',
-                user_id INTEGER,
-                user_agent TEXT NOT NULL DEFAULT '',
-                referer TEXT NOT NULL DEFAULT '',
-                created_at TEXT NOT NULL,
-                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE SET NULL
-            )
-            '''
-        )
-        conn.execute('CREATE INDEX IF NOT EXISTS idx_visit_logs_created_at ON visit_logs(created_at)')
-        conn.execute('CREATE INDEX IF NOT EXISTS idx_visit_logs_ip ON visit_logs(ip)')
-        conn.execute('CREATE INDEX IF NOT EXISTS idx_visit_logs_page ON visit_logs(page)')
-        conn.execute(
-            '''
-            CREATE TABLE IF NOT EXISTS registration_attempt_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ip TEXT NOT NULL DEFAULT '',
-                nickname TEXT NOT NULL DEFAULT '',
-                result TEXT NOT NULL DEFAULT '',
-                user_id INTEGER,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE SET NULL
-            )
-            '''
-        )
-        conn.execute('CREATE INDEX IF NOT EXISTS idx_registration_attempt_logs_ip_created ON registration_attempt_logs(ip, created_at)')
-        conn.execute('CREATE INDEX IF NOT EXISTS idx_registration_attempt_logs_created_at ON registration_attempt_logs(created_at)')
-        conn.execute(
-            '''
             CREATE TABLE IF NOT EXISTS ai_usage_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
@@ -668,7 +634,6 @@ def init_db() -> None:
                 source TEXT NOT NULL,
                 object_key TEXT NOT NULL DEFAULT '',
                 filename TEXT NOT NULL DEFAULT '',
-                ip TEXT NOT NULL DEFAULT '',
                 user_agent TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL,
                 FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
@@ -677,7 +642,6 @@ def init_db() -> None:
         )
         conn.execute('CREATE INDEX IF NOT EXISTS idx_installer_download_logs_user_created ON installer_download_logs(user_id, created_at)')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_installer_download_logs_created_at ON installer_download_logs(created_at)')
-        conn.execute('CREATE INDEX IF NOT EXISTS idx_installer_download_logs_ip ON installer_download_logs(ip)')
         conn.execute(
             '''
             CREATE TABLE IF NOT EXISTS installer_download_limits (
@@ -1810,7 +1774,6 @@ def public_operation_log(row: sqlite3.Row) -> dict:
         'entityType': row['entity_type'],
         'entityId': row['entity_id'],
         'detail': detail,
-        'ip': row['ip'],
         'createdAt': row['created_at'],
     }
 
@@ -1853,109 +1816,6 @@ def set_feedback_limit(conn: sqlite3.Connection, limit: int) -> None:
         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
         ''',
         (FEEDBACK_LIMIT_SETTING_KEY, str(limit), now_iso()),
-    )
-
-
-def default_registration_ip_limit() -> dict:
-    return {
-        'windowHours': DEFAULT_REGISTRATION_IP_WINDOW_HOURS,
-        'attemptLimit': DEFAULT_REGISTRATION_IP_ATTEMPT_LIMIT,
-    }
-
-
-def normalize_registration_ip_limit(raw: object) -> tuple[dict | None, str | None]:
-    if not isinstance(raw, dict):
-        return None, 'limit must be an object'
-    try:
-        window_hours = int(raw.get('windowHours'))
-        attempt_limit = int(raw.get('attemptLimit'))
-    except (TypeError, ValueError):
-        return None, 'windowHours and attemptLimit must be integers'
-    if window_hours < 1 or window_hours > 24 * 365:
-        return None, 'windowHours must be between 1 and 8760'
-    if attempt_limit < 1 or attempt_limit > 1_000_000:
-        return None, 'attemptLimit must be between 1 and 1000000'
-    return {'windowHours': window_hours, 'attemptLimit': attempt_limit}, None
-
-
-def get_registration_ip_limit(conn: sqlite3.Connection) -> dict:
-    row = conn.execute('SELECT value FROM app_settings WHERE key = ?', (REGISTRATION_IP_LIMIT_SETTING_KEY,)).fetchone()
-    if not row:
-        return default_registration_ip_limit()
-    try:
-        payload = json.loads(row['value'])
-    except (TypeError, json.JSONDecodeError):
-        return default_registration_ip_limit()
-    limit, error = normalize_registration_ip_limit(payload)
-    return default_registration_ip_limit() if error else limit
-
-
-def set_registration_ip_limit(conn: sqlite3.Connection, limit: dict) -> None:
-    conn.execute(
-        '''
-        INSERT INTO app_settings (key, value, updated_at)
-        VALUES (?, ?, ?)
-        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
-        ''',
-        (REGISTRATION_IP_LIMIT_SETTING_KEY, json.dumps(limit, ensure_ascii=False), now_iso()),
-    )
-
-
-def registration_ip_window_start(window_hours: int) -> str:
-    start = datetime.now(timezone.utc) - timedelta(hours=window_hours)
-    return start.strftime('%Y-%m-%dT%H:%M:%SZ')
-
-
-def registration_attempt_totals_since(conn: sqlite3.Connection, ip: str, start_key: str) -> dict:
-    row = conn.execute(
-        '''
-        SELECT COUNT(*) AS attempt_count
-        FROM registration_attempt_logs
-        WHERE ip = ? AND created_at >= ?
-        ''',
-        (ip, start_key),
-    ).fetchone()
-    return {'attemptCount': int(row['attempt_count'] or 0)}
-
-
-def registration_ip_limit_status(conn: sqlite3.Connection, ip: str) -> dict:
-    limit = get_registration_ip_limit(conn)
-    usage = registration_attempt_totals_since(conn, ip, registration_ip_window_start(limit['windowHours']))
-    return {
-        'limit': limit,
-        'usage': usage,
-        'exceeded': usage['attemptCount'] >= limit['attemptLimit'],
-    }
-
-
-def registration_ip_limit_error(status: dict) -> dict:
-    limit = status['limit']
-    usage = status['usage']
-    return {
-        'error': 'registration ip limit exceeded',
-        'message': (
-            f"Registration attempt limit reached: last {limit['windowHours']} hours used "
-            f"{usage['attemptCount']} / {limit['attemptLimit']}."
-        ),
-        'windowHours': limit['windowHours'],
-        'attemptLimit': limit['attemptLimit'],
-        'currentAttemptCount': usage['attemptCount'],
-    }
-
-
-def record_registration_attempt(
-    conn: sqlite3.Connection,
-    ip: str,
-    nickname: str,
-    result: str,
-    user_id: int | None = None,
-) -> None:
-    conn.execute(
-        '''
-        INSERT INTO registration_attempt_logs (ip, nickname, result, user_id, created_at)
-        VALUES (?, ?, ?, ?, ?)
-        ''',
-        (ip, nickname[:32], result[:40], user_id, now_iso()),
     )
 
 
@@ -2342,21 +2202,19 @@ def record_installer_download(
     source: str,
     object_key: str,
     filename: str,
-    ip: str,
     user_agent: str,
 ) -> dict:
     conn.execute(
         '''
         INSERT INTO installer_download_logs
-        (user_id, source, object_key, filename, ip, user_agent, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        (user_id, source, object_key, filename, user_agent, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
         ''',
         (
             user_id,
             str(source or '')[:20],
             str(object_key or '')[:1000],
             str(filename or '')[:500],
-            str(ip or '')[:80],
             str(user_agent or '')[:1000],
             now_iso(),
         ),
@@ -2370,7 +2228,6 @@ def reserve_installer_download(
     source: str,
     object_key: str,
     filename: str,
-    ip: str,
     user_agent: str,
 ) -> tuple[bool, dict]:
     """Atomically consume one installer-download slot.
@@ -2384,8 +2241,8 @@ def reserve_installer_download(
     cursor = conn.execute(
         '''
         INSERT INTO installer_download_logs
-            (user_id, source, object_key, filename, ip, user_agent, created_at)
-        SELECT ?, ?, ?, ?, ?, ?, ?
+            (user_id, source, object_key, filename, user_agent, created_at)
+        SELECT ?, ?, ?, ?, ?, ?
         WHERE (
             SELECT COUNT(*)
             FROM installer_download_logs
@@ -2397,7 +2254,6 @@ def reserve_installer_download(
             str(source or '')[:20],
             str(object_key or '')[:1000],
             str(filename or '')[:500],
-            str(ip or '')[:80],
             str(user_agent or '')[:1000],
             now_iso(),
             user_id,
@@ -2407,22 +2263,6 @@ def reserve_installer_download(
     )
     status = installer_download_limit_status(conn, user_id)
     return cursor.rowcount == 1, status
-
-
-def normalize_ip(value: str) -> str:
-    value = str(value).strip()
-    if not value:
-        return ''
-    if value.startswith('[') and ']' in value:
-        value = value[1:value.index(']')]
-    elif value.count(':') == 1:
-        host, port = value.rsplit(':', 1)
-        if port.isdigit():
-            value = host
-    try:
-        return str(ipaddress.ip_address(value))
-    except ValueError:
-        return ''
 
 
 def normalize_static_request_path(path: str) -> str:
@@ -2800,8 +2640,6 @@ class TodoHandler(SimpleHTTPRequestHandler):
         path = urlparse(self.path).path
         if path == '/auth/backchannel-logout':
             return self.handle_backchannel_logout()
-        if path == '/api/visits':
-            return self.handle_create_visit()
         if path == '/api/admin/ai-usage/clear-user-limits':
             return self.handle_admin_clear_all_ai_token_limits()
         if path == '/api/admin/installer-downloads/clear-user-limits':
@@ -2846,8 +2684,6 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return self.handle_admin_update_ai_global_limit()
         if path == '/api/admin/installer-downloads/global-limit':
             return self.handle_admin_update_installer_download_global_limit()
-        if path == '/api/admin/registration-limit':
-            return self.handle_admin_update_registration_limit()
         parts = path.strip('/').split('/')
         if len(parts) == 5 and parts[:3] == ['api', 'admin', 'users'] and parts[4] == 'ai-token-limit':
             return self.handle_admin_update_user_ai_token_limit(parts[3])
@@ -2942,7 +2778,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
         finally:
             file_obj.close()
 
-    def managebac_login_failure_count(self, conn: sqlite3.Connection, user_id: int, ip: str) -> int:
+    def managebac_login_failure_count(self, conn: sqlite3.Connection, user_id: int) -> int:
         window_start = managebac_login_failure_window_start()
         last_success = conn.execute(
             '''
@@ -2959,10 +2795,9 @@ class TodoHandler(SimpleHTTPRequestHandler):
             FROM operation_logs
             WHERE target_user_id = ?
               AND action = 'managebac.login_failed'
-              AND ip = ?
               AND created_at > ?
             ''',
-            (user_id, ip, cutoff),
+            (user_id, cutoff),
         ).fetchone()[0])
 
     def handle_managebac_session_status(self):
@@ -3032,10 +2867,9 @@ class TodoHandler(SimpleHTTPRequestHandler):
             )
 
         user_id = int(user['id'])
-        ip = self.request_ip()
         with managebac_user_lock(user_id):
             with get_db() as conn:
-                failure_count = self.managebac_login_failure_count(conn, user_id, ip)
+                failure_count = self.managebac_login_failure_count(conn, user_id)
             if failure_count >= MANAGEBAC_LOGIN_FAILURE_LIMIT:
                 payload['password'] = ''
                 return self.write_json({
@@ -3280,7 +3114,6 @@ class TodoHandler(SimpleHTTPRequestHandler):
                     'oss',
                     oss_config.key,
                     oss_config.filename,
-                    self.request_ip(),
                     str(self.headers.get('User-Agent', '')),
                 )
                 if not reserved:
@@ -3318,7 +3151,6 @@ class TodoHandler(SimpleHTTPRequestHandler):
                 'local',
                 str(file_path.relative_to(BASE_DIR)) if file_path.is_relative_to(BASE_DIR) else file_path.name,
                 filename,
-                self.request_ip(),
                 str(self.headers.get('User-Agent', '')),
             )
             if not reserved:
@@ -3375,6 +3207,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
                     (now + SESSION_TTL_SECONDS, token, refresh_before),
                 )
                 conn.commit()
+            self._analytics_user_sub = str(row['auth_sub'] or '')
             return row
 
     def require_user(self):
@@ -3550,13 +3383,13 @@ class TodoHandler(SimpleHTTPRequestHandler):
                              DEFAULT_AVATAR_COLOR, identity.sub, created_at),
                         ),
                         (
-                            '''INSERT INTO operation_logs
+                             '''INSERT INTO operation_logs
                                (actor_user_id,target_user_id,action,entity_type,entity_id,
-                                detail_json,ip,created_at)
-                               SELECT id,id,'auth.oidc_first_login','user',CAST(id AS TEXT),?,?,?
+                                detail_json,created_at)
+                               SELECT id,id,'auth.oidc_first_login','user',CAST(id AS TEXT),?,?
                                FROM users WHERE id=?''',
                             (json.dumps({'authSub': identity.sub}, ensure_ascii=False),
-                             self.request_ip(), created_at, generated_user_id),
+                             created_at, generated_user_id),
                         ),
                     ])
                 statements.extend([
@@ -3570,10 +3403,10 @@ class TodoHandler(SimpleHTTPRequestHandler):
                     (
                         '''INSERT INTO operation_logs
                            (actor_user_id,target_user_id,action,entity_type,entity_id,
-                            detail_json,ip,created_at)
-                           SELECT id,id,'auth.oidc_login','user',CAST(id AS TEXT),'{}',?,?
+                            detail_json,created_at)
+                           SELECT id,id,'auth.oidc_login','user',CAST(id AS TEXT),'{}',?
                            FROM users WHERE auth_sub=?''',
-                        (self.request_ip(), created_at, identity.sub),
+                        (created_at, identity.sub),
                     ),
                 ])
                 results = conn.batch(statements)
@@ -3593,7 +3426,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
                     statements[1] = (
                         statements[1][0],
                         (json.dumps({'authSub': identity.sub}, ensure_ascii=False),
-                         self.request_ip(), created_at, generated_user_id),
+                         created_at, generated_user_id),
                     )
                     results = conn.batch(statements)
                     session_result = results[-2]
@@ -3731,8 +3564,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
         conn.execute(
             '''
             INSERT INTO operation_logs
-            (actor_user_id, target_user_id, action, entity_type, entity_id, detail_json, ip, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (actor_user_id, target_user_id, action, entity_type, entity_id, detail_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ''',
             (
                 actor_user_id,
@@ -3741,7 +3574,6 @@ class TodoHandler(SimpleHTTPRequestHandler):
                 entity_type,
                 entity_id,
                 json.dumps(detail or {}, ensure_ascii=False),
-                self.request_ip(),
                 now_iso(),
             ),
         )
@@ -3762,8 +3594,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
         """Build a log INSERT that can participate in an atomic D1 batch."""
         sql = '''
             INSERT INTO operation_logs
-            (actor_user_id, target_user_id, action, entity_type, entity_id, detail_json, ip, created_at)
-            SELECT ?, ?, ?, ?, ?, ?, ?, ?
+            (actor_user_id, target_user_id, action, entity_type, entity_id, detail_json, created_at)
+            SELECT ?, ?, ?, ?, ?, ?, ?
         '''
         if where_sql:
             sql += f' WHERE {where_sql}'
@@ -3776,7 +3608,6 @@ class TodoHandler(SimpleHTTPRequestHandler):
                 entity_type,
                 entity_id,
                 json.dumps(detail or {}, ensure_ascii=False),
-                self.request_ip(),
                 created_at or now_iso(),
                 *where_params,
             ],
@@ -4215,10 +4046,6 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return self.handle_admin_feedback()
         if parts == ['api', 'admin', 'feedback-settings']:
             return self.handle_admin_feedback_settings()
-        if parts == ['api', 'admin', 'registration-limit']:
-            return self.handle_admin_registration_limit()
-        if parts == ['api', 'admin', 'traffic', 'summary']:
-            return self.handle_admin_traffic_summary()
         if parts == ['api', 'admin', 'ai-usage', 'summary']:
             return self.handle_admin_ai_usage_summary()
         if parts == ['api', 'admin', 'installer-downloads', 'summary']:
@@ -4246,223 +4073,6 @@ class TodoHandler(SimpleHTTPRequestHandler):
             (user_id,),
         ).fetchone()
         return row
-
-    def request_ip(self) -> str:
-        peer_ip = normalize_ip(self.client_address[0] if self.client_address else '')
-        if peer_ip in TRUSTED_PROXY_IPS:
-            forwarded_for = str(self.headers.get('X-Forwarded-For', '')).strip()
-            for forwarded_ip in forwarded_for.split(','):
-                normalized_ip = normalize_ip(forwarded_ip)
-                if normalized_ip:
-                    return normalized_ip
-
-            real_ip = normalize_ip(self.headers.get('X-Real-IP', ''))
-            if real_ip:
-                return real_ip
-
-        return peer_ip
-
-    def record_visit(self, page: str, path: str, user_id: int | None = None) -> None:
-        with get_db() as conn:
-            conn.execute(
-                '''
-                INSERT INTO visit_logs (ip, page, path, user_id, user_agent, referer, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                ''',
-                (
-                    self.request_ip(),
-                    page[:40],
-                    path[:500],
-                    user_id,
-                    str(self.headers.get('User-Agent', ''))[:1000],
-                    str(self.headers.get('Referer', ''))[:1000],
-                    now_iso(),
-                ),
-            )
-            conn.commit()
-
-    def handle_create_visit(self):
-        payload = self.read_json_body()
-        if payload is None:
-            return
-        page = str(payload.get('page', '')).strip()
-        if page not in {'home', 'admin'}:
-            return self.write_json({'error': 'invalid page'}, status=HTTPStatus.BAD_REQUEST)
-        user = self.current_user()
-        visit_path = str(payload.get('path', '')).strip() or urlparse(self.path).path
-        self.record_visit(page, visit_path, int(user['id']) if user else None)
-        return self.write_json({'ok': True})
-
-    def handle_admin_traffic_summary(self):
-        query = parse_qs(urlparse(self.path).query)
-        traffic_view = str(query.get('view', ['7d'])[0]).strip()
-        if traffic_view not in {'30d', '7d', '1d', '6h'}:
-            return self.write_json({'error': 'invalid traffic view'}, status=HTTPStatus.BAD_REQUEST)
-        try:
-            page = max(1, int(query.get('page', ['1'])[0]))
-            page_size = min(100, max(1, int(query.get('pageSize', ['50'])[0])))
-        except ValueError:
-            return self.write_json({'error': 'invalid pagination'}, status=HTTPStatus.BAD_REQUEST)
-        offset = (page - 1) * page_size
-
-        user_filter = str(query.get('userId', ['all'])[0]).strip() or 'all'
-        visit_filter_sql = ''
-        visit_filter_params = []
-        if user_filter == 'all':
-            pass
-        elif user_filter == 'anonymous':
-            visit_filter_sql = ' AND visit_logs.user_id IS NULL'
-        else:
-            try:
-                target_user_id = int(user_filter)
-            except ValueError:
-                return self.write_json({'error': 'invalid user filter'}, status=HTTPStatus.BAD_REQUEST)
-            if target_user_id <= 0:
-                return self.write_json({'error': 'invalid user filter'}, status=HTTPStatus.BAD_REQUEST)
-            user_filter = str(target_user_id)
-            visit_filter_sql = ' AND visit_logs.user_id = ?'
-            visit_filter_params = [target_user_id]
-
-        now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0, tzinfo=None)
-        today = now.date()
-        today_key = today.isoformat()
-        if traffic_view == '30d':
-            series_unit = 'day'
-            bucket_count = 30
-            start_dt = datetime.combine(today - timedelta(days=bucket_count - 1), datetime.min.time())
-        elif traffic_view == '7d':
-            series_unit = 'day'
-            bucket_count = 7
-            start_dt = datetime.combine(today - timedelta(days=bucket_count - 1), datetime.min.time())
-        elif traffic_view == '1d':
-            series_unit = 'hour'
-            bucket_count = 24
-            start_dt = now - timedelta(hours=bucket_count - 1)
-        else:
-            series_unit = 'hour'
-            bucket_count = 6
-            start_dt = now - timedelta(hours=bucket_count - 1)
-        start_key = start_dt.strftime('%Y-%m-%dT%H:%M:%SZ')
-
-        with get_db() as conn:
-            total_visits = conn.execute(
-                f'SELECT COUNT(*) FROM visit_logs WHERE 1 = 1{visit_filter_sql}',
-                visit_filter_params,
-            ).fetchone()[0]
-            today_visits = conn.execute(
-                f"SELECT COUNT(*) FROM visit_logs WHERE substr(created_at, 1, 10) = ?{visit_filter_sql}",
-                [today_key, *visit_filter_params],
-            ).fetchone()[0]
-            unique_ips = conn.execute(
-                f"SELECT COUNT(DISTINCT NULLIF(ip, '')) FROM visit_logs WHERE 1 = 1{visit_filter_sql}",
-                visit_filter_params,
-            ).fetchone()[0]
-            today_unique_ips = conn.execute(
-                f"SELECT COUNT(DISTINCT NULLIF(ip, '')) FROM visit_logs WHERE substr(created_at, 1, 10) = ?{visit_filter_sql}",
-                [today_key, *visit_filter_params],
-            ).fetchone()[0]
-            trend_rows = conn.execute(
-                f'''
-                SELECT ip, created_at
-                FROM visit_logs
-                WHERE created_at >= ?{visit_filter_sql}
-                ORDER BY created_at ASC
-                ''',
-                [start_key, *visit_filter_params],
-            ).fetchall()
-            top_rows = conn.execute(
-                f'''
-                SELECT ip, COUNT(*) AS visits, MAX(created_at) AS last_visit_at
-                FROM visit_logs
-                WHERE ip != '' AND created_at >= ?{visit_filter_sql}
-                GROUP BY ip
-                ORDER BY visits DESC, last_visit_at DESC
-                LIMIT 5
-                ''',
-                [start_key, *visit_filter_params],
-            ).fetchall()
-            recent_total = conn.execute(
-                f'SELECT COUNT(*) FROM visit_logs WHERE 1 = 1{visit_filter_sql}',
-                visit_filter_params,
-            ).fetchone()[0]
-            recent_rows = conn.execute(
-                f'''
-                SELECT visit_logs.id, visit_logs.ip, visit_logs.page, visit_logs.path,
-                       visit_logs.user_id, visit_logs.user_agent, visit_logs.referer,
-                       visit_logs.created_at, users.name AS user_name, users.nickname AS user_nickname
-                FROM visit_logs
-                LEFT JOIN users ON users.id = visit_logs.user_id
-                WHERE 1 = 1{visit_filter_sql}
-                ORDER BY visit_logs.created_at DESC, visit_logs.id DESC
-                LIMIT ? OFFSET ?
-                ''',
-                [*visit_filter_params, page_size, offset],
-            ).fetchall()
-
-        trend_by_bucket = {}
-        for row in trend_rows:
-            try:
-                created_at = datetime.strptime(row['created_at'], '%Y-%m-%dT%H:%M:%SZ')
-            except (TypeError, ValueError):
-                continue
-            if series_unit == 'day':
-                bucket_key = created_at.date().isoformat()
-            else:
-                bucket_key = created_at.replace(minute=0, second=0, microsecond=0).strftime('%Y-%m-%dT%H:00:00Z')
-            bucket = trend_by_bucket.setdefault(bucket_key, {'visits': 0, 'ips': set()})
-            bucket['visits'] += 1
-            if row['ip']:
-                bucket['ips'].add(row['ip'])
-
-        trend_series = []
-        for offset in range(bucket_count):
-            bucket_dt = start_dt + (timedelta(days=offset) if series_unit == 'day' else timedelta(hours=offset))
-            if series_unit == 'day':
-                bucket_key = bucket_dt.date().isoformat()
-            else:
-                bucket_key = bucket_dt.strftime('%Y-%m-%dT%H:00:00Z')
-            item = trend_by_bucket.get(bucket_key, {'visits': 0, 'ips': set()})
-            trend_series.append({
-                'date': bucket_key,
-                'visits': item['visits'],
-                'uniqueIps': len(item['ips']),
-            })
-
-        return self.write_json({
-            'trafficView': traffic_view,
-            'userFilter': user_filter,
-            'seriesUnit': series_unit,
-            'totalVisits': total_visits,
-            'todayVisits': today_visits,
-            'uniqueIps': unique_ips,
-            'todayUniqueIps': today_unique_ips,
-            'dailySeries': trend_series,
-            'trendSeries': trend_series,
-            'recentTotal': recent_total,
-            'page': page,
-            'pageSize': page_size,
-            'topIps': [
-                {'ip': row['ip'], 'visits': row['visits'], 'lastVisitAt': row['last_visit_at']}
-                for row in top_rows
-            ],
-            'recentVisits': [
-                {
-                    'id': row['id'],
-                    'ip': row['ip'],
-                    'page': row['page'],
-                    'path': row['path'],
-                    'userId': row['user_id'],
-                    'user': (
-                        {'id': row['user_id'], 'name': row['user_name'], 'nickname': row['user_nickname']}
-                        if row['user_id'] else None
-                    ),
-                    'userAgent': row['user_agent'],
-                    'referer': row['referer'],
-                    'createdAt': row['created_at'],
-                }
-                for row in recent_rows
-            ],
-        })
 
     def handle_admin_ai_usage_summary(self):
         query = parse_qs(urlparse(self.path).query)
@@ -5051,39 +4661,6 @@ class TodoHandler(SimpleHTTPRequestHandler):
             feedback_limit = get_feedback_limit(conn)
         return self.write_json({'feedbackLimitPerUser': feedback_limit})
 
-    def handle_admin_registration_limit(self):
-        with get_db() as conn:
-            limit = get_registration_ip_limit(conn)
-        return self.write_json({'registrationIpLimit': limit})
-
-    def handle_admin_update_registration_limit(self):
-        admin = self.require_admin()
-        if not admin:
-            return
-        payload = self.read_json_body()
-        if payload is None:
-            return
-        limit, error = normalize_registration_ip_limit(payload)
-        if error:
-            return self.write_json({'error': error}, status=HTTPStatus.BAD_REQUEST)
-        with get_db() as conn:
-            old_limit = get_registration_ip_limit(conn)
-            detail = {'oldLimit': old_limit, 'newLimit': limit}
-            if isinstance(conn, D1GatewayConnection):
-                conn.batch([
-                    {'sql': '''INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)
-                        ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at''',
-                     'params': [REGISTRATION_IP_LIMIT_SETTING_KEY, json.dumps(limit, ensure_ascii=False), now_iso()]},
-                    self.operation_log_statement(int(admin['id']), int(admin['id']),
-                        'admin.registration_ip_limit.update', 'setting', REGISTRATION_IP_LIMIT_SETTING_KEY, detail),
-                ])
-            else:
-                set_registration_ip_limit(conn, limit)
-                self.log_operation(conn, int(admin['id']), int(admin['id']),
-                    'admin.registration_ip_limit.update', 'setting', REGISTRATION_IP_LIMIT_SETTING_KEY, detail)
-                conn.commit()
-        return self.write_json({'ok': True, 'registrationIpLimit': limit})
-
     def handle_admin_update_feedback_settings(self):
         admin = self.require_admin()
         if not admin:
@@ -5383,7 +4960,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
             ).fetchone()[0]
             rows = conn.execute(
                 '''
-                SELECT id, actor_user_id, target_user_id, action, entity_type, entity_id, detail_json, ip, created_at
+                SELECT id, actor_user_id, target_user_id, action, entity_type, entity_id, detail_json, created_at
                 FROM operation_logs
                 WHERE target_user_id = ?
                 ORDER BY created_at DESC, id DESC
@@ -6531,10 +6108,10 @@ class TodoHandler(SimpleHTTPRequestHandler):
             if is_d1:
                 conn.batch([
                     {'sql': '''INSERT INTO operation_logs
-                        (actor_user_id, target_user_id, action, entity_type, entity_id, detail_json, ip, created_at)
-                        SELECT ?, ?, ?, ?, ?, ?, ?, ?
+                        (actor_user_id, target_user_id, action, entity_type, entity_id, detail_json, created_at)
+                        SELECT ?, ?, ?, ?, ?, ?, ?
                         WHERE EXISTS (SELECT 1 FROM habits WHERE id = ? AND user_id = ? AND archived = 0)''',
-                     'params': [int(user['id']), int(user['id']), 'habit.delete', 'habit', habit_id, '{}', self.request_ip(), now, habit_id, user['id']]},
+                     'params': [int(user['id']), int(user['id']), 'habit.delete', 'habit', habit_id, '{}', now, habit_id, user['id']]},
                     {'sql': 'UPDATE habits SET archived = 1, active = 0, updated_at = ? WHERE id = ? AND user_id = ? AND archived = 0', 'params': [now, habit_id, user['id']]},
                     {'sql': 'DELETE FROM schedule_items WHERE user_id = ? AND habit_id = ? AND completed = 0', 'params': [user['id'], habit_id]},
                     {'sql': 'DELETE FROM habit_instance_exclusions WHERE user_id = ? AND habit_id = ?', 'params': [user['id'], habit_id]},
@@ -7009,11 +6586,11 @@ class TodoHandler(SimpleHTTPRequestHandler):
                 results = conn.batch([
                     {'sql': update_sql, 'params': list(update_params)},
                     {'sql': '''INSERT INTO operation_logs
-                        (actor_user_id, target_user_id, action, entity_type, entity_id, detail_json, ip, created_at)
-                        SELECT ?, ?, ?, ?, ?, ?, ?, ?
+                        (actor_user_id, target_user_id, action, entity_type, entity_id, detail_json, created_at)
+                        SELECT ?, ?, ?, ?, ?, ?, ?
                         WHERE EXISTS (SELECT 1 FROM schedule_items WHERE id = ? AND user_id = ? AND updated_at = ?)''',
                      'params': [int(user['id']), int(user['id']), action, 'schedule_item', item_id,
-                                json.dumps(detail, ensure_ascii=False), self.request_ip(), updated_at,
+                                json.dumps(detail, ensure_ascii=False), updated_at,
                                 item_id, user['id'], updated_at]},
                 ])
                 if not results or results[0].rowcount == 0:
@@ -7062,10 +6639,10 @@ class TodoHandler(SimpleHTTPRequestHandler):
                 statements.append({'sql': exclusion[0], 'params': list(exclusion[1])})
             detail = {'taskId': existing['task_id'], 'habitId': existing['habit_id'], 'date': existing['schedule_date'], 'slotLabel': existing['slot_label']}
             log_statement = {'sql': '''INSERT INTO operation_logs
-                (actor_user_id, target_user_id, action, entity_type, entity_id, detail_json, ip, created_at)
-                SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (
+                (actor_user_id, target_user_id, action, entity_type, entity_id, detail_json, created_at)
+                SELECT ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (
                     SELECT 1 FROM schedule_items WHERE id = ? AND user_id = ?
-                )''', 'params': [int(user['id']), int(user['id']), 'schedule_item.delete', 'schedule_item', item_id, json.dumps(detail, ensure_ascii=False), self.request_ip(), now_iso(), item_id, user['id']]}
+                )''', 'params': [int(user['id']), int(user['id']), 'schedule_item.delete', 'schedule_item', item_id, json.dumps(detail, ensure_ascii=False), now_iso(), item_id, user['id']]}
             if is_d1:
                 statements.append(log_statement)
             statements.append({'sql': 'DELETE FROM schedule_items WHERE id = ? AND user_id = ?', 'params': [item_id, user['id']]})
@@ -7097,54 +6674,32 @@ class TodoHandler(SimpleHTTPRequestHandler):
         name = str(payload.get('name', '')).strip()
         nickname = str(payload.get('nickname', '')).strip()
         password = str(payload.get('password', ''))
-        request_ip = self.request_ip()
-
-        # D1 has no connection transaction. Reserve the registration attempt with
-        # one conditional INSERT so concurrent requests cannot all pass the limit
-        # check before writing their log. SQLite keeps the legacy transaction path.
-        if DB_BACKEND == 'd1':
-            if not name or not nickname or not password:
-                with get_db() as conn:
-                    record_registration_attempt(conn, request_ip, nickname, 'invalid_required')
-                return self.write_json({'error': 'name, nickname and password are required'}, status=HTTPStatus.BAD_REQUEST)
-            if len(name) > 64 or len(nickname) > 32:
-                with get_db() as conn:
-                    record_registration_attempt(conn, request_ip, nickname, 'invalid_length')
-                return self.write_json({'error': 'name or nickname is too long'}, status=HTTPStatus.BAD_REQUEST)
-            if len(password) < 6:
-                with get_db() as conn:
-                    record_registration_attempt(conn, request_ip, nickname, 'invalid_password')
-                return self.write_json({'error': 'password must be at least 6 characters'}, status=HTTPStatus.BAD_REQUEST)
-            with get_db() as conn:
-                limit = get_registration_ip_limit(conn)
-                start_key = registration_ip_window_start(limit['windowHours'])
-                created_at = now_iso()
+        if not name or not nickname or not password:
+            return self.write_json(
+                {'error': 'name, nickname and password are required'},
+                status=HTTPStatus.BAD_REQUEST,
+            )
+        if len(name) > 64 or len(nickname) > 32:
+            return self.write_json(
+                {'error': 'name or nickname is too long'}, status=HTTPStatus.BAD_REQUEST,
+            )
+        if len(password) < 6:
+            return self.write_json(
+                {'error': 'password must be at least 6 characters'},
+                status=HTTPStatus.BAD_REQUEST,
+            )
+        created_at = now_iso()
+        with get_db() as conn:
+            if isinstance(conn, D1GatewayConnection):
                 user_id = secrets.randbelow(2**62 - 1) + 1
                 results = conn.batch([
                     {
                         'sql': '''INSERT INTO users
                             (id, name, nickname, password_hash, role, created_at)
                             SELECT ?, ?, ?, ?, 'student', ?
-                            WHERE (SELECT COUNT(*) FROM registration_attempt_logs
-                                   WHERE ip = ? AND created_at >= ?) < ?
-                              AND NOT EXISTS (SELECT 1 FROM users WHERE nickname = ? COLLATE NOCASE)''',
-                        'params': [user_id, name, nickname, hash_password(password), created_at,
-                                   request_ip, start_key, limit['attemptLimit'], nickname],
-                    },
-                    {
-                        'sql': '''INSERT INTO registration_attempt_logs
-                            (ip, nickname, result, user_id, created_at)
-                            SELECT ?, ?,
-                                   CASE
-                                     WHEN EXISTS (SELECT 1 FROM users WHERE id = ?) THEN 'success'
-                                     WHEN (SELECT COUNT(*) FROM registration_attempt_logs
-                                           WHERE ip = ? AND created_at >= ?) >= ? THEN 'rate_limited'
-                                     ELSE 'duplicate_nickname'
-                                   END,
-                                   CASE WHEN EXISTS (SELECT 1 FROM users WHERE id = ?) THEN ? ELSE NULL END,
-                                   ?''',
-                        'params': [request_ip, nickname[:32], user_id, request_ip, start_key,
-                                   limit['attemptLimit'], user_id, user_id, created_at],
+                            WHERE NOT EXISTS (SELECT 1 FROM users WHERE nickname = ? COLLATE NOCASE)''',
+                        'params': [user_id, name, nickname, hash_password(password),
+                                   created_at, nickname],
                     },
                     self.operation_log_statement(
                         user_id, user_id, 'auth.register', 'user', str(user_id),
@@ -7154,67 +6709,27 @@ class TodoHandler(SimpleHTTPRequestHandler):
                     ),
                 ])
                 if results[0].rowcount != 1:
-                    status = registration_ip_limit_status(conn, request_ip)
-                    if status['exceeded']:
-                        return self.write_json(registration_ip_limit_error(status), status=HTTPStatus.TOO_MANY_REQUESTS)
-                    return self.write_json({'error': 'nickname already exists'}, status=HTTPStatus.CONFLICT)
-                user = conn.execute(
-                    '''SELECT id, name, nickname, role, avatar_file, avatar_updated_at, avatar_color
-                       FROM users WHERE id = ?''',
-                    (user_id,),
-                ).fetchone()
-            return self.issue_session_response(user)
-
-        with get_db() as conn:
-            conn.execute('BEGIN IMMEDIATE')
-            limit_status = registration_ip_limit_status(conn, request_ip)
-            if limit_status['exceeded']:
-                record_registration_attempt(conn, request_ip, nickname, 'rate_limited')
-                conn.commit()
-                return self.write_json(registration_ip_limit_error(limit_status), status=HTTPStatus.TOO_MANY_REQUESTS)
-
-            if not name or not nickname or not password:
-                record_registration_attempt(conn, request_ip, nickname, 'invalid_required')
-                conn.commit()
-                return self.write_json({'error': 'name, nickname and password are required'}, status=HTTPStatus.BAD_REQUEST)
-            if len(name) > 64 or len(nickname) > 32:
-                record_registration_attempt(conn, request_ip, nickname, 'invalid_length')
-                conn.commit()
-                return self.write_json({'error': 'name or nickname is too long'}, status=HTTPStatus.BAD_REQUEST)
-            if len(password) < 6:
-                record_registration_attempt(conn, request_ip, nickname, 'invalid_password')
-                conn.commit()
-                return self.write_json({'error': 'password must be at least 6 characters'}, status=HTTPStatus.BAD_REQUEST)
-
-            existing = conn.execute('SELECT id FROM users WHERE nickname = ? COLLATE NOCASE', (nickname,)).fetchone()
-            if existing:
-                record_registration_attempt(conn, request_ip, nickname, 'duplicate_nickname')
-                conn.commit()
-                return self.write_json({'error': 'nickname already exists'}, status=HTTPStatus.CONFLICT)
-            try:
-                cursor = conn.execute(
-                    'INSERT INTO users (name, nickname, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?)',
-                    (name, nickname, hash_password(password), 'student', now_iso()),
-                )
-                user_id = cursor.lastrowid
-                self.log_operation(
-                    conn,
-                    user_id,
-                    user_id,
-                    'auth.register',
-                    'user',
-                    str(user_id),
-                    {'nickname': nickname},
-                )
-                record_registration_attempt(conn, request_ip, nickname, 'success', user_id)
-                conn.commit()
-            except sqlite3.IntegrityError:
-                record_registration_attempt(conn, request_ip, nickname, 'duplicate_nickname')
-                conn.commit()
-                return self.write_json({'error': 'nickname already exists'}, status=HTTPStatus.CONFLICT)
+                    return self.write_json(
+                        {'error': 'nickname already exists'}, status=HTTPStatus.CONFLICT,
+                    )
+            else:
+                try:
+                    cursor = conn.execute(
+                        '''INSERT INTO users (name, nickname, password_hash, role, created_at)
+                           VALUES (?, ?, ?, 'student', ?)''',
+                        (name, nickname, hash_password(password), created_at),
+                    )
+                    user_id = cursor.lastrowid
+                    self.log_operation(conn, user_id, user_id, 'auth.register',
+                                       'user', str(user_id), {'nickname': nickname})
+                    conn.commit()
+                except sqlite3.IntegrityError:
+                    return self.write_json(
+                        {'error': 'nickname already exists'}, status=HTTPStatus.CONFLICT,
+                    )
             user = conn.execute(
-                'SELECT id, name, nickname, role, avatar_file, avatar_updated_at, avatar_color FROM users WHERE id = ?',
-                (user_id,),
+                '''SELECT id, name, nickname, role, avatar_file, avatar_updated_at, avatar_color
+                   FROM users WHERE id = ?''', (user_id,),
             ).fetchone()
         return self.issue_session_response(user)
 
@@ -7600,6 +7115,24 @@ class TodoHandler(SimpleHTTPRequestHandler):
         return payload
 
     def end_headers(self):
+        sub = getattr(self, '_analytics_user_sub', '')
+        if not sub:
+            raw_token = self.request_cookie(SESSION_COOKIE_NAME)
+            if raw_token:
+                try:
+                    with get_db() as conn:
+                        row = conn.execute(
+                            '''SELECT sessions.auth_sub FROM sessions JOIN users
+                               ON users.id=sessions.user_id WHERE sessions.token=?
+                               AND sessions.expires_at>? AND users.is_active=1''',
+                            (self.token_digest(raw_token), int(time.time())),
+                        ).fetchone()
+                    sub = str(row['auth_sub'] or '') if row else ''
+                except Exception:
+                    # Analytics must never prevent a normal application response.
+                    sub = ''
+        if sub:
+            self.send_header('X-Nethub-User-Sub', sub)
         self.send_header('X-Content-Type-Options', 'nosniff')
         self.send_header('Referrer-Policy', 'same-origin')
         self.send_header('X-Frame-Options', 'DENY')

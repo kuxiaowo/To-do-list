@@ -372,79 +372,17 @@ class ServerRegressionTests(unittest.TestCase):
             else:
                 os.environ['MANAGEBAC_COOKIE_ENCRYPTION_KEY'] = original_key
 
-    def test_registration_ip_attempt_limit_and_admin_setting(self):
-        admin_token, admin = self.register_user('registration-limit-admin')
-        self.make_admin(admin['id'])
-
-        status, payload = self.request('GET', '/api/admin/registration-limit', token=admin_token)
-        self.assertEqual(status, 200, payload)
-        self.assertEqual(payload['registrationIpLimit']['windowHours'], 24)
-        self.assertEqual(payload['registrationIpLimit']['attemptLimit'], 5)
-
-        headers = {'X-Forwarded-For': '203.0.113.24'}
-        for index in range(5):
-            status, payload = self.request('POST', '/api/auth/register', {
-                'name': f'Limited User {index}',
-                'nickname': f'limited-user-{index}',
-                'password': 'secret123',
-            }, extra_headers=headers)
-            self.assertEqual(status, 200, payload)
-
+    def test_registration_does_not_create_ip_attempt_records(self):
+        self.register_user('registration-user')
         status, payload = self.request('POST', '/api/auth/register', {
-            'name': 'Blocked User',
-            'nickname': 'limited-user-blocked',
-            'password': 'secret123',
-        }, extra_headers=headers)
-        self.assertEqual(status, 429, payload)
-        self.assertEqual(payload['error'], 'registration ip limit exceeded')
-        self.assertEqual(payload['attemptLimit'], 5)
-        self.assertEqual(payload['currentAttemptCount'], 5)
-
-        status, payload = self.request('PUT', '/api/admin/registration-limit', {
-            'windowHours': 24,
-            'attemptLimit': 7,
-        }, token=admin_token)
+            'name': 'Another User', 'nickname': 'another-user', 'password': 'secret123',
+        }, extra_headers={'X-Forwarded-For': '203.0.113.24'})
         self.assertEqual(status, 200, payload)
-        self.assertEqual(payload['registrationIpLimit']['attemptLimit'], 7)
-
-        status, payload = self.request('POST', '/api/auth/register', {
-            'name': 'Allowed User',
-            'nickname': 'limited-user-allowed',
-            'password': 'secret123',
-        }, extra_headers=headers)
-        self.assertEqual(status, 200, payload)
-
-        status, payload = self.request('PUT', '/api/admin/registration-limit', {
-            'windowHours': 24,
-            'attemptLimit': 2,
-        }, token=admin_token)
-        self.assertEqual(status, 200, payload)
-        invalid_headers = {'X-Forwarded-For': '203.0.113.25'}
-        for index in range(2):
-            status, payload = self.request('POST', '/api/auth/register', {
-                'name': f'Invalid User {index}',
-                'nickname': f'invalid-limited-user-{index}',
-                'password': '123',
-            }, extra_headers=invalid_headers)
-            self.assertEqual(status, 400, payload)
-        status, payload = self.request('POST', '/api/auth/register', {
-            'name': 'Still Blocked',
-            'nickname': 'invalid-limited-user-blocked',
-            'password': 'secret123',
-        }, extra_headers=invalid_headers)
-        self.assertEqual(status, 429, payload)
-
         with server.get_db() as conn:
-            main_ip_attempts = conn.execute(
-                'SELECT COUNT(*) FROM registration_attempt_logs WHERE ip = ?',
-                ('203.0.113.24',),
-            ).fetchone()[0]
-            invalid_ip_attempts = conn.execute(
-                'SELECT COUNT(*) FROM registration_attempt_logs WHERE ip = ?',
-                ('203.0.113.25',),
-            ).fetchone()[0]
-        self.assertEqual(main_ip_attempts, 7)
-        self.assertEqual(invalid_ip_attempts, 3)
+            tables = {row['name'] for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()}
+        self.assertNotIn('registration_attempt_logs', tables)
 
     def test_task_payload_rejects_invalid_backend_only_values(self):
         token, _ = self.register_user('task-validation')
@@ -500,7 +438,7 @@ class ServerRegressionTests(unittest.TestCase):
         try:
             return conn.execute(
                 '''
-                SELECT user_id, source, object_key, filename, ip, created_at
+                SELECT user_id, source, object_key, filename, created_at
                 FROM installer_download_logs
                 ORDER BY id ASC
                 '''
@@ -2154,35 +2092,21 @@ class ServerRegressionTests(unittest.TestCase):
         self.assertEqual(status, 200, body)
         self.assertEqual(calls, ['secret123'])
 
-    def test_operation_logs_use_forwarded_ip_from_trusted_proxy(self):
+    def test_operation_logs_do_not_store_forwarded_ip(self):
         self.register_user('proxy-user')
-
-        status, body = self.request(
-            'POST',
-            '/api/auth/login',
-            {
-                'nickname': 'proxy-user',
-                'password': 'secret123',
-            },
-            extra_headers={'X-Forwarded-For': '203.0.113.9, 10.0.0.5'},
-        )
-
+        status, body = self.request('POST', '/api/auth/login', {
+            'nickname': 'proxy-user', 'password': 'secret123',
+        }, extra_headers={'X-Forwarded-For': '203.0.113.9'})
         self.assertEqual(status, 200, body)
-        conn = server.get_db()
-        try:
+        with server.get_db() as conn:
             row = conn.execute(
-                '''
-                SELECT ip
-                FROM operation_logs
-                WHERE action = 'auth.login'
-                ORDER BY id DESC
-                LIMIT 1
-                '''
+                "SELECT action FROM operation_logs WHERE action='auth.login' ORDER BY id DESC LIMIT 1"
             ).fetchone()
-        finally:
-            conn.close()
-        self.assertIsNotNone(row)
-        self.assertEqual(row['ip'], '203.0.113.9')
+            columns = {item['name'] for item in conn.execute(
+                'PRAGMA table_info(operation_logs)'
+            ).fetchall()}
+        self.assertEqual(row['action'], 'auth.login')
+        self.assertNotIn('ip', columns)
 
     def test_local_avatar_write_endpoints_are_gone(self):
         token, user = self.register_user('avatar-user')
@@ -2571,17 +2495,12 @@ class ServerRegressionTests(unittest.TestCase):
         self.assertIn('.installer-download-line', style_css)
         self.assertIn('.installer-download-limit-fields', style_css)
 
-    def test_admin_security_settings_frontend_scaffold(self):
+    def test_admin_links_to_central_analytics(self):
         index_html = INDEX_HTML_PATH.read_text(encoding='utf-8')
         app_js = APP_JS_PATH.read_text(encoding='utf-8')
-
-        self.assertIn("adminSection === 'security'", index_html)
-        self.assertIn("switchAdminSection('security')", index_html)
-        self.assertIn('adminRegistrationIpLimit', app_js)
-        self.assertIn('loadAdminSecuritySettings', app_js)
-        self.assertIn('saveAdminRegistrationIpLimit', index_html)
-        self.assertIn("`${ADMIN_API}/registration-limit`", app_js)
-        self.assertIn("'admin.registration_ip_limit.update'", app_js)
+        self.assertIn('https://auth.nethub.wiki/admin/analytics', index_html)
+        self.assertNotIn("adminSection === 'traffic'", index_html)
+        self.assertNotIn('VISITS_API', app_js)
 
 
 if __name__ == '__main__':
