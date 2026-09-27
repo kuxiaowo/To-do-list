@@ -7,6 +7,7 @@ with --apply only after the Accounts index has been checked for one full cycle.
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
@@ -24,7 +25,19 @@ def existing_tables(conn) -> set[str]:
 
 
 def columns(conn, table: str) -> set[str]:
-    return {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    try:
+        return {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    except Exception:
+        # The production D1 gateway deliberately rejects PRAGMA.  Its
+        # sqlite_master view is read-only and sufficient for this migration.
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        ).fetchone()
+        definition = str(row["sql"] or "") if row else ""
+        return {
+            match.group(1).lower()
+            for match in re.finditer(r"(?im)(?:^|,)\s*[\"'`]?([a-z_][a-z0-9_]*)[\"'`]?\s+", definition)
+        }
 
 
 def operations(conn) -> list[str]:
