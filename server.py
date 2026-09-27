@@ -306,7 +306,7 @@ def configure_db_connection(conn: sqlite3.Connection, *, enable_wal: bool = Fals
     # configured by the gateway and must never touch a local SQLite file.
     if DB_BACKEND != 'sqlite':
         return
-    conn.execute('PRAGMA synchronous = NORMAL')
+    conn.execute('PRAGMA synchronous = FULL')
     conn.execute('PRAGMA foreign_keys = ON')
     conn.execute(f'PRAGMA busy_timeout = {DB_BUSY_TIMEOUT_MS}')
 

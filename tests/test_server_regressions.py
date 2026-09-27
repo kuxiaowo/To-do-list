@@ -1933,7 +1933,7 @@ class ServerRegressionTests(unittest.TestCase):
     def test_database_connections_use_wal_and_performance_pragmas(self):
         with server.get_db() as conn:
             self.assertEqual(conn.execute('PRAGMA journal_mode').fetchone()[0], 'wal')
-            self.assertEqual(conn.execute('PRAGMA synchronous').fetchone()[0], 1)
+            self.assertEqual(conn.execute('PRAGMA synchronous').fetchone()[0], 2)
             self.assertEqual(
                 conn.execute('PRAGMA busy_timeout').fetchone()[0],
                 server.DB_BUSY_TIMEOUT_MS,
