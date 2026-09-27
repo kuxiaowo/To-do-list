@@ -109,7 +109,8 @@ def load_dotenv(path: Path | None = None, *, override: bool = False) -> None:
 load_dotenv()
 
 DATA_DIR = BASE_DIR / 'data'
-DB_PATH = DATA_DIR / 'todo-list.db'
+_configured_db_path = Path(os.environ.get('TODO_DB_PATH', 'data/todo-list.db')).expanduser()
+DB_PATH = _configured_db_path if _configured_db_path.is_absolute() else BASE_DIR / _configured_db_path
 DB_BACKEND = os.environ.get('TODO_DB_BACKEND', 'sqlite').strip().lower()
 D1_GATEWAY_URL = os.environ.get('TODO_D1_GATEWAY_URL', '').strip()
 D1_GATEWAY_SECRET = os.environ.get('TODO_D1_GATEWAY_SECRET', '').strip()
@@ -317,6 +318,7 @@ def init_db() -> None:
         avatar_dir().mkdir(parents=True, exist_ok=True)
         return
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     avatar_dir().mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(
         DB_PATH,
