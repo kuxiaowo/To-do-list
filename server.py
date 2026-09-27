@@ -141,14 +141,11 @@ DEFAULT_FEEDBACK_LIMIT_PER_USER = 10
 FEEDBACK_LIMIT_SETTING_KEY = 'feedback_limit_per_user'
 AI_TOKEN_LIMIT_SETTING_KEY = 'ai_token_limit_global'
 INSTALLER_DOWNLOAD_LIMIT_SETTING_KEY = 'managebac_installer_download_limit_global'
-REGISTRATION_IP_LIMIT_SETTING_KEY = 'registration_ip_attempt_limit'
 DEFAULT_AI_TOKEN_WINDOW_HOURS = 24
 DEFAULT_AI_INPUT_TOKEN_LIMIT = 200_000
 DEFAULT_AI_OUTPUT_TOKEN_LIMIT = 50_000
 DEFAULT_INSTALLER_DOWNLOAD_WINDOW_HOURS = 24
 DEFAULT_INSTALLER_DOWNLOAD_LINK_LIMIT = 5
-DEFAULT_REGISTRATION_IP_WINDOW_HOURS = 24
-DEFAULT_REGISTRATION_IP_ATTEMPT_LIMIT = 5
 TRUSTED_PROXY_IPS = {'127.0.0.1', '::1'}
 DEEPSEEK_API_URL = 'https://api.deepseek.com/chat/completions'
 DEFAULT_DEEPSEEK_MODEL = 'deepseek-v4-flash'
@@ -697,20 +694,6 @@ def init_db() -> None:
                 json.dumps({
                     'windowHours': DEFAULT_INSTALLER_DOWNLOAD_WINDOW_HOURS,
                     'linkLimit': DEFAULT_INSTALLER_DOWNLOAD_LINK_LIMIT,
-                }, ensure_ascii=False),
-                now_iso(),
-            ),
-        )
-        conn.execute(
-            '''
-            INSERT OR IGNORE INTO app_settings (key, value, updated_at)
-            VALUES (?, ?, ?)
-            ''',
-            (
-                REGISTRATION_IP_LIMIT_SETTING_KEY,
-                json.dumps({
-                    'windowHours': DEFAULT_REGISTRATION_IP_WINDOW_HOURS,
-                    'attemptLimit': DEFAULT_REGISTRATION_IP_ATTEMPT_LIMIT,
                 }, ensure_ascii=False),
                 now_iso(),
             ),
