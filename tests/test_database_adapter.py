@@ -146,7 +146,7 @@ class D1GatewayContractTests(unittest.TestCase):
         login_start = source.index("\n    def handle_auth_login(", register_start)
         register = source[register_start:login_start]
         self.assertIn("results = conn.batch([", register)
-        self.assertNotIn("INSERT INTO registration_attempt_logs", register)
+        self.assertIn("INSERT INTO registration_attempt_logs", register)
         self.assertIn("operation_log_statement", register)
         self.assertNotIn("reserved = conn.execute", register)
 

@@ -8,6 +8,7 @@ const SCHEDULE_DAY_SLOTS_API = '/api/schedule-day-slots';
 const HABITS_API = '/api/habits';
 const ADMIN_API = '/api/admin';
 const FEEDBACK_API = '/api/feedback';
+const VISITS_API = '/api/visits';
 const AI_CHAT_STREAM_API = '/api/ai/chat-stream';
 const MANAGEBAC_API_BASE = '/api/managebac';
 const MANAGEBAC_HELPER_BASE = 'http://127.0.0.1:27654';
@@ -291,12 +292,37 @@ createApp({
       adminFeedbackReplyVisible: false,
       adminFeedbackActive: null,
       adminFeedbackReply: '',
+      adminRegistrationIpLimit: {
+        windowHours: 24,
+        attemptLimit: 5
+      },
+      adminRegistrationIpLimitDraft: {
+        windowHours: 24,
+        attemptLimit: 5
+      },
+      adminTrafficView: '7d',
+      adminTrafficUserFilter: 'all',
+      adminTrafficHoverPoint: null,
+      adminTrafficRecentTotal: 0,
+      adminTrafficRecentPage: 1,
+      adminTrafficRecentPageSize: 50,
       adminTrafficViewOptions: [
         { value: '30d', label: '30天' },
         { value: '7d', label: '7天' },
         { value: '1d', label: '1天' },
         { value: '6h', label: '6小时' }
       ],
+      adminTraffic: {
+        seriesUnit: 'day',
+        totalVisits: 0,
+        todayVisits: 0,
+        uniqueIps: 0,
+        todayUniqueIps: 0,
+        trendSeries: [],
+        dailySeries: [],
+        topIps: [],
+        recentVisits: []
+      },
       adminAiUsageView: '7d',
       adminAiUsageHoverPoint: null,
       adminAiUsageUsersTotal: 0,
@@ -454,6 +480,80 @@ createApp({
     paginatedAdminUsers() {
       const start = (this.adminUsersPage - 1) * this.adminUsersPageSize;
       return this.adminUsers.slice(start, start + this.adminUsersPageSize);
+    },
+    trafficMetricCards() {
+      return [
+        { label: '总访问', value: this.adminTraffic.totalVisits },
+        { label: '今日访问', value: this.adminTraffic.todayVisits },
+        { label: '独立 IP', value: this.adminTraffic.uniqueIps },
+        { label: '今日独立 IP', value: this.adminTraffic.todayUniqueIps }
+      ];
+    },
+    trafficSeries() {
+      const series = Array.isArray(this.adminTraffic.trendSeries)
+        ? this.adminTraffic.trendSeries
+        : this.adminTraffic.dailySeries;
+      return Array.isArray(series) ? series : [];
+    },
+    trafficChartTitle() {
+      const labels = {
+        '30d': '近 30 天访问趋势',
+        '7d': '近 7 天访问趋势',
+        '1d': '近 24 小时访问趋势',
+        '6h': '近 6 小时访问趋势'
+      };
+      return labels[this.adminTrafficView] || '访问趋势';
+    },
+    trafficTopIpTitle() {
+      const labels = {
+        '30d': '近 30 天 Top IP',
+        '7d': '近 7 天 Top IP',
+        '1d': '近 24 小时 Top IP',
+        '6h': '近 6 小时 Top IP'
+      };
+      return labels[this.adminTrafficView] || 'Top IP';
+    },
+    trafficChartPoints() {
+      const series = this.trafficSeries;
+      if (!series.length) return '';
+      return this.trafficChartPointItems.map(point => `${point.x.toFixed(2)},${point.y.toFixed(2)}`).join(' ');
+    },
+    trafficChartPointItems() {
+      const series = this.trafficSeries;
+      if (!series.length) return [];
+      const maxVisits = Math.max(1, ...series.map(item => Number(item.visits || 0)));
+      return series.map((item, index) => {
+        const x = series.length === 1 ? 50 : (index / (series.length - 1)) * 100;
+        const y = 92 - (Number(item.visits || 0) / maxVisits) * 76;
+        return {
+          ...item,
+          x,
+          y,
+          visits: Number(item.visits || 0),
+          uniqueIps: Number(item.uniqueIps || 0)
+        };
+      });
+    },
+    trafficChartLabels() {
+      const series = this.trafficSeries;
+      if (!series.length) return [];
+      if (this.adminTrafficView === '6h' || this.adminTrafficView === '7d') return series;
+      const step = this.adminTrafficView === '1d' ? 3 : 5;
+      const labels = series.filter((item, index) => index % step === 0);
+      const last = series[series.length - 1];
+      if (labels[labels.length - 1] !== last) labels.push(last);
+      return labels;
+    },
+    trafficMaxVisits() {
+      const series = this.trafficSeries;
+      return Math.max(0, ...series.map(item => Number(item.visits || 0)));
+    },
+    trafficHoverStyle() {
+      if (!this.adminTrafficHoverPoint) return {};
+      return {
+        left: `${this.adminTrafficHoverPoint.x}%`,
+        top: `${this.adminTrafficHoverPoint.y}%`
+      };
     },
     aiUsageMetricCards() {
       return [
@@ -1009,6 +1109,7 @@ createApp({
       }
       this.accountMenuOpen = true;
     }
+    await this.recordVisit('home');
     await this.loadSubjectTemplate();
     await this.loadScheduleConfig();
     await this.loadTasks();
@@ -2304,8 +2405,11 @@ createApp({
       if (this.adminSection === 'logs') await this.loadAdminLogs(1);
       if (this.adminSection === 'timeline') await this.loadAdminTimeline();
       if (this.adminSection === 'feedback') await this.loadAdminFeedback(1);
+      if (this.adminSection === 'security') await this.loadAdminSecuritySettings();
+      if (this.adminSection === 'traffic') await this.loadAdminTraffic();
       if (this.adminSection === 'aiUsage') await this.loadAdminAiUsage();
       if (this.adminSection === 'installerDownloads') await this.loadAdminInstallerDownloads();
+      await this.recordVisit('admin');
     },
     async exitAdminMode() {
       this.adminMode = false;
@@ -2322,8 +2426,23 @@ createApp({
       if (section === 'logs') await this.loadAdminLogs(1);
       if (section === 'timeline') await this.loadAdminTimeline();
       if (section === 'feedback') await this.loadAdminFeedback(1);
+      if (section === 'security') await this.loadAdminSecuritySettings();
+      if (section === 'traffic') await this.loadAdminTraffic();
       if (section === 'aiUsage') await this.loadAdminAiUsage();
       if (section === 'installerDownloads') await this.loadAdminInstallerDownloads();
+    },
+    async recordVisit(page) {
+      try {
+        await this.apiJson(VISITS_API, {
+          method: 'POST',
+          body: JSON.stringify({
+            page,
+            path: `${window.location.pathname}${window.location.search}#${page}`
+          })
+        });
+      } catch (error) {
+        console.warn('访问记录上报失败：', error);
+      }
     },
     async loadAdminUsers() {
       if (!this.isAdmin) return;
@@ -2459,6 +2578,119 @@ createApp({
       } finally {
         this.adminLoading = false;
       }
+    },
+    normalizeRegistrationIpLimitDraft(limit) {
+      const windowHours = Number(limit && limit.windowHours);
+      const attemptLimit = Number(limit && limit.attemptLimit);
+      if (!Number.isInteger(windowHours) || windowHours < 1 || windowHours > 8760) {
+        throw new Error('窗口小时数必须是 1 到 8760 之间的整数。');
+      }
+      if (!Number.isInteger(attemptLimit) || attemptLimit < 1 || attemptLimit > 1000000) {
+        throw new Error('尝试次数上限必须是 1 到 1000000 之间的整数。');
+      }
+      return { windowHours, attemptLimit };
+    },
+    registrationIpLimitDraftFromLimit(limit) {
+      return {
+        windowHours: Number(limit && limit.windowHours ? limit.windowHours : 24),
+        attemptLimit: Number(limit && limit.attemptLimit ? limit.attemptLimit : 5)
+      };
+    },
+    registrationLimitText(limit) {
+      const safe = this.registrationIpLimitDraftFromLimit(limit);
+      return `${safe.windowHours} 小时 · ${this.formatTokenCount(safe.attemptLimit)} 次`;
+    },
+    async loadAdminSecuritySettings() {
+      if (!this.isAdmin) return;
+      this.adminLoading = true;
+      try {
+        const payload = await this.apiJson(`${ADMIN_API}/registration-limit`, { cache: 'no-store' });
+        const limit = this.registrationIpLimitDraftFromLimit(payload.registrationIpLimit);
+        this.adminRegistrationIpLimit = limit;
+        this.adminRegistrationIpLimitDraft = this.registrationIpLimitDraftFromLimit(limit);
+      } catch (error) {
+        ElementPlus.ElMessage.error(`安全设置读取失败：${error.message}`);
+      } finally {
+        this.adminLoading = false;
+      }
+    },
+    async saveAdminRegistrationIpLimit() {
+      if (!this.isAdmin) return;
+      let limit;
+      try {
+        limit = this.normalizeRegistrationIpLimitDraft(this.adminRegistrationIpLimitDraft);
+      } catch (error) {
+        ElementPlus.ElMessage.warning(error.message);
+        return;
+      }
+      this.adminLoading = true;
+      try {
+        const payload = await this.apiJson(`${ADMIN_API}/registration-limit`, {
+          method: 'PUT',
+          body: JSON.stringify(limit)
+        });
+        const saved = this.registrationIpLimitDraftFromLimit(payload.registrationIpLimit || limit);
+        this.adminRegistrationIpLimit = saved;
+        this.adminRegistrationIpLimitDraft = this.registrationIpLimitDraftFromLimit(saved);
+        ElementPlus.ElMessage.success('注册限制已保存。');
+      } catch (error) {
+        ElementPlus.ElMessage.error(`注册限制保存失败：${error.message}`);
+      } finally {
+        this.adminLoading = false;
+      }
+    },
+    async loadAdminTraffic(page = this.adminTrafficRecentPage) {
+      if (!this.isAdmin) return;
+      const nextPage = Number(page);
+      const safePage = Number.isFinite(nextPage) && nextPage > 0 ? Math.floor(nextPage) : this.adminTrafficRecentPage;
+      this.adminLoading = true;
+      try {
+        const params = new URLSearchParams({
+          view: this.adminTrafficView,
+          page: String(safePage),
+          pageSize: String(this.adminTrafficRecentPageSize)
+        });
+        if (this.adminTrafficUserFilter && this.adminTrafficUserFilter !== 'all') {
+          params.set('userId', this.adminTrafficUserFilter);
+        }
+        const url = `${ADMIN_API}/traffic/summary?${params.toString()}`;
+        const payload = await this.apiJson(url, { cache: 'no-store' });
+        this.adminTrafficUserFilter = payload.userFilter || this.adminTrafficUserFilter || 'all';
+        this.adminTraffic = {
+          seriesUnit: payload.seriesUnit || 'day',
+          totalVisits: Number(payload.totalVisits || 0),
+          todayVisits: Number(payload.todayVisits || 0),
+          uniqueIps: Number(payload.uniqueIps || 0),
+          todayUniqueIps: Number(payload.todayUniqueIps || 0),
+          trendSeries: Array.isArray(payload.trendSeries) ? payload.trendSeries : [],
+          dailySeries: Array.isArray(payload.dailySeries) ? payload.dailySeries : [],
+          topIps: Array.isArray(payload.topIps) ? payload.topIps : [],
+          recentVisits: Array.isArray(payload.recentVisits) ? payload.recentVisits : []
+        };
+        this.adminTrafficRecentTotal = Number(payload.recentTotal || 0);
+        this.adminTrafficRecentPage = Number(payload.page || safePage);
+      } catch (error) {
+        ElementPlus.ElMessage.error(`流量统计读取失败：${error.message}`);
+      } finally {
+        this.adminLoading = false;
+      }
+    },
+    async switchAdminTrafficView(view) {
+      if (view === this.adminTrafficView) return;
+      this.adminTrafficView = view;
+      this.adminTrafficHoverPoint = null;
+      await this.loadAdminTraffic(this.adminTrafficRecentPage);
+    },
+    async handleAdminTrafficUserFilterChange() {
+      this.adminTrafficHoverPoint = null;
+      this.adminTrafficRecentPage = 1;
+      await this.loadAdminTraffic(1);
+    },
+    showTrafficPoint(point) {
+      this.adminTrafficHoverPoint = point;
+    },
+    hideTrafficPoint() {
+      this.adminTrafficHoverPoint = null;
     },
     normalizeAiLimitDraft(limit) {
       const windowHours = Number(limit && limit.windowHours);
@@ -3426,6 +3658,24 @@ createApp({
       this.adminFeedbackReplyVisible = false;
       this.adminFeedbackActive = null;
       this.adminFeedbackReply = '';
+      this.adminRegistrationIpLimit = { windowHours: 24, attemptLimit: 5 };
+      this.adminRegistrationIpLimitDraft = { windowHours: 24, attemptLimit: 5 };
+      this.adminTrafficView = '7d';
+      this.adminTrafficUserFilter = 'all';
+      this.adminTrafficHoverPoint = null;
+      this.adminTrafficRecentTotal = 0;
+      this.adminTrafficRecentPage = 1;
+      this.adminTraffic = {
+        seriesUnit: 'day',
+        totalVisits: 0,
+        todayVisits: 0,
+        uniqueIps: 0,
+        todayUniqueIps: 0,
+        trendSeries: [],
+        dailySeries: [],
+        topIps: [],
+        recentVisits: []
+      };
       this.adminAiUsageView = '7d';
       this.adminAiUsageHoverPoint = null;
       this.adminAiUsageUsersTotal = 0;
