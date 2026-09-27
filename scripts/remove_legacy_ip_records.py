@@ -13,7 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from server import get_db  # noqa: E402
+from server import DB_BACKEND, get_db  # noqa: E402
 
 
 def existing_tables(conn) -> set[str]:
@@ -42,6 +42,21 @@ def columns(conn, table: str) -> set[str]:
 
 def operations(conn) -> list[str]:
     tables = existing_tables(conn)
+    if DB_BACKEND == "d1":
+        # The runtime gateway intentionally rejects DDL.  Remove every
+        # legacy value now; a later Wrangler migration can drop the columns.
+        result = []
+        if "visit_logs" in tables:
+            result.append("DELETE FROM visit_logs")
+        if "registration_attempt_logs" in tables:
+            result.append("DELETE FROM registration_attempt_logs")
+        if "operation_logs" in tables and "ip" in columns(conn, "operation_logs"):
+            result.append("UPDATE operation_logs SET ip='' WHERE ip IS NOT NULL")
+        if "installer_download_logs" in tables and "ip" in columns(conn, "installer_download_logs"):
+            result.append("UPDATE installer_download_logs SET ip='' WHERE ip IS NOT NULL")
+        if "app_settings" in tables:
+            result.append("DELETE FROM app_settings WHERE key='registration_ip_attempt_limit'")
+        return result
     result = []
     for table in ("visit_logs", "registration_attempt_logs"):
         if table in tables:
