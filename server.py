@@ -3375,6 +3375,7 @@ class TodoHandler(SimpleHTTPRequestHandler):
                     (now + SESSION_TTL_SECONDS, token, refresh_before),
                 )
                 conn.commit()
+            self._analytics_user_sub = str(row['auth_sub'] or '')
             return row
 
     def require_user(self):
@@ -7600,6 +7601,25 @@ class TodoHandler(SimpleHTTPRequestHandler):
         return payload
 
     def end_headers(self):
+        sub = getattr(self, '_analytics_user_sub', '')
+        if not sub:
+            raw_token = self.request_cookie(SESSION_COOKIE_NAME)
+            if raw_token:
+                try:
+                    with get_db() as conn:
+                        row = conn.execute(
+                            '''SELECT COALESCE(NULLIF(sessions.auth_sub,''), users.auth_sub) AS auth_sub
+                               FROM sessions JOIN users ON users.id=sessions.user_id
+                               WHERE sessions.token=? AND sessions.expires_at>?
+                               AND users.is_active=1''',
+                            (self.token_digest(raw_token), int(time.time())),
+                        ).fetchone()
+                    sub = str(row['auth_sub'] or '') if row else ''
+                except Exception:
+                    # Telemetry must not interrupt a normal response.
+                    sub = ''
+        if sub:
+            self.send_header('X-Nethub-User-Sub', sub)
         self.send_header('X-Content-Type-Options', 'nosniff')
         self.send_header('Referrer-Policy', 'same-origin')
         self.send_header('X-Frame-Options', 'DENY')

@@ -27,6 +27,17 @@ STYLE_CSS_PATH = WEB_DIR / 'style.css'
 
 
 class ServerRegressionTests(unittest.TestCase):
+    def test_authenticated_response_exposes_accounts_subject_to_proxy(self):
+        token, user = self.register_user('analytics-subject')
+        subject = '11111111-2222-3333-4444-555555555555'
+        with server.get_db() as conn:
+            conn.execute('UPDATE users SET auth_sub=? WHERE id=?', (subject, user['id']))
+            conn.execute('UPDATE sessions SET auth_sub=? WHERE user_id=?', (subject, user['id']))
+            conn.commit()
+        status, headers, _ = self.raw_request('GET', '/api/auth/me', token=token)
+        self.assertEqual(status, 200)
+        self.assertEqual(headers.get('X-Nethub-User-Sub'), subject)
+
     def setUp(self):
         self.original_data_dir = server.DATA_DIR
         self.original_db_path = server.DB_PATH
