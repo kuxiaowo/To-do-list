@@ -2262,7 +2262,7 @@ class ServerRegressionTests(unittest.TestCase):
         self.assertIn(
             'window.location.replace(`/auth/login?prompt=none&next=${next}`)', app_js
         )
-        self.assertIn('./app.js?v=auth-return-20260906-1', index_html)
+        self.assertIn('./app.js?v=turnstile1', index_html)
 
     def test_ai_frontend_explains_pending_task_placement(self):
         index_html = INDEX_HTML_PATH.read_text(encoding='utf-8')

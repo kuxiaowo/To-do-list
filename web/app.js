@@ -53,6 +53,56 @@ function currentReturnPath() {
   return `${window.location.pathname}${window.location.search}${window.location.hash}`;
 }
 
+let turnstileScriptPromise;
+let turnstileSiteKeyPromise;
+
+async function getTurnstileToken(action) {
+  if (!turnstileSiteKeyPromise) {
+    turnstileSiteKeyPromise = fetch('/api/turnstile/config')
+      .then((response) => response.ok ? response.json() : Promise.reject(new Error('人机验证暂不可用')))
+      .then((config) => config.siteKey)
+      .catch((error) => { turnstileSiteKeyPromise = null; throw error; });
+  }
+  const siteKey = await turnstileSiteKeyPromise;
+  if (!siteKey) throw new Error('人机验证暂不可用');
+  if (!turnstileScriptPromise) {
+    turnstileScriptPromise = new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+      script.async = true;
+      script.onload = resolve;
+      script.onerror = () => reject(new Error('人机验证组件加载失败'));
+      document.head.append(script);
+    }).catch((error) => { turnstileScriptPromise = null; throw error; });
+  }
+  await turnstileScriptPromise;
+  return new Promise((resolve, reject) => {
+    const host = document.createElement('div');
+    document.body.append(host);
+    let widgetId;
+    let settled = false;
+    const finish = (token, error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (widgetId !== undefined) window.turnstile.remove(widgetId);
+      host.remove();
+      if (error) reject(new Error(error));
+      else resolve(token);
+    };
+    const timer = setTimeout(() => finish(null, '人机验证超时，请重试'), 120000);
+    try {
+      widgetId = window.turnstile.render(host, {
+        sitekey: siteKey, action, size: 'invisible', execution: 'execute',
+        callback: (token) => finish(token),
+        'error-callback': () => finish(null, '人机验证失败，请重试'),
+        'expired-callback': () => finish(null, '人机验证已过期，请重试'),
+      });
+      window.turnstile.execute(widgetId);
+    } catch { finish(null, '人机验证组件无法启动，请重试'); }
+  });
+}
+
 const DEFAULT_APP_SETTINGS = {
   aiEnabled: true,
   showHabitPool: true,
@@ -3362,9 +3412,10 @@ createApp({
       }
       this.feedbackLoading = true;
       try {
+        const turnstileToken = await getTurnstileToken('feedback');
         await this.apiJson(FEEDBACK_API, {
           method: 'POST',
-          body: JSON.stringify({ content })
+          body: JSON.stringify({ content, turnstileToken })
         });
         this.feedbackForm.content = '';
         await this.loadFeedback();

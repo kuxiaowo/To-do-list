@@ -119,6 +119,39 @@ HOST = os.environ.get('TODO_HOST', '127.0.0.1')
 PORT = int(os.environ.get('TODO_PORT', '8092'))
 HTTP_MAX_WORKERS = max(1, int(os.environ.get('TODO_HTTP_MAX_WORKERS', '32')))
 PUBLIC_URL = os.environ.get('TODO_PUBLIC_URL', 'https://todolist.nethub.wiki').rstrip('/')
+TURNSTILE_SITE_KEY = os.environ.get('TURNSTILE_SITE_KEY', '').strip()
+TURNSTILE_SECRET_KEY = os.environ.get('TURNSTILE_SECRET_KEY', '').strip()
+
+
+class TurnstileUnavailable(Exception):
+    pass
+
+
+def verify_turnstile(token: str, action: str) -> bool:
+    if not token or len(token) > 2048:
+        return False
+    if not TURNSTILE_SECRET_KEY:
+        raise TurnstileUnavailable
+    body = urlencode({
+        'secret': TURNSTILE_SECRET_KEY,
+        'response': token,
+    }).encode('ascii')
+    submission = urllib.request.Request(
+        'https://challenges.cloudflare.com/turnstile/v0/siteverify',
+        data=body,
+        headers={'Content-Type': 'application/x-www-form-urlencoded'},
+        method='POST',
+    )
+    try:
+        with urllib.request.urlopen(submission, timeout=4) as response:
+            result = json.load(response)
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ValueError) as exc:
+        raise TurnstileUnavailable from exc
+    return (
+        result.get('success') is True
+        and result.get('hostname') == urlparse(PUBLIC_URL).hostname
+        and result.get('action') == action
+    )
 ACCOUNTS_ISSUER = os.environ.get('ACCOUNTS_ISSUER', 'https://auth.nethub.wiki').rstrip('/')
 OIDC_CLIENT_ID = os.environ.get('TODO_OIDC_CLIENT_ID', 'todo').strip()
 OIDC_CLIENT_SECRET = os.environ.get('TODO_OIDC_CLIENT_SECRET', '').strip()
@@ -2603,6 +2636,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
             return self.handle_managebac_session_status()
         if path == '/api/health':
             return self.write_json({'ok': True})
+        if path == '/api/turnstile/config':
+            return self.write_json({'siteKey': TURNSTILE_SITE_KEY})
         if path.startswith('/api/'):
             return self.write_json({'error': 'not found'}, status=HTTPStatus.NOT_FOUND)
         if not is_allowed_static_path(path):
@@ -4988,6 +5023,12 @@ class TodoHandler(SimpleHTTPRequestHandler):
         payload = self.read_json_body()
         if payload is None:
             return
+        try:
+            verified = verify_turnstile(str(payload.get('turnstileToken') or ''), 'feedback')
+        except TurnstileUnavailable:
+            return self.write_json({'error': 'turnstile unavailable', 'message': '人机验证暂不可用。'}, status=HTTPStatus.SERVICE_UNAVAILABLE)
+        if not verified:
+            return self.write_json({'error': 'turnstile failed', 'message': '请完成人机验证后重试。'}, status=HTTPStatus.BAD_REQUEST)
         content = str(payload.get('content', '')).strip()
         if not content:
             return self.write_json({'error': 'content is required', 'message': '反馈内容不能为空。'}, status=HTTPStatus.BAD_REQUEST)

@@ -5,6 +5,7 @@ import sqlite3
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 import urllib.error
 import urllib.request
 from http import HTTPStatus
@@ -22,6 +23,8 @@ API_DOC_PATH = Path('docs') / 'zh-CN' / 'API.md'
 
 class ProjectWorkflowTests(unittest.TestCase):
     def setUp(self):
+        self.turnstile_patch = patch.object(server, 'verify_turnstile', return_value=True)
+        self.turnstile_patch.start()
         self.original_data_dir = server.DATA_DIR
         self.original_db_path = server.DB_PATH
         self.original_iterations = server.PASSWORD_ITERATIONS
@@ -39,6 +42,7 @@ class ProjectWorkflowTests(unittest.TestCase):
         self.base_url = f'http://127.0.0.1:{self.httpd.server_address[1]}'
 
     def tearDown(self):
+        self.turnstile_patch.stop()
         self.httpd.shutdown()
         self.httpd.server_close()
         self.thread.join(timeout=5)
