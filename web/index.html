@@ -47,6 +47,7 @@
           </div>
           <div class="toolbar-row">
             <el-button plain @click="scrollToToday">定位今天</el-button>
+            <el-button plain @click="jumpToOffset(-7)">前一周</el-button>
             <el-button plain @click="jumpToOffset(7)">后一周</el-button>
           </div>
           <div class="toolbar-row">
@@ -1123,6 +1124,7 @@
                 </div>
                 <div class="toolbar-row">
                   <el-button plain @click="scrollToToday">定位今天</el-button>
+                  <el-button plain @click="jumpToOffset(-7)">前一周</el-button>
                   <el-button plain @click="jumpToOffset(7)">后一周</el-button>
                 </div>
                 <div class="toolbar-row">
@@ -2509,8 +2511,8 @@
 
   <script src="./vendor/vue.global.prod.js"></script>
   <script src="./vendor/element-plus.full.min.js"></script>
-  <script src="./i18n.js?v=managebac-methods-20260902-2"></script>
-  <script src="./app.js?v=turnstile-visible2"></script>
+  <script src="./i18n.js?v=timeline-nav-20260929"></script>
+  <script src="./app.js?v=timeline-nav-20260929"></script>
 </body>
 </html>
 

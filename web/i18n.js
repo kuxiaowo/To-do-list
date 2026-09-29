@@ -205,6 +205,7 @@
   "后台只读": "Background read-only",
   "后天": "The day after tomorrow",
   "后一周": "Next week",
+  "前一周": "Previous week",
   "化学": "Chemistry",
   "恢复全局下载限制失败：${error.message}": "Failed to restore global download limits: ${error.message}",
   "恢复全局限制失败：${error.message}": "Failed to restore global limits: ${error.message}",

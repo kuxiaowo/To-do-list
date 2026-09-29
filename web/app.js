@@ -247,10 +247,13 @@ createApp({
       activeTaskId: null,
       activeTaskPool: 'todo',
       currentViewDateKey: '',
+      todayDateKey: this.formatDateKey(new Date()),
+      todayRefreshTimer: null,
       quickJumpDate: '',
       form: this.emptyForm(),
       dayRange: { past: 90, future: 90 },
       timelineStickyScrollbarWidths: { ddl: 0, daily: 0 },
+      timelineExpectedScroll: { ddl: { content: null, sticky: null }, daily: { content: null, sticky: null } },
       suppressTimelineAutoExpand: false,
       timelineAutoExpandTimer: null,
       habitDialogVisible: false,
@@ -870,9 +873,9 @@ createApp({
       return keys;
     },
     dayColumns() {
-      const base = this.startOfDay(new Date());
+      const base = this.parseDateKey(this.todayDateKey);
       const start = this.timelineStartDate();
-      const end = this.addDays(base, this.dayRange.future);
+      const end = this.timelineEndDate();
       const days = [];
       for (let date = new Date(start); date <= end; date = this.addDays(date, 1)) {
         const offset = this.daysBetween(base, date);
@@ -903,7 +906,7 @@ createApp({
       const monthEnd = new Date(monthDate.getFullYear(), monthDate.getMonth() + 1, 0);
       const gridStart = this.ddlCalendarWeekStartDate(monthStart);
       const gridEnd = this.addDays(this.ddlCalendarWeekStartDate(monthEnd), 6);
-      const todayKey = this.formatDateKey(new Date());
+      const todayKey = this.todayDateKey;
       const selectedKey = this.pageViewDateKeys.calendar || this.currentViewDateKey || todayKey;
       const days = [];
       for (let date = new Date(gridStart); date <= gridEnd; date = this.addDays(date, 1)) {
@@ -1000,9 +1003,9 @@ createApp({
       return groups;
     },
     scheduleDayColumns() {
-      const base = this.startOfDay(new Date());
+      const base = this.parseDateKey(this.todayDateKey);
       const start = this.timelineStartDate();
-      const end = this.addDays(base, this.dayRange.future);
+      const end = this.timelineEndDate();
       const days = [];
       for (let date = new Date(start); date <= end; date = this.addDays(date, 1)) {
         const offset = this.daysBetween(base, date);
@@ -1072,6 +1075,8 @@ createApp({
     await this.loadScheduleItems();
     window.addEventListener('resize', this.handleViewportResize);
     window.addEventListener('scroll', this.updateGuideTarget, true);
+    document.addEventListener('visibilitychange', this.refreshTodayDate);
+    this.todayRefreshTimer = window.setInterval(this.refreshTodayDate, 60000);
     this.$nextTick(() => {
       this.scrollToDate(this.currentViewDateKey, 'ddl', 'instant');
       this.updateTimelineStickyScrollbars();
@@ -1083,6 +1088,8 @@ createApp({
     document.removeEventListener('click', this.closeAccountMenu);
     window.removeEventListener('resize', this.handleViewportResize);
     window.removeEventListener('scroll', this.updateGuideTarget, true);
+    document.removeEventListener('visibilitychange', this.refreshTodayDate);
+    if (this.todayRefreshTimer) window.clearInterval(this.todayRefreshTimer);
     if (this.timelineAutoExpandTimer) window.clearTimeout(this.timelineAutoExpandTimer);
     this.removeSchedulePointerListeners();
     document.body.classList.remove('is-schedule-touch-dragging');
@@ -4547,11 +4554,10 @@ createApp({
       return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
     },
     timelineStartDate() {
-      const today = new Date();
-      return this.addDays(this.startOfDay(today), -this.dayRange.past);
+      return this.addDays(this.parseDateKey(this.todayDateKey), -this.dayRange.past);
     },
     timelineEndDate() {
-      return this.addDays(this.startOfDay(new Date()), this.dayRange.future);
+      return this.addDays(this.parseDateKey(this.todayDateKey), this.dayRange.future);
     },
     scheduleQueryRange() {
       return {
@@ -4580,7 +4586,7 @@ createApp({
     },
     ensureDateRangeForKey(dateKey) {
       const target = this.parseDateKey(dateKey);
-      const base = this.startOfDay(new Date());
+      const base = this.parseDateKey(this.todayDateKey);
       const offset = this.daysBetween(base, target);
       let changed = false;
       if (offset > this.dayRange.future - DATE_RANGE_EXPAND_MARGIN) {
@@ -4592,6 +4598,18 @@ createApp({
         changed = true;
       }
       return changed;
+    },
+    refreshTodayDate() {
+      const nextKey = this.formatDateKey(new Date());
+      if (nextKey === this.todayDateKey) return;
+      if (this.activePage !== 'calendar') this.rememberCurrentViewDate(this.activePage);
+      const visibleKey = this.pageViewDateKeys[this.activePage] || this.currentViewDateKey;
+      this.todayDateKey = nextKey;
+      this.$nextTick(() => {
+        if (this.activePage !== 'calendar') this.scrollToDate(visibleKey, this.activePage, 'instant');
+        this.updateTimelineStickyScrollbars();
+      });
+      if (this.currentUser && this.activePage === 'daily') this.loadScheduleItems();
     },
     addDays(date, days) {
       const next = new Date(date);
@@ -4984,19 +5002,27 @@ createApp({
         this.timelineStickyScrollbarWidths[page] = width;
       }
       if (Math.abs(sticky.scrollLeft - content.scrollLeft) > 1) {
+        this.timelineExpectedScroll[page].sticky = content.scrollLeft;
         sticky.scrollLeft = content.scrollLeft;
       }
     },
     syncTimelineStickyScrollbar(page, source) {
       const { content, sticky } = this.timelineScrollElements(page);
       if (!content || !sticky) return;
+      const expected = this.timelineExpectedScroll[page];
+      const sourceElement = source === 'sticky' ? sticky : content;
+      const expectedPosition = expected[source];
+      expected[source] = null;
+      if (expectedPosition !== null && Math.abs(sourceElement.scrollLeft - expectedPosition) <= 1) return;
       if (source === 'sticky') {
         if (Math.abs(content.scrollLeft - sticky.scrollLeft) > 1) {
+          expected.content = sticky.scrollLeft;
           content.scrollLeft = sticky.scrollLeft;
         }
         return;
       }
       if (Math.abs(sticky.scrollLeft - content.scrollLeft) > 1) {
+        expected.sticky = content.scrollLeft;
         sticky.scrollLeft = content.scrollLeft;
       }
     },
@@ -5004,10 +5030,12 @@ createApp({
       this.syncTimelineStickyScrollbar(page, 'sticky');
     },
     scrollToToday() {
-      this.scrollToDate(this.startOfDay(new Date()));
+      this.refreshTodayDate();
+      this.$nextTick(() => this.scrollToDate(this.startOfDay(new Date()), this.activePage, 'instant'));
     },
     scrollSidebarToToday() {
-      this.scrollToDate(this.startOfDay(new Date()), this.activePage, 'smooth', 'peek-start');
+      this.refreshTodayDate();
+      this.$nextTick(() => this.scrollToDate(this.startOfDay(new Date()), this.activePage, 'instant', 'peek-start'));
     },
     handleQuickJumpDateChange(value) {
       if (!value) return;
@@ -5137,9 +5165,10 @@ createApp({
       }, duration);
     },
     jumpToOffset(days) {
+      if (this.activePage !== 'calendar') this.rememberCurrentViewDate(this.activePage);
       const base = this.parseDateKey(this.currentViewDateKey);
       const target = this.addDays(base, days);
-      this.scrollToDate(target);
+      this.scrollToDate(target, this.activePage, 'instant');
     },
     pad(value) {
       return String(value).padStart(2, '0');
