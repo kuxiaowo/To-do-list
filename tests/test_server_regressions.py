@@ -141,7 +141,7 @@ class ServerRegressionTests(unittest.TestCase):
         status, headers, body = self.raw_request('GET', '/')
         self.assertEqual(status, 200)
         self.assertIn(b'app.js', body)
-        self.assertIn(b'i18n.js?v=managebac-methods-20260902-2', body)
+        self.assertIn(b'i18n.js?v=timeline-nav-20260929', body)
         self.assertIn(b'style.css', body)
         self.assertEqual(body.count(b'<span>Language</span>'), 2)
         self.assertEqual(body.count(b'aria-label="Language"'), 2)
@@ -2262,7 +2262,7 @@ class ServerRegressionTests(unittest.TestCase):
         self.assertIn(
             'window.location.replace(`/auth/login?prompt=none&next=${next}`)', app_js
         )
-        self.assertIn('./app.js?v=turnstile-visible2', index_html)
+        self.assertIn('./app.js?v=timeline-nav-20260929', index_html)
 
     def test_ai_frontend_explains_pending_task_placement(self):
         index_html = INDEX_HTML_PATH.read_text(encoding='utf-8')
