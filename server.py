@@ -3235,12 +3235,29 @@ class TodoHandler(SimpleHTTPRequestHandler):
         if not user:
             self.write_json({'error': 'login required'}, status=HTTPStatus.UNAUTHORIZED)
             return None
+        if not self.central_user_allowed(user):
+            return None
         if self.command not in {'GET', 'HEAD'} and not self._auth_via_legacy_bearer:
             csrf = self.headers.get('X-CSRF-Token', '')
             if not csrf or not hmac.compare_digest(csrf, str(user['csrf_token'])):
                 self.write_json({'error': 'csrf validation failed'}, status=HTTPStatus.FORBIDDEN)
                 return None
         return user
+
+    def central_user_allowed(self, user):
+        from nethub_status import AccountStatusUnavailable, read_account_status
+        try:
+            status = read_account_status(ACCOUNTS_ISSUER, OIDC_CLIENT_ID, OIDC_CLIENT_SECRET, str(user['auth_sub'] or ''))
+        except AccountStatusUnavailable:
+            self.write_json({'error': '账号中心暂时不可用，请稍后重试'}, status=HTTPStatus.SERVICE_UNAVAILABLE)
+            return False
+        if not status['active']:
+            with get_db() as conn:
+                conn.execute('DELETE FROM sessions WHERE user_id=?', (user['id'],))
+                conn.commit()
+            self.write_json({'error': '账号已被全站封禁或停用'}, status=HTTPStatus.FORBIDDEN)
+            return False
+        return True
 
     @staticmethod
     def token_digest(value: str) -> str:
@@ -5368,6 +5385,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
         if not user:
             return self.write_json({'tasks': [], 'readOnly': True})
 
+        if not self.central_user_allowed(user):
+            return
         with get_db() as conn:
             tasks = self.fetch_tasks_for_user(conn, int(user['id']))
         return self.write_json({'tasks': tasks, 'readOnly': False, 'user': public_user(user)})
@@ -5981,6 +6000,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
         user = self.current_user()
         if not user:
             return self.write_json({'habits': [], 'readOnly': True})
+        if not self.central_user_allowed(user):
+            return
         with get_db() as conn:
             habits = self.fetch_habits_for_user(conn, int(user['id']))
         return self.write_json({'habits': habits, 'readOnly': False})
@@ -6155,6 +6176,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
         if not user:
             return self.write_json({'items': [], 'readOnly': True})
 
+        if not self.central_user_allowed(user):
+            return
         with get_db() as conn:
             query_start, query_end = self.schedule_query_window_from_request()
             sync_start, sync_end = self.habit_sync_window_from_request()
@@ -6174,6 +6197,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
                 'readOnly': True,
             })
 
+        if not self.central_user_allowed(user):
+            return
         with get_db() as conn:
             config = self.fetch_schedule_config_for_user(conn, int(user['id']))
         return self.write_json(config)
@@ -6780,6 +6805,8 @@ class TodoHandler(SimpleHTTPRequestHandler):
         user = self.current_user()
         if not user:
             return self.write_json({'error': 'login required'}, status=HTTPStatus.UNAUTHORIZED)
+        if not self.central_user_allowed(user):
+            return
         return self.write_json({'user': public_user(user), 'csrfToken': user['csrf_token']})
 
     def handle_auth_logout(self):
