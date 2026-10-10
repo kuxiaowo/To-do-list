@@ -142,6 +142,7 @@ class ServerRegressionTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn(b'app.js', body)
         self.assertIn(b'i18n.js?v=timeline-nav-20260929', body)
+
         self.assertIn(b'style.css', body)
         self.assertEqual(body.count(b'<span>Language</span>'), 2)
         self.assertEqual(body.count(b'aria-label="Language"'), 2)
@@ -2512,6 +2513,24 @@ class ServerRegressionTests(unittest.TestCase):
         self.assertIn('https://auth.nethub.wiki/admin/analytics', index_html)
         self.assertNotIn("adminSection === 'traffic'", index_html)
         self.assertNotIn('VISITS_API', app_js)
+
+
+    def test_central_ban_blocks_private_reads_and_revokes_session(self):
+        from unittest.mock import patch
+        token, user = self.register_user('central-ban-test')
+        with patch('nethub_status.read_account_status', return_value={'active': False, 'emailVerified': True}):
+            status, _ = self.request('GET', '/api/tasks', token=token)
+            self.assertEqual(status, 403)
+        with server.get_db() as conn:
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM sessions WHERE user_id=?', (user['id'],)).fetchone()[0], 0)
+
+    def test_central_outage_fails_closed_for_private_reads(self):
+        from unittest.mock import patch
+        from nethub_status import AccountStatusUnavailable
+        token, _ = self.register_user('central-outage-test')
+        with patch('nethub_status.read_account_status', side_effect=AccountStatusUnavailable('test')):
+            status, _ = self.request('GET', '/api/tasks', token=token)
+            self.assertEqual(status, 503)
 
 
 if __name__ == '__main__':
